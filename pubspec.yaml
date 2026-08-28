@@ -76,6 +76,8 @@ dev_dependencies:
   drift_dev: 2.28.0 # pinned in lockstep with `drift` above
   build_runner: ^2.5.4
   mocktail: ^1.0.5
+  integration_test:
+    sdk: flutter
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

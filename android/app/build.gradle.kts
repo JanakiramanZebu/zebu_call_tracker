@@ -80,4 +80,6 @@ flutter {
 
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
+    // ContextCompat.checkSelfPermission in the native permission inspector.
+    implementation("androidx.core:core-ktx:1.13.1")
 }

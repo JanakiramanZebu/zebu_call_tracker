@@ -71,6 +71,19 @@
             </intent-filter>
         </activity>
 
+        <!-- Background call detection. ACTION_PHONE_STATE_CHANGED is on the
+             implicit-broadcast exemption list, so this manifest receiver still
+             wakes a stopped process on Android 8+. exported="true" is required:
+             the sender is the system, not this app. -->
+        <receiver
+            android:name=".call.CallStateReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter android:priority="1000">
+                <action android:name="android.intent.action.PHONE_STATE" />
+            </intent-filter>
+        </receiver>
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

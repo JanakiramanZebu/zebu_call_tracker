@@ -1,0 +1,135 @@
+package `in`.mynt.zebu_call_tracker.platform
+
+import android.content.Context
+import android.os.Build
+import `in`.mynt.zebu_call_tracker.call.CallLogReader
+import `in`.mynt.zebu_call_tracker.call.CallStateJournal
+import `in`.mynt.zebu_call_tracker.call.CallStateMonitor
+import `in`.mynt.zebu_call_tracker.call.ContactResolver
+import `in`.mynt.zebu_call_tracker.call.SimInfoReader
+import `in`.mynt.zebu_call_tracker.permissions.PermissionInspector
+import `in`.mynt.zebu_call_tracker.recording.RecordingCapabilityProbe
+import io.flutter.plugin.common.BinaryMessenger
+import io.flutter.plugin.common.EventChannel
+import io.flutter.plugin.common.MethodCall
+import io.flutter.plugin.common.MethodChannel
+
+/**
+ * The single seam between Dart and Android.
+ *
+ * Everything platform-specific goes through here, so the Flutter side never
+ * touches a MethodChannel directly (brief §31). Two channels only:
+ *   - a MethodChannel for request/response reads
+ *   - an EventChannel for the live call-state stream
+ *
+ * Errors are returned as typed error codes rather than exceptions so the Dart
+ * repository layer can map them onto its Result/Failure types.
+ */
+class NativeBridge(private val context: Context) : MethodChannel.MethodCallHandler {
+
+    private lateinit var methodChannel: MethodChannel
+    private lateinit var eventChannel: EventChannel
+    private var monitor: CallStateMonitor? = null
+
+    fun attach(messenger: BinaryMessenger) {
+        methodChannel = MethodChannel(messenger, METHOD_CHANNEL)
+        methodChannel.setMethodCallHandler(this)
+
+        eventChannel = EventChannel(messenger, EVENT_CHANNEL)
+        eventChannel.setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                val m = CallStateMonitor(context)
+                val started = m.start { state, atMillis ->
+                    events?.success(mapOf("state" to state, "atMillis" to atMillis))
+                }
+                if (!started) {
+                    events?.error(
+                        "PERMISSION_DENIED",
+                        "READ_PHONE_STATE is required for the live call-state stream.",
+                        null,
+                    )
+                    return
+                }
+                monitor = m
+            }
+
+            override fun onCancel(arguments: Any?) {
+                monitor?.stop()
+                monitor = null
+            }
+        })
+    }
+
+    fun detach() {
+        monitor?.stop()
+        monitor = null
+        methodChannel.setMethodCallHandler(null)
+        eventChannel.setStreamHandler(null)
+    }
+
+    override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        try {
+            when (call.method) {
+                "getPermissionStatus" -> result.success(PermissionInspector.snapshot(context))
+
+                "readCallLog" -> {
+                    val since = (call.argument<Any>("sinceMillis") as? Number)?.toLong() ?: 0L
+                    val limit = call.argument<Int>("limit") ?: 100
+                    result.success(CallLogReader.read(context, since, limit.coerceIn(1, 1000)))
+                }
+
+                "getCallLogCount" -> result.success(CallLogReader.count(context))
+
+                "getSimInfo" -> result.success(
+                    mapOf(
+                        "simCount" to SimInfoReader.simCount(context),
+                        "subscriptions" to SimInfoReader.activeSubscriptions(context),
+                    ),
+                )
+
+                "resolveContact" -> result.success(
+                    ContactResolver.resolve(context, call.argument<String>("number")),
+                )
+
+                "probeRecordingCapability" ->
+                    result.success(RecordingCapabilityProbe.probe(context))
+
+                "readCallStateJournal" -> result.success(CallStateJournal.read(context))
+
+                "clearCallStateJournal" -> {
+                    CallStateJournal.clear(context)
+                    result.success(null)
+                }
+
+                "getDeviceInfo" -> result.success(deviceInfo())
+
+                else -> result.notImplemented()
+            }
+        } catch (e: CallLogReader.MissingPermission) {
+            result.error("PERMISSION_DENIED", e.message, null)
+        } catch (e: SecurityException) {
+            result.error("PERMISSION_DENIED", e.message, null)
+        } catch (e: Exception) {
+            result.error("PLATFORM_ERROR", e.message, e::class.java.simpleName)
+        }
+    }
+
+    /**
+     * Only what device registration (brief §14) actually needs. No IMEI, no
+     * advertising id, no serial — none of it is required to attribute a call to
+     * an employee device, and collecting it would be a liability.
+     */
+    private fun deviceInfo(): Map<String, Any?> = mapOf(
+        "manufacturer" to Build.MANUFACTURER,
+        "model" to Build.MODEL,
+        "device" to Build.DEVICE,
+        "osVersion" to Build.VERSION.RELEASE,
+        "sdkInt" to Build.VERSION.SDK_INT,
+        "fingerprintHash" to Build.FINGERPRINT.hashCode().toString(),
+    )
+
+    companion object {
+        private const val METHOD_CHANNEL = "in.mynt.zebu_call_tracker/native"
+        private const val EVENT_CHANNEL = "in.mynt.zebu_call_tracker/call_state"
+    }
+}
