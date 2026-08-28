@@ -45,6 +45,13 @@ app.*.map.json
 /android/app/release
 
 # ---------------------------------------------------------------------------
+# Gradle build output. The generated .gitignore only covers the root /build/,
+# which lets android/build/reports/ slip through.
+android/build/
+android/app/build/
+android/.gradle/
+
+# ---------------------------------------------------------------------------
 # Call Tracker: secrets and per-environment config
 # ---------------------------------------------------------------------------
 # Environment files carry per-deployment base URLs; .env.example is the only
