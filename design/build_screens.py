@@ -116,6 +116,9 @@ P_DEVICE = '<rect x="6" y="2" width="12" height="20" rx="3"/><path d="M11 18.5h2
 P_LOCK = '<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>'
 P_DB = '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>'
 P_WIFI = '<path d="M2.5 9a15 15 0 0 1 19 0"/><path d="M6 12.5a10 10 0 0 1 12 0"/><path d="M9.5 16a5 5 0 0 1 5 0"/><path d="M12 19.5v.01"/>'
+P_PLAY = '<path d="M8 5.5v13l11-6.5Z"/>'
+P_INFO = '<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8v.01"/>'
+P_REVIEW = '<path d="M12 4 2 20h20L12 4Z"/><path d="M12 10v4"/><path d="M12 17.5v.01"/>'
 P_OUTLINK = '<path d="M14 4h6v6"/><path d="M20 4 11 13"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>'
 
 # --- shared fragments -------------------------------------------------------
@@ -307,12 +310,27 @@ SCREENS["CallDetail"] = f"""      <div class="safe"></div>
           </div>
         </div>
 
-        <div class="card" style="padding:16px; display:flex; gap:12px; border-color:var(--amber);">
-          <div class="ico" style="background:var(--ambert);">{ic(P_MIC_OFF, 20, "var(--amber)")}</div>
-          <div style="flex:1; min-width:0;">
-            <div style="font-size:14px; font-weight:600;">Recording unavailable</div>
-            <div style="font-size:12.5px; line-height:1.55; color:var(--muted); margin-top:4px;">
-              Android 16 does not allow third-party apps to record calls. Call details are still tracked in full.
+        <div class="card" style="overflow:hidden;">
+          <div style="padding:14px 16px; display:flex; gap:12px; align-items:center;">
+            <div class="ico" style="background:var(--greent);">{ic(P_PLAY, 20, "var(--green)")}</div>
+            <div style="flex:1; min-width:0;">
+              <div style="font-size:14px; font-weight:600;">Recording</div>
+              <div class="num" style="font-size:12.5px; color:var(--muted);">4m 32s &middot; 1.8 MB &middot; m4a</div>
+            </div>
+            <div class="pill" style="background:var(--greent); color:var(--green);">Matched</div>
+          </div>
+          <div style="padding:0 16px 14px; display:flex; align-items:center; gap:12px;">
+            <div style="flex:1; height:4px; border-radius:2px; background:var(--tint); overflow:hidden;">
+              <div style="width:34%; height:100%; background:var(--brand);"></div>
+            </div>
+            <span class="num" style="font-size:12px; color:var(--muted);">01:32 / 04:32</span>
+          </div>
+          <div class="sep"></div>
+          <div style="padding:12px 16px; display:flex; gap:10px; align-items:flex-start;">
+            {ic(P_INFO, 16, "var(--muted)")}
+            <div style="flex:1; font-size:12px; line-height:1.55; color:var(--muted);">
+              Captured by the phone&rsquo;s own call recorder, then matched to this call on
+              duration and timing. <span class="num">99.6% confidence</span>.
             </div>
           </div>
         </div>
@@ -370,6 +388,13 @@ SCREENS["SyncStatus"] = f"""      <div class="safe"></div>
 
         <div class="btn out">{ic(P_SYNC, 18, "var(--brand)")}Retry failed uploads</div>
 
+        <div class="sect" style="margin-top:4px;">Recordings</div>
+        <div class="card" style="overflow:hidden;">
+          {sync_row(P_CHECK, "var(--green)", "var(--greent)", "Matched", "112", "Associated with a call")}
+          {sync_row(P_REVIEW, "var(--amber)", "var(--ambert)", "Needs review", "2", "Match was not clear enough")}
+          {sync_row(P_MIC_OFF, "var(--muted)", "var(--tint)", "No recording", "31", "Missed calls and unrecorded calls", last=True)}
+        </div>
+
         <div class="sect" style="margin-top:4px;">Status</div>
         <div class="card" style="overflow:hidden;">
           {meta_row(P_CLOCK, "Last successful sync", "2 min ago")}
@@ -422,7 +447,7 @@ SCREENS["Settings"] = f"""      <div class="safe"></div>
         <div class="sect" style="margin-top:4px;">Tracking</div>
         <div class="card" style="overflow:hidden;">
           {set_row(P_SHIELD, "Permissions", "3 of 4")}
-          {set_row(P_MIC_OFF, "Recording", "Unavailable")}
+          {set_row(P_PLAY, "Recording ingestion", "On")}
           {set_row(P_SYNC, "Sync &amp; upload", "Wi-Fi + mobile", last=True)}
         </div>
 
