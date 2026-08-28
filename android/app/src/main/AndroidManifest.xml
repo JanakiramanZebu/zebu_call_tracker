@@ -1,0 +1,87 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- ==================================================================
+         PERMISSIONS
+         Every entry below maps to a capability documented in
+         docs/feasibility.md. Nothing here is speculative: if a permission is
+         listed, a concrete subsystem requests it at runtime with a rationale
+         shown to the user first (progressive requests, never all at launch).
+         ================================================================== -->
+
+    <!-- Network: metadata + recording upload, connectivity-aware sync queue. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Call state machine: ringing / offhook / idle transitions and, on
+         API 30+, the number delivered with the state change. -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <!-- Dual-SIM subscription + carrier attribution (API 26+). Optional: the
+         app degrades to single-SIM behaviour when unavailable. -->
+    <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
+
+    <!-- Call log reconciliation. This is the authoritative source for final
+         duration/status; the live state machine only supplies early signal. -->
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+
+    <!-- Contact-name resolution. Denial is non-fatal: contactName stays null. -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+
+    <!-- Call recording. Third-party recording of the far-end audio is blocked
+         by the platform from Android 10 (API 29) onward; this permission only
+         enables the OEM/device-dependent path documented in
+         docs/feasibility.md. RecordingCapabilityService probes at runtime and
+         reports `unsupported` rather than producing a silent/one-sided file. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Foreground service used ONLY while an upload batch or an active
+         recording is in flight — never as an always-on keepalive. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+
+    <!-- Sync/upload status notifications (runtime-requested on API 33+). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Reboot recovery: re-arm the call-state receiver and resume the queue.
+         Handler is strictly idempotent — see docs/architecture.md. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <application
+        android:label="Call Tracker"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="false"
+        android:networkSecurityConfig="@xml/network_security_config">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+    </queries>
+</manifest>

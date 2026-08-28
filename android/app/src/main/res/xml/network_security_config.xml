@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  HTTPS-only. Cleartext is denied for every domain, including debug builds, so
+  a misconfigured .env base URL fails loudly instead of leaking call metadata
+  over plain HTTP. Add a debug-overrides block ONLY for a local dev server, and
+  never ship it.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
