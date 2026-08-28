@@ -350,10 +350,11 @@ class CallStateEvent {
   final String state;
   final int atMillis;
 
-  factory CallStateEvent.fromPlatform(Map<Object?, Object?> m) => CallStateEvent(
-    state: m['state'] as String? ?? 'unknown',
-    atMillis: (m['atMillis'] as num?)?.toInt() ?? 0,
-  );
+  factory CallStateEvent.fromPlatform(Map<Object?, Object?> m) =>
+      CallStateEvent(
+        state: m['state'] as String? ?? 'unknown',
+        atMillis: (m['atMillis'] as num?)?.toInt() ?? 0,
+      );
 }
 
 class CallStateJournal {

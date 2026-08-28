@@ -223,7 +223,8 @@ class RecordingMatcher {
     for (final candidate in candidates) {
       final signals = _score(call, candidate);
       if (signals == null) continue; // hard-gated out
-      final score = _wDuration * signals.durationScore +
+      final score =
+          _wDuration * signals.durationScore +
           _wTiming * signals.timingScore +
           _wIdentity * signals.identityScore;
       scored.add((c: candidate, score: score, s: signals));
@@ -283,8 +284,8 @@ class RecordingMatcher {
   MatchSignals? _score(CallForMatching call, RecordingCandidate candidate) {
     if (candidate.durationMillis <= 0) return null;
 
-    final durationDelta =
-        (candidate.durationSeconds - call.durationSeconds).abs();
+    final durationDelta = (candidate.durationSeconds - call.durationSeconds)
+        .abs();
     if (durationDelta > maxDurationDeltaSeconds) return null;
 
     final ringGap =
@@ -292,8 +293,10 @@ class RecordingMatcher {
     if (ringGap < minRingGapSeconds || ringGap > maxRingGapSeconds) return null;
 
     // Linear decay to zero at the tolerance edge.
-    final durationScore =
-        math.max(0.0, 1.0 - (durationDelta / durationToleranceSeconds));
+    final durationScore = math.max(
+      0.0,
+      1.0 - (durationDelta / durationToleranceSeconds),
+    );
 
     // A gap of 0-20s is an ordinary ring and scores full marks; longer gaps are
     // possible but progressively less likely to be THIS call.
@@ -304,8 +307,10 @@ class RecordingMatcher {
     } else if (ringGap <= 20) {
       timingScore = 1.0;
     } else {
-      timingScore =
-          math.max(0.0, 1.0 - ((ringGap - 20) / (maxRingGapSeconds - 20)));
+      timingScore = math.max(
+        0.0,
+        1.0 - ((ringGap - 20) / (maxRingGapSeconds - 20)),
+      );
     }
 
     final identityMatched = _identityMatches(call, candidate.displayName);
@@ -333,7 +338,8 @@ class RecordingMatcher {
       // +919876543210, 919876543210 or 9876543210 for the same call.
       final digits = number.replaceAll(RegExp(r'[^0-9]'), '');
       final tail = digits.substring(math.max(0, digits.length - 10));
-      if (haystack.replaceAll(RegExp(r'[^0-9]'), '').contains(tail)) return true;
+      final haystackDigits = haystack.replaceAll(RegExp(r'[^0-9]'), '');
+      if (haystackDigits.contains(tail)) return true;
     }
 
     final name = call.contactName;

@@ -62,6 +62,7 @@ dependencies:
   # 0.6.0+eol is an empty no-op shim that only applies after migrating to
   # sqlite3 3.x, which drift 2.28 does not use.
   sqlite3_flutter_libs: 0.5.41
+  google_fonts: ^8.2.1
 
 dev_dependencies:
   flutter_test:
