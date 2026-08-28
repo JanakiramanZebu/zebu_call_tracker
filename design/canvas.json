@@ -1,0 +1,38 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html", "title": "Overview", "x": 0, "y": 0, "w": 1296, "h": 920 },
+
+    { "file": "Login.dc.html", "title": "Login", "x": 0, "y": 1010, "w": 908, "h": 964 },
+    { "file": "Permissions.dc.html", "title": "Permission setup", "x": 960, "y": 1010, "w": 908, "h": 964 },
+    { "file": "Dashboard.dc.html", "title": "Dashboard", "x": 1920, "y": 1010, "w": 908, "h": 964 },
+    { "file": "CallHistory.dc.html", "title": "Call history", "x": 2880, "y": 1010, "w": 908, "h": 964 },
+
+    { "file": "CallDetail.dc.html", "title": "Call detail", "x": 0, "y": 2030, "w": 908, "h": 964 },
+    { "file": "SyncStatus.dc.html", "title": "Sync status", "x": 960, "y": 2030, "w": 908, "h": 964 },
+    { "file": "Settings.dc.html", "title": "Settings", "x": 1920, "y": 2030, "w": 908, "h": 964 }
+  ],
+  "annotations": [
+    {
+      "id": "note-recording",
+      "x": 2880,
+      "y": 2030,
+      "w": 340,
+      "text": "The recording block on Call detail says \"unavailable\" on purpose.\n\nVerified on the SM-M356B: Android 16 blocks third-party call recording even with RECORD_AUDIO granted. A play button here would be a lie, so the screen states the limit and keeps the call record complete."
+    },
+    {
+      "id": "note-history",
+      "x": 2880,
+      "y": 2360,
+      "w": 340,
+      "text": "Call history deliberately shows the awkward rows: an unknown number, a withheld (private) number, and a failed upload.\n\nThese are the cases that break naive designs, so they are drawn before the happy path is built."
+    },
+    {
+      "id": "note-tokens",
+      "x": 2880,
+      "y": 2660,
+      "w": 340,
+      "text": "Every value is lifted from the Mynt system already shipping in zebu_helpdesk — Inter, #0037B7, 12px cards, 8px inputs, 50px buttons, flat surfaces with 1px outlines. Nothing here invents a new token."
+    }
+  ],
+  "launch": { "view": "canvas" }
+}

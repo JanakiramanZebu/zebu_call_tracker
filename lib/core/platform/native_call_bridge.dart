@@ -1,5 +1,7 @@
 import 'package:flutter/services.dart';
 
+import '../../features/recording/domain/recording_matcher.dart';
+
 /// Typed reason a platform call failed, so repositories can branch on a value
 /// instead of parsing exception strings.
 enum NativeFailureKind { permissionDenied, platformError, unsupportedPlatform }
@@ -31,6 +33,21 @@ abstract interface class NativeCallBridge {
   Future<SimInfo> getSimInfo();
   Future<String?> resolveContact(String number);
   Future<RecordingCapability> probeRecordingCapability();
+
+  /// Which permission the recording scan needs on this OS version, and whether
+  /// it is held. Read-only: never triggers a dialog.
+  Future<({String permission, bool granted})> getRecordingAccess();
+
+  /// Discovers recordings the device's own dialer already wrote. Incremental by
+  /// MediaStore DATE_ADDED, which is in SECONDS (the call log is milliseconds).
+  Future<List<RecordingCandidate>> scanRecordings({
+    required int sinceEpochSeconds,
+    int limit = 200,
+  });
+
+  /// Streaming SHA-256, computed natively so multi-megabyte audio never crosses
+  /// the platform channel. Null when the file has since been deleted.
+  Future<({String checksum, int bytesRead})?> hashRecording(int mediaStoreId);
   Future<Map<String, Object?>> getDeviceInfo();
   Future<CallStateJournal> readCallStateJournal();
   Future<void> clearCallStateJournal();
@@ -109,6 +126,45 @@ class MethodChannelNativeCallBridge implements NativeCallBridge {
       );
 
   @override
+  Future<({String permission, bool granted})> getRecordingAccess() async {
+    final raw = await _invoke<Map<Object?, Object?>>('getRecordingAccess');
+    return (
+      permission: raw['permission']! as String,
+      granted: raw['granted']! as bool,
+    );
+  }
+
+  @override
+  Future<List<RecordingCandidate>> scanRecordings({
+    required int sinceEpochSeconds,
+    int limit = 200,
+  }) async {
+    final raw = await _invoke<List<Object?>>('scanRecordings', {
+      'sinceEpochSeconds': sinceEpochSeconds,
+      'limit': limit,
+    });
+    return raw
+        .cast<Map<Object?, Object?>>()
+        .map(_candidateFromPlatform)
+        .toList(growable: false);
+  }
+
+  @override
+  Future<({String checksum, int bytesRead})?> hashRecording(
+    int mediaStoreId,
+  ) async {
+    final raw = await _method.invokeMethod<Map<Object?, Object?>>(
+      'hashRecording',
+      {'mediaStoreId': mediaStoreId},
+    );
+    if (raw == null) return null;
+    return (
+      checksum: raw['checksum']! as String,
+      bytesRead: (raw['bytesRead']! as num).toInt(),
+    );
+  }
+
+  @override
   Future<Map<String, Object?>> getDeviceInfo() async {
     final raw = await _invoke<Map<Object?, Object?>>('getDeviceInfo');
     return raw.map((k, v) => MapEntry(k! as String, v));
@@ -130,6 +186,20 @@ class MethodChannelNativeCallBridge implements NativeCallBridge {
       .receiveBroadcastStream()
       .map((e) => CallStateEvent.fromPlatform(e as Map<Object?, Object?>));
 }
+
+RecordingCandidate _candidateFromPlatform(Map<Object?, Object?> m) =>
+    RecordingCandidate(
+      mediaStoreId: (m['mediaStoreId']! as num).toInt(),
+      displayName: m['displayName'] as String?,
+      durationMillis: (m['durationMillis'] as num?)?.toInt() ?? 0,
+      sizeBytes: (m['sizeBytes'] as num?)?.toInt() ?? 0,
+      dateAddedEpochSeconds: (m['dateAddedEpochSeconds'] as num?)?.toInt() ?? 0,
+      dateModifiedEpochSeconds:
+          (m['dateModifiedEpochSeconds'] as num?)?.toInt() ?? 0,
+      mimeType: m['mimeType'] as String?,
+      relativePath: m['relativePath'] as String?,
+      source: m['source'] as String? ?? 'UNKNOWN',
+    );
 
 // ---------------------------------------------------------------------------
 // Platform DTOs. Deliberately dumb: normalisation, E.164 formatting and the

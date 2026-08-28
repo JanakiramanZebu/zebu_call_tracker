@@ -1,0 +1,185 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin:0; background:#EEF0F4; font-family:'Inter',system-ui,sans-serif; -webkit-font-smoothing:antialiased; }
+    a { color:#0037B7; } a:hover { color:#002E9B; }
+    .light { --bg:#F8F9FA; --surface:#FFFFFF; --text:#141414; --muted:#737373; --outline:#DDE2E7;
+             --brand:#0037B7; --brandc:#E3EDFA; --field:#F9F9F9; --green:#00B14F; --red:#FF1717;
+             --amber:#FFB038; --tab:#F1F3F8; --tint:rgba(20,20,20,.04);
+             --greent:rgba(0,177,79,.12); --redt:rgba(255,23,23,.10); --ambert:rgba(255,176,56,.14); }
+    .dark  { --bg:#181818; --surface:#1A1A1A; --text:#FFFFFF; --muted:#8A8A8A; --outline:#333333;
+             --brand:#4A6CF7; --brandc:#1D242F; --field:#1E1E1E; --green:#00B14F; --red:#FF6B6B;
+             --amber:#FFB038; --tab:#24242B; --tint:rgba(255,255,255,.05);
+             --greent:rgba(0,177,79,.16); --redt:rgba(255,107,107,.14); --ambert:rgba(255,176,56,.16); }
+    .phone { width:390px; height:844px; border-radius:26px; overflow:hidden; display:flex;
+             flex-direction:column; background:var(--bg); color:var(--text); border:1px solid var(--outline); }
+    /* The real OS status bar paints here. Nothing is drawn into it. */
+    .safe { height:44px; flex:none; background:var(--surface); }
+    .cap { font-size:12px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:#8A8F98; }
+    .bar { height:56px; flex:none; display:flex; align-items:center; gap:12px; padding:0 16px; background:var(--surface); }
+    .bar h1 { margin:0; font-size:18px; font-weight:600; letter-spacing:-0.01em; }
+    .scroll { flex:1; overflow:hidden; padding:16px; display:flex; flex-direction:column; gap:14px; }
+    .card { background:var(--surface); border:1px solid var(--outline); border-radius:12px; }
+    .btn { height:50px; border-radius:8px; display:flex; align-items:center; justify-content:center;
+           gap:8px; font-size:15px; font-weight:600; }
+    .fill { background:var(--brand); color:#FFFFFF; }
+    .out { color:var(--brand); border:1px solid var(--outline); }
+    .num { font-variant-numeric:tabular-nums; }
+    .ico { width:38px; height:38px; border-radius:10px; display:flex; align-items:center; justify-content:center; flex:none; }
+    .row { display:flex; align-items:center; gap:12px; padding:12px 14px; }
+    .sep { height:1px; background:var(--outline); }
+    .pill { height:26px; border-radius:8px; display:inline-flex; align-items:center; gap:6px;
+            padding:0 9px; font-size:12px; font-weight:600; }
+    .chip { height:34px; border-radius:8px; display:inline-flex; align-items:center; padding:0 14px;
+            font-size:13.5px; font-weight:500; color:var(--muted); background:var(--tab); }
+    .chip.on { background:var(--brand); color:#FFFFFF; font-weight:600; }
+    .sect { font-size:12px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); }
+  </style>
+</helmet>
+
+<div style="display: flex; gap: 48px; padding: 40px; align-items: flex-start;">
+
+  <div style="display: flex; flex-direction: column; gap: 12px;">
+    <div class="cap">Light</div>
+    <div class="phone light">
+      <div class="safe"></div>
+      <div class="bar"><div style="width:32px; height:32px; display:flex; align-items:center;"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: currentColor;"><path d="M15 5 8 12l7 7"/></svg></div><div style="flex:1; display:flex; flex-direction:column; gap:1px;"><h1>Call detail</h1></div></div>
+      <div class="scroll">
+
+        <div class="card" style="padding:18px; display:flex; gap:14px; align-items:center;">
+          <div style="width:52px; height:52px; border-radius:26px; background:var(--brandc); color:var(--brand);
+                      display:flex; align-items:center; justify-content:center; font-size:19px; font-weight:600; flex:none;">RK</div>
+          <div style="flex:1; min-width:0;">
+            <div style="font-size:19px; font-weight:600; letter-spacing:-0.01em;">Ramesh Kumar</div>
+            <div class="num" style="font-size:14px; color:var(--muted); margin-top:2px;">+91 98&bull;&bull;&bull; &bull;&bull;210</div>
+            <div style="display:flex; gap:6px; margin-top:10px;">
+              <div class="pill" style="background:var(--greent); color:var(--green);"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--green);"><path d="M19 5 11 13"/><path d="M11 7v6h6"/></svg>Incoming</div>
+              <div class="pill" style="background:var(--tint); color:var(--muted);">Answered</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="padding:18px;">
+          <div class="sect" style="margin-bottom:16px;">Timeline</div>
+          <div style="display:flex; gap:14px;"><div style="display:flex; flex-direction:column; align-items:center; width:12px;"><div style="width:10px; height:10px; border-radius:5px; background:var(--muted); flex:none; margin-top:5px;"></div><div style="width:2px; flex:1; background:var(--outline); margin:4px 0;"></div></div><div style="flex:1; padding-bottom:18px;"><div style="display:flex; justify-content:space-between; align-items:baseline;"><span style="font-size:14px; font-weight:600;">Started</span><span class="num" style="font-size:13px; color:var(--muted);">14:32:08</span></div><div style="font-size:12.5px; color:var(--muted); margin-top:2px;">Ringing</div></div></div>
+          <div style="display:flex; gap:14px;"><div style="display:flex; flex-direction:column; align-items:center; width:12px;"><div style="width:10px; height:10px; border-radius:5px; background:var(--green); flex:none; margin-top:5px;"></div><div style="width:2px; flex:1; background:var(--outline); margin:4px 0;"></div></div><div style="flex:1; padding-bottom:18px;"><div style="display:flex; justify-content:space-between; align-items:baseline;"><span style="font-size:14px; font-weight:600;">Answered</span><span class="num" style="font-size:13px; color:var(--muted);">14:32:14</span></div><div style="font-size:12.5px; color:var(--muted); margin-top:2px;">After 6 seconds</div></div></div>
+          <div style="display:flex; gap:14px;"><div style="display:flex; flex-direction:column; align-items:center; width:12px;"><div style="width:10px; height:10px; border-radius:5px; background:var(--muted); flex:none; margin-top:5px;"></div></div><div style="flex:1; padding-bottom:0;"><div style="display:flex; justify-content:space-between; align-items:baseline;"><span style="font-size:14px; font-weight:600;">Ended</span><span class="num" style="font-size:13px; color:var(--muted);">14:36:40</span></div><div style="font-size:12.5px; color:var(--muted); margin-top:2px;">Ended by remote party</div></div></div>
+          <div class="sep" style="margin:16px 0;"></div>
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <span style="font-size:14px; color:var(--muted);">Duration</span>
+            <span class="num" style="font-size:22px; font-weight:700; letter-spacing:-0.02em;">4m 32s</span>
+          </div>
+        </div>
+
+        <div class="card" style="padding:14px 16px; display:flex; align-items:center; gap:12px;">
+          <div class="ico" style="background:var(--tint);"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--muted);"><path d="M6 3h8l5 5v13H6Z"/><rect x="9" y="12" width="7" height="6" rx="1"/></svg></div>
+          <div style="flex:1;">
+            <div style="font-size:14px; font-weight:600;">SIM 1 &middot; Airtel</div>
+            <div style="font-size:12.5px; color:var(--muted);">Subscription 1</div>
+          </div>
+        </div>
+
+        <div class="card" style="padding:16px; display:flex; gap:12px; border-color:var(--amber);">
+          <div class="ico" style="background:var(--ambert);"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--amber);"><path d="M3 3l18 18"/><path d="M9 9v3a3 3 0 0 0 4.6 2.5"/><path d="M15 10V6a3 3 0 0 0-5.7-1.3"/><path d="M18 11a6 6 0 0 1-.8 3"/><path d="M6 11a6 6 0 0 0 9 5.2"/><path d="M12 19v3"/></svg></div>
+          <div style="flex:1; min-width:0;">
+            <div style="font-size:14px; font-weight:600;">Recording unavailable</div>
+            <div style="font-size:12.5px; line-height:1.55; color:var(--muted); margin-top:4px;">
+              Android 16 does not allow third-party apps to record calls. Call details are still tracked in full.
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="padding:14px 16px; display:flex; align-items:center; gap:12px;">
+          <div class="ico" style="background:var(--greent);"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="color: var(--green);"><path d="m5 13 4 4L19 7"/></svg></div>
+          <div style="flex:1;">
+            <div style="font-size:14px; font-weight:600;">Uploaded</div>
+            <div style="font-size:12.5px; color:var(--muted);">2 minutes ago &middot; confirmed by server</div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 12px;">
+    <div class="cap">Dark</div>
+    <div class="phone dark">
+      <div class="safe"></div>
+      <div class="bar"><div style="width:32px; height:32px; display:flex; align-items:center;"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: currentColor;"><path d="M15 5 8 12l7 7"/></svg></div><div style="flex:1; display:flex; flex-direction:column; gap:1px;"><h1>Call detail</h1></div></div>
+      <div class="scroll">
+
+        <div class="card" style="padding:18px; display:flex; gap:14px; align-items:center;">
+          <div style="width:52px; height:52px; border-radius:26px; background:var(--brandc); color:var(--brand);
+                      display:flex; align-items:center; justify-content:center; font-size:19px; font-weight:600; flex:none;">RK</div>
+          <div style="flex:1; min-width:0;">
+            <div style="font-size:19px; font-weight:600; letter-spacing:-0.01em;">Ramesh Kumar</div>
+            <div class="num" style="font-size:14px; color:var(--muted); margin-top:2px;">+91 98&bull;&bull;&bull; &bull;&bull;210</div>
+            <div style="display:flex; gap:6px; margin-top:10px;">
+              <div class="pill" style="background:var(--greent); color:var(--green);"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--green);"><path d="M19 5 11 13"/><path d="M11 7v6h6"/></svg>Incoming</div>
+              <div class="pill" style="background:var(--tint); color:var(--muted);">Answered</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="padding:18px;">
+          <div class="sect" style="margin-bottom:16px;">Timeline</div>
+          <div style="display:flex; gap:14px;"><div style="display:flex; flex-direction:column; align-items:center; width:12px;"><div style="width:10px; height:10px; border-radius:5px; background:var(--muted); flex:none; margin-top:5px;"></div><div style="width:2px; flex:1; background:var(--outline); margin:4px 0;"></div></div><div style="flex:1; padding-bottom:18px;"><div style="display:flex; justify-content:space-between; align-items:baseline;"><span style="font-size:14px; font-weight:600;">Started</span><span class="num" style="font-size:13px; color:var(--muted);">14:32:08</span></div><div style="font-size:12.5px; color:var(--muted); margin-top:2px;">Ringing</div></div></div>
+          <div style="display:flex; gap:14px;"><div style="display:flex; flex-direction:column; align-items:center; width:12px;"><div style="width:10px; height:10px; border-radius:5px; background:var(--green); flex:none; margin-top:5px;"></div><div style="width:2px; flex:1; background:var(--outline); margin:4px 0;"></div></div><div style="flex:1; padding-bottom:18px;"><div style="display:flex; justify-content:space-between; align-items:baseline;"><span style="font-size:14px; font-weight:600;">Answered</span><span class="num" style="font-size:13px; color:var(--muted);">14:32:14</span></div><div style="font-size:12.5px; color:var(--muted); margin-top:2px;">After 6 seconds</div></div></div>
+          <div style="display:flex; gap:14px;"><div style="display:flex; flex-direction:column; align-items:center; width:12px;"><div style="width:10px; height:10px; border-radius:5px; background:var(--muted); flex:none; margin-top:5px;"></div></div><div style="flex:1; padding-bottom:0;"><div style="display:flex; justify-content:space-between; align-items:baseline;"><span style="font-size:14px; font-weight:600;">Ended</span><span class="num" style="font-size:13px; color:var(--muted);">14:36:40</span></div><div style="font-size:12.5px; color:var(--muted); margin-top:2px;">Ended by remote party</div></div></div>
+          <div class="sep" style="margin:16px 0;"></div>
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <span style="font-size:14px; color:var(--muted);">Duration</span>
+            <span class="num" style="font-size:22px; font-weight:700; letter-spacing:-0.02em;">4m 32s</span>
+          </div>
+        </div>
+
+        <div class="card" style="padding:14px 16px; display:flex; align-items:center; gap:12px;">
+          <div class="ico" style="background:var(--tint);"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--muted);"><path d="M6 3h8l5 5v13H6Z"/><rect x="9" y="12" width="7" height="6" rx="1"/></svg></div>
+          <div style="flex:1;">
+            <div style="font-size:14px; font-weight:600;">SIM 1 &middot; Airtel</div>
+            <div style="font-size:12.5px; color:var(--muted);">Subscription 1</div>
+          </div>
+        </div>
+
+        <div class="card" style="padding:16px; display:flex; gap:12px; border-color:var(--amber);">
+          <div class="ico" style="background:var(--ambert);"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--amber);"><path d="M3 3l18 18"/><path d="M9 9v3a3 3 0 0 0 4.6 2.5"/><path d="M15 10V6a3 3 0 0 0-5.7-1.3"/><path d="M18 11a6 6 0 0 1-.8 3"/><path d="M6 11a6 6 0 0 0 9 5.2"/><path d="M12 19v3"/></svg></div>
+          <div style="flex:1; min-width:0;">
+            <div style="font-size:14px; font-weight:600;">Recording unavailable</div>
+            <div style="font-size:12.5px; line-height:1.55; color:var(--muted); margin-top:4px;">
+              Android 16 does not allow third-party apps to record calls. Call details are still tracked in full.
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="padding:14px 16px; display:flex; align-items:center; gap:12px;">
+          <div class="ico" style="background:var(--greent);"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="color: var(--green);"><path d="m5 13 4 4L19 7"/></svg></div>
+          <div style="flex:1;">
+            <div style="font-size:14px; font-weight:600;">Uploaded</div>
+            <div style="font-size:12.5px; color:var(--muted);">2 minutes ago &middot; confirmed by server</div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

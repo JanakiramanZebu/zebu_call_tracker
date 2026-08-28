@@ -1,0 +1,109 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #EEF0F4; font-family: 'Inter', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+    a { color: #0037B7; } a:hover { color: #002E9B; }
+    .light { --bg:#F8F9FA; --surface:#FFFFFF; --text:#141414; --muted:#737373; --outline:#DDE2E7;
+             --brand:#0037B7; --brandc:#E3EDFA; --field:#F9F9F9; --green:#00B14F; --red:#FF1717; --amber:#FFB038; }
+    .dark  { --bg:#181818; --surface:#1A1A1A; --text:#FFFFFF; --muted:#8A8A8A; --outline:#333333;
+             --brand:#4A6CF7; --brandc:#1D242F; --field:#1E1E1E; --green:#00B14F; --red:#FF6B6B; --amber:#FFB038; }
+  </style>
+</helmet>
+
+<div style="padding: 48px; display: flex; flex-direction: column; gap: 40px; width: 1200px;">
+
+  <div style="display: flex; flex-direction: column; gap: 10px;">
+    <div style="font-size: 12px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: #8A8F98;">Zebu · Internal</div>
+    <h1 style="margin: 0; font-size: 44px; font-weight: 700; letter-spacing: -0.03em; color: #141414;">Call Tracker</h1>
+    <p style="margin: 0; max-width: 640px; font-size: 16px; line-height: 1.6; color: #5B6472;">
+      Business call tracking for Android fleet devices. Built on the Mynt design system — Inter,
+      brand blue, flat surfaces with hairline outlines. Every screen is drawn light and dark side by side.
+    </p>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 16px;">
+    <div style="font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #8A8F98;">Palette</div>
+    <div style="display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px;">
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <div style="height: 64px; border-radius: 10px; background: #0037B7;"></div>
+        <div style="font-size: 13px; font-weight: 600; color: #141414;">Brand</div>
+        <div style="font-size: 12px; color: #737373; font-variant-numeric: tabular-nums;">#0037B7</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <div style="height: 64px; border-radius: 10px; background: #4A6CF7;"></div>
+        <div style="font-size: 13px; font-weight: 600; color: #141414;">Brand · dark UI</div>
+        <div style="font-size: 12px; color: #737373; font-variant-numeric: tabular-nums;">#4A6CF7</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <div style="height: 64px; border-radius: 10px; background: #00B14F;"></div>
+        <div style="font-size: 13px; font-weight: 600; color: #141414;">Answered</div>
+        <div style="font-size: 12px; color: #737373; font-variant-numeric: tabular-nums;">#00B14F</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <div style="height: 64px; border-radius: 10px; background: #FF1717;"></div>
+        <div style="font-size: 13px; font-weight: 600; color: #141414;">Missed / failed</div>
+        <div style="font-size: 12px; color: #737373; font-variant-numeric: tabular-nums;">#FF1717</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <div style="height: 64px; border-radius: 10px; background: #FFB038;"></div>
+        <div style="font-size: 13px; font-weight: 600; color: #141414;">Waiting</div>
+        <div style="font-size: 12px; color: #737373; font-variant-numeric: tabular-nums;">#FFB038</div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <div style="height: 64px; border-radius: 10px; background: #F8F9FA; border: 1px solid #DDE2E7;"></div>
+        <div style="font-size: 13px; font-weight: 600; color: #141414;">Canvas</div>
+        <div style="font-size: 12px; color: #737373; font-variant-numeric: tabular-nums;">#F8F9FA</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 16px;">
+    <div style="font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #8A8F98;">Screens on this canvas</div>
+    <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px;">
+      <div style="background: #fff; border: 1px solid #DDE2E7; border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 6px;">
+        <div style="font-size: 15px; font-weight: 600; color: #141414;">Login</div>
+        <div style="font-size: 13px; line-height: 1.5; color: #737373;">Employee sign-in. States up front that the device gets registered.</div>
+      </div>
+      <div style="background: #fff; border: 1px solid #DDE2E7; border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 6px;">
+        <div style="font-size: 15px; font-weight: 600; color: #141414;">Permissions</div>
+        <div style="font-size: 13px; line-height: 1.5; color: #737373;">One card per permission, each carrying its own reason. Requested progressively, never all at once.</div>
+      </div>
+      <div style="background: #fff; border: 1px solid #DDE2E7; border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 6px;">
+        <div style="font-size: 15px; font-weight: 600; color: #141414;">Dashboard</div>
+        <div style="font-size: 13px; line-height: 1.5; color: #737373;">Talk time leads. Sync trust sits above the fold, not buried in settings.</div>
+      </div>
+      <div style="background: #fff; border: 1px solid #DDE2E7; border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 6px;">
+        <div style="font-size: 15px; font-weight: 600; color: #141414;">Call History</div>
+        <div style="font-size: 13px; line-height: 1.5; color: #737373;">Includes the awkward rows on purpose — unknown numbers, withheld numbers, a failed upload.</div>
+      </div>
+      <div style="background: #fff; border: 1px solid #DDE2E7; border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 6px;">
+        <div style="font-size: 15px; font-weight: 600; color: #141414;">Call Detail</div>
+        <div style="font-size: 13px; line-height: 1.5; color: #737373;">Timeline rail for started / answered / ended. Recording block tells the truth about this device.</div>
+      </div>
+      <div style="background: #fff; border: 1px solid #DDE2E7; border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 6px;">
+        <div style="font-size: 15px; font-weight: 600; color: #141414;">Sync &amp; Settings</div>
+        <div style="font-size: 13px; line-height: 1.5; color: #737373;">Queue state per bucket with one recovery action. Settings keeps account, device and privacy together.</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

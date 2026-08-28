@@ -9,6 +9,7 @@ import `in`.mynt.zebu_call_tracker.call.ContactResolver
 import `in`.mynt.zebu_call_tracker.call.SimInfoReader
 import `in`.mynt.zebu_call_tracker.permissions.PermissionInspector
 import `in`.mynt.zebu_call_tracker.recording.RecordingCapabilityProbe
+import `in`.mynt.zebu_call_tracker.recording.RecordingScanner
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
@@ -94,6 +95,32 @@ class NativeBridge(private val context: Context) : MethodChannel.MethodCallHandl
                 "probeRecordingCapability" ->
                     result.success(RecordingCapabilityProbe.probe(context))
 
+                // --- recording INGESTION (discover files the device already
+                // wrote; this app never records) ------------------------------
+                "getRecordingAccess" -> result.success(
+                    mapOf(
+                        "permission" to RecordingScanner.requiredPermission(),
+                        "granted" to RecordingScanner.hasPermission(context),
+                    ),
+                )
+
+                "scanRecordings" -> {
+                    val since = (call.argument<Any>("sinceEpochSeconds") as? Number)?.toLong() ?: 0L
+                    val limit = call.argument<Int>("limit") ?: 200
+                    result.success(
+                        RecordingScanner.scan(context, since, limit.coerceIn(1, 2000)),
+                    )
+                }
+
+                "hashRecording" -> {
+                    val id = (call.argument<Any>("mediaStoreId") as? Number)?.toLong()
+                    if (id == null) {
+                        result.error("INVALID_ARGUMENT", "mediaStoreId is required", null)
+                    } else {
+                        result.success(RecordingScanner.sha256(context, id))
+                    }
+                }
+
                 "readCallStateJournal" -> result.success(CallStateJournal.read(context))
 
                 "clearCallStateJournal" -> {
@@ -105,6 +132,8 @@ class NativeBridge(private val context: Context) : MethodChannel.MethodCallHandl
 
                 else -> result.notImplemented()
             }
+        } catch (e: RecordingScanner.MissingPermission) {
+            result.error("PERMISSION_DENIED", e.message, null)
         } catch (e: CallLogReader.MissingPermission) {
             result.error("PERMISSION_DENIED", e.message, null)
         } catch (e: SecurityException) {

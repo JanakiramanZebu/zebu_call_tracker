@@ -26,18 +26,23 @@
     <!-- Contact-name resolution. Denial is non-fatal: contactName stays null. -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />
 
-    <!-- Call recording. Third-party recording of the far-end audio is blocked
-         by the platform from Android 10 (API 29) onward; this permission only
-         enables the OEM/device-dependent path documented in
-         docs/feasibility.md. RecordingCapabilityService probes at runtime and
-         reports `unsupported` rather than producing a silent/one-sided file. -->
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Recording INGESTION, not recording capture. This app has no recording
+         engine: it discovers audio the device's own dialer already wrote and
+         uploads it. Reading those files goes through MediaStore, so the normal
+         media permission is enough and MANAGE_EXTERNAL_STORAGE is NOT needed
+         (which keeps the app out of all-files-access territory).
+         Verified on SM-M356B/Android 16: /sdcard/Recordings/Call is owned by
+         the dialer's uid and is not world-readable, so direct File access returns
+         nothing, while the same files are fully indexed in MediaStore.Audio. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 
     <!-- Foreground service used ONLY while an upload batch or an active
          recording is in flight — never as an always-on keepalive. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
     <!-- Sync/upload status notifications (runtime-requested on API 33+). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />

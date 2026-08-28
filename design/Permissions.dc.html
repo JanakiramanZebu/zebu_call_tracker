@@ -1,0 +1,125 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin:0; background:#EEF0F4; font-family:'Inter',system-ui,sans-serif; -webkit-font-smoothing:antialiased; }
+    a { color:#0037B7; } a:hover { color:#002E9B; }
+    .light { --bg:#F8F9FA; --surface:#FFFFFF; --text:#141414; --muted:#737373; --outline:#DDE2E7;
+             --brand:#0037B7; --brandc:#E3EDFA; --field:#F9F9F9; --green:#00B14F; --red:#FF1717;
+             --amber:#FFB038; --tab:#F1F3F8; --tint:rgba(20,20,20,.04);
+             --greent:rgba(0,177,79,.12); --redt:rgba(255,23,23,.10); --ambert:rgba(255,176,56,.14); }
+    .dark  { --bg:#181818; --surface:#1A1A1A; --text:#FFFFFF; --muted:#8A8A8A; --outline:#333333;
+             --brand:#4A6CF7; --brandc:#1D242F; --field:#1E1E1E; --green:#00B14F; --red:#FF6B6B;
+             --amber:#FFB038; --tab:#24242B; --tint:rgba(255,255,255,.05);
+             --greent:rgba(0,177,79,.16); --redt:rgba(255,107,107,.14); --ambert:rgba(255,176,56,.16); }
+    .phone { width:390px; height:844px; border-radius:26px; overflow:hidden; display:flex;
+             flex-direction:column; background:var(--bg); color:var(--text); border:1px solid var(--outline); }
+    /* The real OS status bar paints here. Nothing is drawn into it. */
+    .safe { height:44px; flex:none; background:var(--surface); }
+    .cap { font-size:12px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:#8A8F98; }
+    .bar { height:56px; flex:none; display:flex; align-items:center; gap:12px; padding:0 16px; background:var(--surface); }
+    .bar h1 { margin:0; font-size:18px; font-weight:600; letter-spacing:-0.01em; }
+    .scroll { flex:1; overflow:hidden; padding:16px; display:flex; flex-direction:column; gap:14px; }
+    .card { background:var(--surface); border:1px solid var(--outline); border-radius:12px; }
+    .btn { height:50px; border-radius:8px; display:flex; align-items:center; justify-content:center;
+           gap:8px; font-size:15px; font-weight:600; }
+    .fill { background:var(--brand); color:#FFFFFF; }
+    .out { color:var(--brand); border:1px solid var(--outline); }
+    .num { font-variant-numeric:tabular-nums; }
+    .ico { width:38px; height:38px; border-radius:10px; display:flex; align-items:center; justify-content:center; flex:none; }
+    .row { display:flex; align-items:center; gap:12px; padding:12px 14px; }
+    .sep { height:1px; background:var(--outline); }
+    .pill { height:26px; border-radius:8px; display:inline-flex; align-items:center; gap:6px;
+            padding:0 9px; font-size:12px; font-weight:600; }
+    .chip { height:34px; border-radius:8px; display:inline-flex; align-items:center; padding:0 14px;
+            font-size:13.5px; font-weight:500; color:var(--muted); background:var(--tab); }
+    .chip.on { background:var(--brand); color:#FFFFFF; font-weight:600; }
+    .sect { font-size:12px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); }
+  </style>
+</helmet>
+
+<div style="display: flex; gap: 48px; padding: 40px; align-items: flex-start;">
+
+  <div style="display: flex; flex-direction: column; gap: 12px;">
+    <div class="cap">Light</div>
+    <div class="phone light">
+      <div class="safe"></div>
+      <div class="bar"><div style="flex:1; display:flex; flex-direction:column; gap:1px;"><h1>Set up tracking</h1><span style="font-size:12px; color:var(--muted);">Step 2 of 3</span></div></div>
+      <div class="scroll">
+
+        <div style="display:flex; align-items:center; gap:10px;">
+          <div style="flex:1; height:6px; border-radius:3px; background:var(--tint); overflow:hidden;">
+            <div style="width:50%; height:100%; background:var(--brand);"></div>
+          </div>
+          <span class="num" style="font-size:12px; font-weight:600; color:var(--muted);">2 of 4</span>
+        </div>
+
+        <p style="margin:0; font-size:14px; line-height:1.55; color:var(--muted);">
+          Each permission is requested only when it is needed, and only with the reason shown.
+          You can decline any of them &mdash; the app keeps working with less detail.
+        </p>
+
+        <div class="card" style="padding:14px; display:flex; gap:12px;"><div class="ico" style="background:var(--greent);"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--green);"><path d="M5 4h3l2 5-2.5 1.5a12 12 0 0 0 5 5L14 13l5 2v3a2 2 0 0 1-2.2 2A17 17 0 0 1 3 6.2 2 2 0 0 1 5 4Z"/></svg></div><div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:4px;"><div style="font-size:15px; font-weight:600;">Phone &amp; call log</div><div style="font-size:13px; line-height:1.5; color:var(--muted);">Detects when a call starts and ends, and reads its final duration and status. Without this nothing is tracked.</div><div style="margin-top:6px;"><div class="pill" style="background:var(--greent); color:var(--green);"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" style="color: currentColor;"><path d="m5 13 4 4L19 7"/></svg>Enabled</div></div></div></div>
+        <div class="card" style="padding:14px; display:flex; gap:12px;"><div class="ico" style="background:var(--greent);"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--green);"><rect x="4" y="3" width="16" height="18" rx="2"/><circle cx="12" cy="10" r="2.5"/><path d="M8 17a4 4 0 0 1 8 0"/></svg></div><div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:4px;"><div style="font-size:15px; font-weight:600;">Contacts</div><div style="font-size:13px; line-height:1.5; color:var(--muted);">Shows a name instead of a bare number. Declining keeps the number; only the name is missing.</div><div style="margin-top:6px;"><div class="pill" style="background:var(--greent); color:var(--green);"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" style="color: currentColor;"><path d="m5 13 4 4L19 7"/></svg>Enabled</div></div></div></div>
+        <div class="card" style="padding:14px; display:flex; gap:12px;"><div class="ico" style="background:var(--brandc);"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--brand);"><path d="M18 9a6 6 0 1 0-12 0c0 5-2 6-2 6h16s-2-1-2-6Z"/><path d="M10.5 19a1.8 1.8 0 0 0 3 0"/></svg></div><div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:4px;"><div style="font-size:15px; font-weight:600;">Notifications</div><div style="font-size:13px; line-height:1.5; color:var(--muted);">Tells you when an upload fails so calls do not sit unsynced without you noticing.</div><div style="margin-top:6px;"><div class="pill" style="background:var(--brand); color:#FFFFFF; height:34px; padding:0 14px;">Enable</div></div></div></div>
+        <div class="card" style="padding:14px; display:flex; gap:12px;"><div class="ico" style="background:var(--brandc);"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--brand);"><rect x="2" y="8" width="16" height="9" rx="2"/><path d="M21 11v3"/><path d="M6 11v3"/></svg></div><div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:4px;"><div style="font-size:15px; font-weight:600;">Background activity</div><div style="font-size:13px; line-height:1.5; color:var(--muted);">Samsung power saving can stop the app from uploading while the screen is off.</div><div style="margin-top:6px;"><div class="pill" style="background:var(--tab); color:var(--muted); height:34px; padding:0 14px;">Open settings</div></div></div></div>
+
+      </div>
+      <div style="padding:16px; display:flex; flex-direction:column; gap:10px; background:var(--surface); border-top:1px solid var(--outline);">
+        <div class="btn fill">Continue</div>
+        <div style="text-align:center; font-size:12px; color:var(--muted);">Change any of these later in Settings &rsaquo; Permissions</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 12px;">
+    <div class="cap">Dark</div>
+    <div class="phone dark">
+      <div class="safe"></div>
+      <div class="bar"><div style="flex:1; display:flex; flex-direction:column; gap:1px;"><h1>Set up tracking</h1><span style="font-size:12px; color:var(--muted);">Step 2 of 3</span></div></div>
+      <div class="scroll">
+
+        <div style="display:flex; align-items:center; gap:10px;">
+          <div style="flex:1; height:6px; border-radius:3px; background:var(--tint); overflow:hidden;">
+            <div style="width:50%; height:100%; background:var(--brand);"></div>
+          </div>
+          <span class="num" style="font-size:12px; font-weight:600; color:var(--muted);">2 of 4</span>
+        </div>
+
+        <p style="margin:0; font-size:14px; line-height:1.55; color:var(--muted);">
+          Each permission is requested only when it is needed, and only with the reason shown.
+          You can decline any of them &mdash; the app keeps working with less detail.
+        </p>
+
+        <div class="card" style="padding:14px; display:flex; gap:12px;"><div class="ico" style="background:var(--greent);"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--green);"><path d="M5 4h3l2 5-2.5 1.5a12 12 0 0 0 5 5L14 13l5 2v3a2 2 0 0 1-2.2 2A17 17 0 0 1 3 6.2 2 2 0 0 1 5 4Z"/></svg></div><div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:4px;"><div style="font-size:15px; font-weight:600;">Phone &amp; call log</div><div style="font-size:13px; line-height:1.5; color:var(--muted);">Detects when a call starts and ends, and reads its final duration and status. Without this nothing is tracked.</div><div style="margin-top:6px;"><div class="pill" style="background:var(--greent); color:var(--green);"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" style="color: currentColor;"><path d="m5 13 4 4L19 7"/></svg>Enabled</div></div></div></div>
+        <div class="card" style="padding:14px; display:flex; gap:12px;"><div class="ico" style="background:var(--greent);"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--green);"><rect x="4" y="3" width="16" height="18" rx="2"/><circle cx="12" cy="10" r="2.5"/><path d="M8 17a4 4 0 0 1 8 0"/></svg></div><div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:4px;"><div style="font-size:15px; font-weight:600;">Contacts</div><div style="font-size:13px; line-height:1.5; color:var(--muted);">Shows a name instead of a bare number. Declining keeps the number; only the name is missing.</div><div style="margin-top:6px;"><div class="pill" style="background:var(--greent); color:var(--green);"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" style="color: currentColor;"><path d="m5 13 4 4L19 7"/></svg>Enabled</div></div></div></div>
+        <div class="card" style="padding:14px; display:flex; gap:12px;"><div class="ico" style="background:var(--brandc);"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--brand);"><path d="M18 9a6 6 0 1 0-12 0c0 5-2 6-2 6h16s-2-1-2-6Z"/><path d="M10.5 19a1.8 1.8 0 0 0 3 0"/></svg></div><div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:4px;"><div style="font-size:15px; font-weight:600;">Notifications</div><div style="font-size:13px; line-height:1.5; color:var(--muted);">Tells you when an upload fails so calls do not sit unsynced without you noticing.</div><div style="margin-top:6px;"><div class="pill" style="background:var(--brand); color:#FFFFFF; height:34px; padding:0 14px;">Enable</div></div></div></div>
+        <div class="card" style="padding:14px; display:flex; gap:12px;"><div class="ico" style="background:var(--brandc);"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--brand);"><rect x="2" y="8" width="16" height="9" rx="2"/><path d="M21 11v3"/><path d="M6 11v3"/></svg></div><div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:4px;"><div style="font-size:15px; font-weight:600;">Background activity</div><div style="font-size:13px; line-height:1.5; color:var(--muted);">Samsung power saving can stop the app from uploading while the screen is off.</div><div style="margin-top:6px;"><div class="pill" style="background:var(--tab); color:var(--muted); height:34px; padding:0 14px;">Open settings</div></div></div></div>
+
+      </div>
+      <div style="padding:16px; display:flex; flex-direction:column; gap:10px; background:var(--surface); border-top:1px solid var(--outline);">
+        <div class="btn fill">Continue</div>
+        <div style="text-align:center; font-size:12px; color:var(--muted);">Change any of these later in Settings &rsaquo; Permissions</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

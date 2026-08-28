@@ -1,0 +1,153 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin:0; background:#EEF0F4; font-family:'Inter',system-ui,sans-serif; -webkit-font-smoothing:antialiased; }
+    a { color:#0037B7; } a:hover { color:#002E9B; }
+    .light { --bg:#F8F9FA; --surface:#FFFFFF; --text:#141414; --muted:#737373; --outline:#DDE2E7;
+             --brand:#0037B7; --brandc:#E3EDFA; --field:#F9F9F9; --green:#00B14F; --red:#FF1717;
+             --amber:#FFB038; --tab:#F1F3F8; --tint:rgba(20,20,20,.04);
+             --greent:rgba(0,177,79,.12); --redt:rgba(255,23,23,.10); --ambert:rgba(255,176,56,.14); }
+    .dark  { --bg:#181818; --surface:#1A1A1A; --text:#FFFFFF; --muted:#8A8A8A; --outline:#333333;
+             --brand:#4A6CF7; --brandc:#1D242F; --field:#1E1E1E; --green:#00B14F; --red:#FF6B6B;
+             --amber:#FFB038; --tab:#24242B; --tint:rgba(255,255,255,.05);
+             --greent:rgba(0,177,79,.16); --redt:rgba(255,107,107,.14); --ambert:rgba(255,176,56,.16); }
+    .phone { width:390px; height:844px; border-radius:26px; overflow:hidden; display:flex;
+             flex-direction:column; background:var(--bg); color:var(--text); border:1px solid var(--outline); }
+    /* The real OS status bar paints here. Nothing is drawn into it. */
+    .safe { height:44px; flex:none; background:var(--surface); }
+    .cap { font-size:12px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:#8A8F98; }
+    .bar { height:56px; flex:none; display:flex; align-items:center; gap:12px; padding:0 16px; background:var(--surface); }
+    .bar h1 { margin:0; font-size:18px; font-weight:600; letter-spacing:-0.01em; }
+    .scroll { flex:1; overflow:hidden; padding:16px; display:flex; flex-direction:column; gap:14px; }
+    .card { background:var(--surface); border:1px solid var(--outline); border-radius:12px; }
+    .btn { height:50px; border-radius:8px; display:flex; align-items:center; justify-content:center;
+           gap:8px; font-size:15px; font-weight:600; }
+    .fill { background:var(--brand); color:#FFFFFF; }
+    .out { color:var(--brand); border:1px solid var(--outline); }
+    .num { font-variant-numeric:tabular-nums; }
+    .ico { width:38px; height:38px; border-radius:10px; display:flex; align-items:center; justify-content:center; flex:none; }
+    .row { display:flex; align-items:center; gap:12px; padding:12px 14px; }
+    .sep { height:1px; background:var(--outline); }
+    .pill { height:26px; border-radius:8px; display:inline-flex; align-items:center; gap:6px;
+            padding:0 9px; font-size:12px; font-weight:600; }
+    .chip { height:34px; border-radius:8px; display:inline-flex; align-items:center; padding:0 14px;
+            font-size:13.5px; font-weight:500; color:var(--muted); background:var(--tab); }
+    .chip.on { background:var(--brand); color:#FFFFFF; font-weight:600; }
+    .sect { font-size:12px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); }
+  </style>
+</helmet>
+
+<div style="display: flex; gap: 48px; padding: 40px; align-items: flex-start;">
+
+  <div style="display: flex; flex-direction: column; gap: 12px;">
+    <div class="cap">Light</div>
+    <div class="phone light">
+      <div class="safe"></div>
+      <div class="bar"><div style="flex:1; display:flex; flex-direction:column; gap:1px;"><h1>Sync</h1></div></div>
+      <div class="scroll">
+
+        <div class="card" style="padding:18px; display:flex; gap:14px; align-items:center; border-color:var(--amber);">
+          <div class="ico" style="width:44px; height:44px; background:var(--ambert);"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--amber);"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg></div>
+          <div style="flex:1;">
+            <div style="font-size:16px; font-weight:600;">Syncing 3 of 8</div>
+            <div style="font-size:13px; color:var(--muted); margin-top:2px;">Started 12 seconds ago</div>
+          </div>
+        </div>
+
+        <div style="height:6px; border-radius:3px; background:var(--tint); overflow:hidden; margin-top:-4px;">
+          <div style="width:38%; height:100%; background:var(--brand);"></div>
+        </div>
+
+        <div class="card" style="overflow:hidden;">
+          <div style="display:flex; align-items:center; gap:12px; padding:13px 14px;"><div class="ico" style="width:32px; height:32px; border-radius:8px; background:var(--greent);"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--green);"><path d="m5 13 4 4L19 7"/></svg></div><div style="flex:1;"><div style="font-size:14.5px; font-weight:600;">Uploaded</div><div style="font-size:12.5px; color:var(--muted);">Confirmed by the server</div></div><span class="num" style="font-size:19px; font-weight:700; letter-spacing:-0.02em; color:var(--green);">128</span></div><div class="sep" style="margin-left:56px;"></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:13px 14px;"><div class="ico" style="width:32px; height:32px; border-radius:8px; background:var(--brandc);"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--brand);"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg></div><div style="flex:1;"><div style="font-size:14.5px; font-weight:600;">Uploading</div><div style="font-size:12.5px; color:var(--muted);">In flight now</div></div><span class="num" style="font-size:19px; font-weight:700; letter-spacing:-0.02em; color:var(--brand);">3</span></div><div class="sep" style="margin-left:56px;"></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:13px 14px;"><div class="ico" style="width:32px; height:32px; border-radius:8px; background:var(--ambert);"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--amber);"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div><div style="flex:1;"><div style="font-size:14.5px; font-weight:600;">Waiting</div><div style="font-size:12.5px; color:var(--muted);">Queued for the next window</div></div><span class="num" style="font-size:19px; font-weight:700; letter-spacing:-0.02em; color:var(--amber);">5</span></div><div class="sep" style="margin-left:56px;"></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:13px 14px;"><div class="ico" style="width:32px; height:32px; border-radius:8px; background:var(--redt);"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--red);"><path d="M12 4 2 20h20L12 4Z"/><path d="M12 10v4"/><path d="M12 17.5v.01"/></svg></div><div style="flex:1;"><div style="font-size:14.5px; font-weight:600;">Failed</div><div style="font-size:12.5px; color:var(--muted);">Retried 4 times</div></div><span class="num" style="font-size:19px; font-weight:700; letter-spacing:-0.02em; color:var(--red);">1</span></div>
+        </div>
+
+        <div class="btn out"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--brand);"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>Retry failed uploads</div>
+
+        <div class="sect" style="margin-top:4px;">Status</div>
+        <div class="card" style="overflow:hidden;">
+          <div style="display:flex; align-items:center; gap:12px; padding:13px 14px;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--muted);"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span style="flex:1; font-size:14px;">Last successful sync</span><span style="font-size:13.5px; font-weight:600; color:var(--muted);">2 min ago</span></div><div class="sep" style="margin-left:44px;"></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:13px 14px;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--muted);"><path d="M2.5 9a15 15 0 0 1 19 0"/><path d="M6 12.5a10 10 0 0 1 12 0"/><path d="M9.5 16a5 5 0 0 1 5 0"/><path d="M12 19.5v.01"/></svg><span style="flex:1; font-size:14px;">Network</span><span style="font-size:13.5px; font-weight:600; color:var(--green);">Wi-Fi</span></div><div class="sep" style="margin-left:44px;"></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:13px 14px;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--muted);"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg><span style="flex:1; font-size:14px;">Server</span><span style="font-size:13.5px; font-weight:600; color:var(--green);">Reachable</span></div><div class="sep" style="margin-left:44px;"></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:13px 14px;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--muted);"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M11 18.5h2"/></svg><span style="flex:1; font-size:14px;">Queue size</span><span style="font-size:13.5px; font-weight:600; color:var(--muted);">9 records</span></div>
+        </div>
+
+        <p style="margin:4px 2px 0; font-size:12.5px; line-height:1.55; color:var(--muted);">
+          Calls are saved on the device the moment they end. Nothing is lost while offline &mdash;
+          the queue drains when a connection returns.
+        </p>
+
+      </div>
+      <div style="height:64px; flex:none; display:flex; background:var(--surface); border-top:1px solid var(--outline);"><div style="flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; font-size:12px; font-weight:500; color:var(--muted);"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: currentColor;"><path d="M4 10 12 4l8 6v9a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1Z"/></svg><span>Home</span></div><div style="flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; font-size:12px; font-weight:500; color:var(--muted);"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: currentColor;"><path d="M5 4h3l2 5-2.5 1.5a12 12 0 0 0 5 5L14 13l5 2v3a2 2 0 0 1-2.2 2A17 17 0 0 1 3 6.2 2 2 0 0 1 5 4Z"/></svg><span>Calls</span></div><div style="flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; font-size:12px; font-weight:500; color:var(--brand);"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: currentColor;"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg><span>Sync</span></div><div style="flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; font-size:12px; font-weight:500; color:var(--muted);"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: currentColor;"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4"/></svg><span>Settings</span></div></div>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 12px;">
+    <div class="cap">Dark</div>
+    <div class="phone dark">
+      <div class="safe"></div>
+      <div class="bar"><div style="flex:1; display:flex; flex-direction:column; gap:1px;"><h1>Sync</h1></div></div>
+      <div class="scroll">
+
+        <div class="card" style="padding:18px; display:flex; gap:14px; align-items:center; border-color:var(--amber);">
+          <div class="ico" style="width:44px; height:44px; background:var(--ambert);"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--amber);"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg></div>
+          <div style="flex:1;">
+            <div style="font-size:16px; font-weight:600;">Syncing 3 of 8</div>
+            <div style="font-size:13px; color:var(--muted); margin-top:2px;">Started 12 seconds ago</div>
+          </div>
+        </div>
+
+        <div style="height:6px; border-radius:3px; background:var(--tint); overflow:hidden; margin-top:-4px;">
+          <div style="width:38%; height:100%; background:var(--brand);"></div>
+        </div>
+
+        <div class="card" style="overflow:hidden;">
+          <div style="display:flex; align-items:center; gap:12px; padding:13px 14px;"><div class="ico" style="width:32px; height:32px; border-radius:8px; background:var(--greent);"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--green);"><path d="m5 13 4 4L19 7"/></svg></div><div style="flex:1;"><div style="font-size:14.5px; font-weight:600;">Uploaded</div><div style="font-size:12.5px; color:var(--muted);">Confirmed by the server</div></div><span class="num" style="font-size:19px; font-weight:700; letter-spacing:-0.02em; color:var(--green);">128</span></div><div class="sep" style="margin-left:56px;"></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:13px 14px;"><div class="ico" style="width:32px; height:32px; border-radius:8px; background:var(--brandc);"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--brand);"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg></div><div style="flex:1;"><div style="font-size:14.5px; font-weight:600;">Uploading</div><div style="font-size:12.5px; color:var(--muted);">In flight now</div></div><span class="num" style="font-size:19px; font-weight:700; letter-spacing:-0.02em; color:var(--brand);">3</span></div><div class="sep" style="margin-left:56px;"></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:13px 14px;"><div class="ico" style="width:32px; height:32px; border-radius:8px; background:var(--ambert);"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--amber);"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div><div style="flex:1;"><div style="font-size:14.5px; font-weight:600;">Waiting</div><div style="font-size:12.5px; color:var(--muted);">Queued for the next window</div></div><span class="num" style="font-size:19px; font-weight:700; letter-spacing:-0.02em; color:var(--amber);">5</span></div><div class="sep" style="margin-left:56px;"></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:13px 14px;"><div class="ico" style="width:32px; height:32px; border-radius:8px; background:var(--redt);"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--red);"><path d="M12 4 2 20h20L12 4Z"/><path d="M12 10v4"/><path d="M12 17.5v.01"/></svg></div><div style="flex:1;"><div style="font-size:14.5px; font-weight:600;">Failed</div><div style="font-size:12.5px; color:var(--muted);">Retried 4 times</div></div><span class="num" style="font-size:19px; font-weight:700; letter-spacing:-0.02em; color:var(--red);">1</span></div>
+        </div>
+
+        <div class="btn out"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--brand);"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>Retry failed uploads</div>
+
+        <div class="sect" style="margin-top:4px;">Status</div>
+        <div class="card" style="overflow:hidden;">
+          <div style="display:flex; align-items:center; gap:12px; padding:13px 14px;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--muted);"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span style="flex:1; font-size:14px;">Last successful sync</span><span style="font-size:13.5px; font-weight:600; color:var(--muted);">2 min ago</span></div><div class="sep" style="margin-left:44px;"></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:13px 14px;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--muted);"><path d="M2.5 9a15 15 0 0 1 19 0"/><path d="M6 12.5a10 10 0 0 1 12 0"/><path d="M9.5 16a5 5 0 0 1 5 0"/><path d="M12 19.5v.01"/></svg><span style="flex:1; font-size:14px;">Network</span><span style="font-size:13.5px; font-weight:600; color:var(--green);">Wi-Fi</span></div><div class="sep" style="margin-left:44px;"></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:13px 14px;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--muted);"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg><span style="flex:1; font-size:14px;">Server</span><span style="font-size:13.5px; font-weight:600; color:var(--green);">Reachable</span></div><div class="sep" style="margin-left:44px;"></div>
+          <div style="display:flex; align-items:center; gap:12px; padding:13px 14px;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: var(--muted);"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M11 18.5h2"/></svg><span style="flex:1; font-size:14px;">Queue size</span><span style="font-size:13.5px; font-weight:600; color:var(--muted);">9 records</span></div>
+        </div>
+
+        <p style="margin:4px 2px 0; font-size:12.5px; line-height:1.55; color:var(--muted);">
+          Calls are saved on the device the moment they end. Nothing is lost while offline &mdash;
+          the queue drains when a connection returns.
+        </p>
+
+      </div>
+      <div style="height:64px; flex:none; display:flex; background:var(--surface); border-top:1px solid var(--outline);"><div style="flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; font-size:12px; font-weight:500; color:var(--muted);"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: currentColor;"><path d="M4 10 12 4l8 6v9a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1Z"/></svg><span>Home</span></div><div style="flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; font-size:12px; font-weight:500; color:var(--muted);"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: currentColor;"><path d="M5 4h3l2 5-2.5 1.5a12 12 0 0 0 5 5L14 13l5 2v3a2 2 0 0 1-2.2 2A17 17 0 0 1 3 6.2 2 2 0 0 1 5 4Z"/></svg><span>Calls</span></div><div style="flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; font-size:12px; font-weight:500; color:var(--brand);"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: currentColor;"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg><span>Sync</span></div><div style="flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; font-size:12px; font-weight:500; color:var(--muted);"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color: currentColor;"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4"/></svg><span>Settings</span></div></div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>
