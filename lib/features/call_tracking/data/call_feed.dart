@@ -1,4 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../../../core/platform/native_call_bridge.dart';
 import '../../recording/domain/recording_matcher.dart';
@@ -19,12 +20,17 @@ final permissionStatusProvider = FutureProvider.autoDispose<PermissionSnapshot>(
     final bridge = ref.watch(nativeBridgeProvider);
     final calls = await bridge.getPermissionStatus();
     final recordings = await bridge.getRecordingAccess();
+    // Notifications are not in the native inspector's remit: POST_NOTIFICATIONS
+    // does not exist below API 33, and permission_handler already reports
+    // "granted" there. Checking status never raises a dialog.
+    final notifications = await Permission.notification.isGranted;
     return PermissionSnapshot(
       readPhoneState: calls['readPhoneState'] ?? false,
       readCallLog: calls['readCallLog'] ?? false,
       readContacts: calls['readContacts'] ?? false,
       readMediaAudio: recordings.granted,
       mediaPermissionName: recordings.permission,
+      notifications: notifications,
     );
   },
 );
@@ -36,6 +42,7 @@ class PermissionSnapshot {
     required this.readContacts,
     required this.readMediaAudio,
     required this.mediaPermissionName,
+    required this.notifications,
   });
 
   final bool readPhoneState;
@@ -43,17 +50,20 @@ class PermissionSnapshot {
   final bool readContacts;
   final bool readMediaAudio;
   final String mediaPermissionName;
+  final bool notifications;
 
   /// Call log is the only hard requirement — everything else degrades.
   bool get canTrack => readCallLog;
 
   int get grantedCount => [
-    readPhoneState,
-    readCallLog,
+    readPhoneState && readCallLog,
     readContacts,
     readMediaAudio,
+    notifications,
   ].where((g) => g).length;
 
+  /// One per entry in `permissionAsks`; the phone/call-log pair counts as one
+  /// ask because the user is shown one card for it.
   static const total = 4;
 }
 
@@ -66,12 +76,27 @@ class CallFeed extends AsyncNotifier<CallFeedState> {
   static const _pageSize = 60;
   static const _recordingPoolSize = 400;
 
-  @override
-  Future<CallFeedState> build() => _load(page: 0, previous: const []);
+  /// Scanned once and reused for the life of the notifier.
+  ///
+  /// MediaStore is queried on the *first* page only. Re-scanning per page cost
+  /// a full media query for every twenty rows the user scrolled past, for a
+  /// pool that barely changes while a list is open. `refresh()` rebuilds it.
+  List<RecordingCandidate> _pool = const [];
+  bool _poolLoaded = false;
 
+  @override
+  Future<CallFeedState> build() => _load(previous: const []);
+
+  /// Loads one page of rows older than [beforeMillis].
+  ///
+  /// Keyset pagination, not offset: the call log can gain rows between pages,
+  /// and an offset would silently skip or repeat entries when it does. Passing
+  /// the oldest timestamp already held also means each row is read from the
+  /// provider exactly once across the whole scroll, instead of the previous
+  /// re-read-everything-and-discard-the-prefix approach.
   Future<CallFeedState> _load({
-    required int page,
     required List<CallEntry> previous,
+    int beforeMillis = 0,
   }) async {
     final bridge = ref.read(nativeBridgeProvider);
     final matcher = ref.read(recordingMatcherProvider);
@@ -81,31 +106,38 @@ class CallFeed extends AsyncNotifier<CallFeedState> {
       return const CallFeedState(entries: [], hasMore: false, blocked: true);
     }
 
-    // Page by timestamp, not offset: the call log can gain rows between pages,
-    // and an offset would silently skip or repeat entries when it does.
-    final since = 0;
     final rows = await bridge.readCallLog(
-      sinceMillis: since,
-      limit: _pageSize * (page + 1),
+      sinceMillis: 0,
+      beforeMillis: beforeMillis,
+      limit: _pageSize,
     );
 
-    // The recording pool is scanned once and reused across pages. Matching is
-    // pure and cheap; re-scanning MediaStore per page would not be.
-    final pool = perms.readMediaAudio
-        ? await bridge.scanRecordings(
-            sinceEpochSeconds: 0,
-            limit: _recordingPoolSize,
-          )
-        : const <RecordingCandidate>[];
+    if (!_poolLoaded) {
+      _pool = perms.readMediaAudio
+          ? await bridge.scanRecordings(
+              sinceEpochSeconds: 0,
+              limit: _recordingPoolSize,
+            )
+          : const <RecordingCandidate>[];
+      _poolLoaded = true;
+    }
+
+    // One platform round-trip for the whole page. Resolving per row meant a
+    // channel hop and a PhoneLookup query for each of sixty rows before the
+    // page could paint; the native side also caches, so repeat callers — most
+    // of a real call log — cost nothing on later pages.
+    final names = perms.readContacts
+        ? await bridge.resolveContacts([
+            for (final r in rows)
+              if (r.number != null && r.number!.isNotEmpty) r.number!,
+          ])
+        : const <String, String>{};
 
     final entries = <CallEntry>[];
-    for (final row in rows.skip(previous.length)) {
+    for (final row in rows) {
       if (row.dateMillis == null) continue;
 
-      final name = perms.readContacts && row.number != null
-          ? await bridge.resolveContact(row.number!)
-          : null;
-
+      final name = row.number == null ? null : names[row.number!];
       final match = matcher.match(
         CallForMatching(
           startedAtEpochMillis: row.dateMillis!,
@@ -113,18 +145,18 @@ class CallFeed extends AsyncNotifier<CallFeedState> {
           normalizedNumber: row.number,
           contactName: name ?? row.cachedName,
         ),
-        pool,
+        _pool,
       );
 
       entries.add(CallEntry(row: row, match: match, contactName: name));
     }
 
-    final all = [...previous, ...entries];
     return CallFeedState(
-      entries: all,
-      hasMore: rows.length >= _pageSize * (page + 1),
-      page: page,
-      recordingPoolSize: pool.length,
+      entries: [...previous, ...entries],
+      // A short page means the provider had nothing more to give, which is a
+      // reliable end-of-list signal now that each page is a bounded query.
+      hasMore: rows.length >= _pageSize,
+      recordingPoolSize: _pool.length,
     );
   }
 
@@ -132,16 +164,27 @@ class CallFeed extends AsyncNotifier<CallFeedState> {
     final current = state.value;
     if (current == null || !current.hasMore || current.loadingMore) return;
 
+    // The oldest row already held is the cursor for the next page. Null-safe
+    // because a row without a timestamp is skipped during load and so can
+    // never be the last entry.
+    final cursor = current.entries.isEmpty
+        ? 0
+        : current.entries.last.row.dateMillis ?? 0;
+
     state = AsyncData(current.copyWith(loadingMore: true));
-    final next = await _load(page: current.page + 1, previous: current.entries);
-    state = AsyncData(next);
+    state = await AsyncValue.guard(
+      () => _load(previous: current.entries, beforeMillis: cursor),
+    );
   }
 
   Future<void> refresh() async {
     state = const AsyncLoading();
     state = await AsyncValue.guard(() async {
       ref.invalidate(permissionStatusProvider);
-      return _load(page: 0, previous: const []);
+      // A pull-to-refresh is the user saying the device state changed, so the
+      // recording pool is rebuilt rather than reused.
+      _poolLoaded = false;
+      return _load(previous: const []);
     });
   }
 }
@@ -150,7 +193,6 @@ class CallFeedState {
   const CallFeedState({
     required this.entries,
     required this.hasMore,
-    this.page = 0,
     this.loadingMore = false,
     this.blocked = false,
     this.recordingPoolSize = 0,
@@ -158,7 +200,6 @@ class CallFeedState {
 
   final List<CallEntry> entries;
   final bool hasMore;
-  final int page;
   final bool loadingMore;
 
   /// True when the call-log permission is missing, so the UI can explain rather
@@ -170,7 +211,6 @@ class CallFeedState {
   CallFeedState copyWith({bool? loadingMore}) => CallFeedState(
     entries: entries,
     hasMore: hasMore,
-    page: page,
     loadingMore: loadingMore ?? this.loadingMore,
     blocked: blocked,
     recordingPoolSize: recordingPoolSize,
@@ -214,6 +254,9 @@ final callFeedProvider = AsyncNotifierProvider<CallFeed, CallFeedState>(
 );
 
 /// Today's aggregates for the dashboard.
+///
+/// Recomputed only when the feed changes, and in a single pass over the day's
+/// entries — see [CallStats.from].
 final todayStatsProvider = Provider<CallStats>((ref) {
   final feed = ref.watch(callFeedProvider).value;
   if (feed == null) return CallStats.empty;

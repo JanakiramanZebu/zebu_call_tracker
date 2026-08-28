@@ -6,7 +6,11 @@ import `in`.mynt.zebu_call_tracker.call.CallLogReader
 import `in`.mynt.zebu_call_tracker.call.CallStateJournal
 import `in`.mynt.zebu_call_tracker.call.CallStateMonitor
 import `in`.mynt.zebu_call_tracker.call.ContactResolver
+import `in`.mynt.zebu_call_tracker.call.Dialer
 import `in`.mynt.zebu_call_tracker.call.SimInfoReader
+import `in`.mynt.zebu_call_tracker.background.BackgroundScheduler
+import `in`.mynt.zebu_call_tracker.background.IngestStore
+import `in`.mynt.zebu_call_tracker.permissions.BatteryOptimization
 import `in`.mynt.zebu_call_tracker.permissions.PermissionInspector
 import `in`.mynt.zebu_call_tracker.recording.RecordingCapabilityProbe
 import `in`.mynt.zebu_call_tracker.recording.RecordingScanner
@@ -75,11 +79,43 @@ class NativeBridge(private val context: Context) : MethodChannel.MethodCallHandl
 
                 "readCallLog" -> {
                     val since = (call.argument<Any>("sinceMillis") as? Number)?.toLong() ?: 0L
+                    val before = (call.argument<Any>("beforeMillis") as? Number)?.toLong() ?: 0L
                     val limit = call.argument<Int>("limit") ?: 100
-                    result.success(CallLogReader.read(context, since, limit.coerceIn(1, 1000)))
+                    result.success(
+                        CallLogReader.read(context, since, limit.coerceIn(1, 1000), before),
+                    )
                 }
 
                 "getCallLogCount" -> result.success(CallLogReader.count(context))
+
+                "readCallLogForNumber" -> {
+                    val number = call.argument<String>("number")
+                    val limit = call.argument<Int>("limit") ?: 50
+                    if (number.isNullOrBlank()) {
+                        result.success(emptyList<Map<String, Any?>>())
+                    } else {
+                        result.success(
+                            CallLogReader.readForNumber(
+                                context,
+                                number,
+                                limit.coerceIn(1, 500),
+                            ),
+                        )
+                    }
+                }
+
+                "dialNumber" -> result.success(
+                    Dialer.dial(context, call.argument<String>("number") ?: ""),
+                )
+
+                "getRecordingUri" -> {
+                    val id = (call.argument<Any>("mediaStoreId") as? Number)?.toLong()
+                    if (id == null) {
+                        result.error("INVALID_ARGUMENT", "mediaStoreId is required", null)
+                    } else {
+                        result.success(RecordingScanner.contentUri(id))
+                    }
+                }
 
                 "getSimInfo" -> result.success(
                     mapOf(
@@ -90,6 +126,13 @@ class NativeBridge(private val context: Context) : MethodChannel.MethodCallHandl
 
                 "resolveContact" -> result.success(
                     ContactResolver.resolve(context, call.argument<String>("number")),
+                )
+
+                "resolveContacts" -> result.success(
+                    ContactResolver.resolveBatch(
+                        context,
+                        call.argument<List<String>>("numbers") ?: emptyList(),
+                    ),
                 )
 
                 "probeRecordingCapability" ->
@@ -129,6 +172,42 @@ class NativeBridge(private val context: Context) : MethodChannel.MethodCallHandl
                 }
 
                 "getDeviceInfo" -> result.success(deviceInfo())
+
+                // --- background execution ------------------------------------
+                "getBackgroundStatus" -> result.success(
+                    IngestStore.read(context).filterKeys { it != "batches" } +
+                        BatteryOptimization.status(context),
+                )
+
+                "readIngestBatches" -> result.success(IngestStore.read(context))
+
+                "clearIngestBatches" -> {
+                    IngestStore.clearBatches(context)
+                    result.success(null)
+                }
+
+                "startBackgroundTracking" -> {
+                    BackgroundScheduler.ensurePeriodic(context)
+                    BackgroundScheduler.enqueueNow(
+                        context,
+                        call.argument<String>("reason") ?: BackgroundScheduler.REASON_APP_START,
+                    )
+                    result.success(null)
+                }
+
+                "stopBackgroundTracking" -> {
+                    BackgroundScheduler.cancelAll(context)
+                    // Names resolved for the previous user must not survive into
+                    // the next one's session on a shared handset.
+                    ContactResolver.clearCache()
+                    result.success(null)
+                }
+
+                "requestBatteryExemption" ->
+                    result.success(BatteryOptimization.requestExemption(context))
+
+                "openVendorBackgroundSettings" ->
+                    result.success(BatteryOptimization.openVendorSettings(context))
 
                 else -> result.notImplemented()
             }

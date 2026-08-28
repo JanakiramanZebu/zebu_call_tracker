@@ -218,4 +218,23 @@ object RecordingScanner {
 
     private fun Cursor.getLongOrNull(column: String): Long? =
         getColumnIndex(column).takeIf { it >= 0 }?.let { if (isNull(it)) null else getLong(it) }
+
+    /**
+     * The playable content:// URI for a scanned recording.
+     *
+     * Playback goes through this rather than a filesystem path on purpose:
+     * /sdcard/Recordings/Call is owned by the dialer's uid and is not
+     * world-readable, so a File path would be unopenable even with the media
+     * permission held. The MediaStore URI is, and ExoPlayer resolves it
+     * directly — so nothing has to be copied out to play it.
+     *
+     * Returns the URI without checking the row still exists: the file can be
+     * deleted between this call and playback either way, so the player treats a
+     * failed open as "recording is gone" and says so.
+     */
+    fun contentUri(mediaStoreId: Long): String =
+        ContentUris.withAppendedId(
+            MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+            mediaStoreId,
+        ).toString()
 }

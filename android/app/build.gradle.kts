@@ -82,4 +82,9 @@ dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
     // ContextCompat.checkSelfPermission in the native permission inspector.
     implementation("androidx.core:core-ktx:1.13.1")
+    // Background ingest. WorkManager rather than a bare foreground service:
+    // Android 12+ forbids starting an FGS from a background broadcast, and
+    // WorkManager owns the FGS lifecycle for expedited work, survives reboot,
+    // and is the only scheduler the OEM battery managers on this fleet respect.
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
 }

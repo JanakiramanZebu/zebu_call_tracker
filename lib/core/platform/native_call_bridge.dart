@@ -24,14 +24,44 @@ abstract interface class NativeCallBridge {
 
   /// Strictly incremental: returns only rows with `date > sinceMillis`, newest
   /// first. The full history is never re-read.
+  ///
+  /// [beforeMillis] adds an exclusive upper bound so the history list can page
+  /// backwards by keyset — "older than the oldest row I hold" — instead of
+  /// re-reading every earlier page with a growing limit. Pass 0 for no bound.
   Future<List<CallLogRow>> readCallLog({
     required int sinceMillis,
     int limit = 100,
+    int beforeMillis = 0,
   });
 
   Future<int> getCallLogCount();
+
+  /// Every call with this number, newest first — the history on a call's
+  /// detail screen.
+  ///
+  /// Matched on the last ten digits natively, so the same person logged as
+  /// +9197…, 09197… and 97… returns as one history rather than three.
+  Future<List<CallLogRow>> readCallLogForNumber(String number, {int limit = 50});
+
+  /// Opens the system dialer with [number] filled in. Returns false when the
+  /// device has no dialer to open.
+  Future<bool> dialNumber(String number);
+
+  /// The playable `content://` URI for a scanned recording. The file lives in
+  /// the dialer's private directory, so this URI — not a path — is the only
+  /// way to read it.
+  Future<String> getRecordingUri(int mediaStoreId);
   Future<SimInfo> getSimInfo();
   Future<String?> resolveContact(String number);
+
+  /// Resolves a whole page of numbers in one round-trip.
+  ///
+  /// Keys are the numbers that matched a contact; a number absent from the
+  /// result simply has no saved name. Prefer this over looping
+  /// [resolveContact]: per-row resolution costs a platform hop and a
+  /// PhoneLookup query each, which is what made the first paint of the call
+  /// list slow.
+  Future<Map<String, String>> resolveContacts(List<String> numbers);
   Future<RecordingCapability> probeRecordingCapability();
 
   /// Which permission the recording scan needs on this OS version, and whether
@@ -55,6 +85,34 @@ abstract interface class NativeCallBridge {
   /// Live call-state transitions. Foreground only — the background path is the
   /// native CallStateReceiver.
   Stream<CallStateEvent> callStateStream();
+
+  // --- background execution ------------------------------------------------
+
+  /// Whether background ingest is actually able to run, and what it last did.
+  /// Cheap: reads SharedPreferences and one PowerManager flag.
+  Future<BackgroundStatus> getBackgroundStatus();
+
+  /// Drains what the background worker captured while the app was closed.
+  ///
+  /// Returns the snapshots as-is; matching is applied by the Dart matcher, so
+  /// the rules live in exactly one place.
+  Future<IngestSnapshot> readIngestBatches();
+
+  /// Call only after the batches have been folded in — this is not idempotent
+  /// with respect to unprocessed data.
+  Future<void> clearIngestBatches();
+
+  /// Arms the periodic sweep and runs one capture now. Idempotent.
+  Future<void> startBackgroundTracking({String reason = 'app-start'});
+
+  /// Cancels all scheduled ingest. Used on sign-out.
+  Future<void> stopBackgroundTracking();
+
+  /// Opens the Doze exemption prompt. Returns false when no screen resolved.
+  Future<bool> requestBatteryExemption();
+
+  /// Opens the OEM background-restriction screen, falling back to app info.
+  Future<bool> openVendorBackgroundSettings();
 }
 
 class MethodChannelNativeCallBridge implements NativeCallBridge {
@@ -89,9 +147,11 @@ class MethodChannelNativeCallBridge implements NativeCallBridge {
   Future<List<CallLogRow>> readCallLog({
     required int sinceMillis,
     int limit = 100,
+    int beforeMillis = 0,
   }) async {
     final raw = await _invoke<List<Object?>>('readCallLog', {
       'sinceMillis': sinceMillis,
+      'beforeMillis': beforeMillis,
       'limit': limit,
     });
     return raw
@@ -102,6 +162,29 @@ class MethodChannelNativeCallBridge implements NativeCallBridge {
 
   @override
   Future<int> getCallLogCount() => _invoke<int>('getCallLogCount');
+
+  @override
+  Future<List<CallLogRow>> readCallLogForNumber(
+    String number, {
+    int limit = 50,
+  }) async {
+    final raw = await _invoke<List<Object?>>('readCallLogForNumber', {
+      'number': number,
+      'limit': limit,
+    });
+    return raw
+        .cast<Map<Object?, Object?>>()
+        .map(CallLogRow.fromPlatform)
+        .toList(growable: false);
+  }
+
+  @override
+  Future<bool> dialNumber(String number) =>
+      _invoke<bool>('dialNumber', {'number': number});
+
+  @override
+  Future<String> getRecordingUri(int mediaStoreId) =>
+      _invoke<String>('getRecordingUri', {'mediaStoreId': mediaStoreId});
 
   @override
   Future<SimInfo> getSimInfo() async =>
@@ -116,6 +199,23 @@ class MethodChannelNativeCallBridge implements NativeCallBridge {
     } on PlatformException {
       // Contact resolution is decorative: never fail a call record over it.
       return null;
+    }
+  }
+
+  @override
+  Future<Map<String, String>> resolveContacts(List<String> numbers) async {
+    if (numbers.isEmpty) return const {};
+    try {
+      final raw = await _method.invokeMethod<Map<Object?, Object?>>(
+        'resolveContacts',
+        {'numbers': numbers},
+      );
+      return (raw ?? const {}).map(
+        (k, v) => MapEntry(k! as String, v! as String),
+      );
+    } on PlatformException {
+      // Contact resolution is decorative: never fail a page of calls over it.
+      return const {};
     }
   }
 
@@ -185,6 +285,41 @@ class MethodChannelNativeCallBridge implements NativeCallBridge {
   Stream<CallStateEvent> callStateStream() => _events
       .receiveBroadcastStream()
       .map((e) => CallStateEvent.fromPlatform(e as Map<Object?, Object?>));
+
+  @override
+  Future<BackgroundStatus> getBackgroundStatus() async =>
+      BackgroundStatus.fromPlatform(
+        await _invoke<Map<Object?, Object?>>('getBackgroundStatus'),
+      );
+
+  @override
+  Future<IngestSnapshot> readIngestBatches() async =>
+      IngestSnapshot.fromPlatform(
+        await _invoke<Map<Object?, Object?>>('readIngestBatches'),
+      );
+
+  @override
+  Future<void> clearIngestBatches() async {
+    await _method.invokeMethod<void>('clearIngestBatches');
+  }
+
+  @override
+  Future<void> startBackgroundTracking({String reason = 'app-start'}) async {
+    await _invoke<void>('startBackgroundTracking', {'reason': reason});
+  }
+
+  @override
+  Future<void> stopBackgroundTracking() async {
+    await _invoke<void>('stopBackgroundTracking');
+  }
+
+  @override
+  Future<bool> requestBatteryExemption() =>
+      _invoke<bool>('requestBatteryExemption');
+
+  @override
+  Future<bool> openVendorBackgroundSettings() =>
+      _invoke<bool>('openVendorBackgroundSettings');
 }
 
 RecordingCandidate _candidateFromPlatform(Map<Object?, Object?> m) =>
@@ -343,6 +478,121 @@ class RecordingCapability {
               .toList(growable: false),
     );
   }
+}
+
+/// How the last background run went, and whether the next one can happen.
+class BackgroundStatus {
+  const BackgroundStatus({
+    required this.ignoringBatteryOptimizations,
+    required this.manufacturer,
+    required this.hasVendorSettings,
+    required this.lastRunAtUtc,
+    required this.lastRunStatus,
+    required this.lastRunReason,
+    required this.runCount,
+    required this.capturedCalls,
+    required this.overflowed,
+  });
+
+  /// False means the OS may defer scheduled ingest for hours. Not fatal — the
+  /// call log is durable — but a dialer recording can be rotated away first.
+  final bool ignoringBatteryOptimizations;
+
+  final String manufacturer;
+
+  /// Whether an OEM background-restriction screen could be resolved, so the UI
+  /// only offers the shortcut when it leads somewhere.
+  final bool hasVendorSettings;
+
+  /// Null until the worker has run at least once.
+  final DateTime? lastRunAtUtc;
+
+  /// `ok`, `blocked` (a permission is missing) or `failed`.
+  final String? lastRunStatus;
+
+  /// Why the run was scheduled: `call-ended`, `periodic`, `boot`, ...
+  final String? lastRunReason;
+
+  final int runCount;
+  final int capturedCalls;
+
+  /// True when the capture store hit its cap and dropped its oldest batches —
+  /// the app has been closed for a very long time.
+  final bool overflowed;
+
+  bool get hasRun => lastRunAtUtc != null;
+  bool get isHealthy => lastRunStatus == 'ok' || !hasRun;
+
+  factory BackgroundStatus.fromPlatform(Map<Object?, Object?> m) {
+    final at = (m['lastRunAtMillis'] as num?)?.toInt() ?? 0;
+    return BackgroundStatus(
+      ignoringBatteryOptimizations:
+          m['ignoringBatteryOptimizations'] as bool? ?? false,
+      manufacturer: m['manufacturer'] as String? ?? '',
+      hasVendorSettings: m['hasVendorSettings'] as bool? ?? false,
+      lastRunAtUtc: at == 0
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(at).toUtc(),
+      lastRunStatus: m['lastRunStatus'] as String?,
+      lastRunReason: m['lastRunReason'] as String?,
+      runCount: (m['runCount'] as num?)?.toInt() ?? 0,
+      capturedCalls: (m['capturedCalls'] as num?)?.toInt() ?? 0,
+      overflowed: m['overflowed'] as bool? ?? false,
+    );
+  }
+}
+
+/// One background capture: the call rows seen, plus the recordings that existed
+/// at that moment. The pairing is what makes this worth running in the
+/// background — a recording listing is perishable, a call log row is not.
+class IngestBatch {
+  const IngestBatch({
+    required this.capturedAtUtc,
+    required this.calls,
+    required this.recordings,
+  });
+
+  final DateTime capturedAtUtc;
+  final List<CallLogRow> calls;
+  final List<RecordingCandidate> recordings;
+
+  factory IngestBatch.fromPlatform(Map<Object?, Object?> m) => IngestBatch(
+    capturedAtUtc: DateTime.fromMillisecondsSinceEpoch(
+      (m['capturedAtMillis'] as num?)?.toInt() ?? 0,
+    ).toUtc(),
+    calls: (m['calls'] as List<Object?>? ?? const <Object?>[])
+        .cast<Map<Object?, Object?>>()
+        .map(CallLogRow.fromPlatform)
+        .toList(growable: false),
+    recordings: (m['recordings'] as List<Object?>? ?? const <Object?>[])
+        .cast<Map<Object?, Object?>>()
+        .map(_candidateFromPlatform)
+        .toList(growable: false),
+  );
+}
+
+class IngestSnapshot {
+  const IngestSnapshot({required this.batches, required this.overflowed});
+
+  final List<IngestBatch> batches;
+  final bool overflowed;
+
+  bool get isEmpty => batches.isEmpty;
+
+  /// Every recording seen across all batches, newest capture last. Feeding the
+  /// matcher the union rather than per-batch lists means a call captured in one
+  /// run can still match a recording indexed in the next.
+  List<RecordingCandidate> get allRecordings => [
+    for (final b in batches) ...b.recordings,
+  ];
+
+  factory IngestSnapshot.fromPlatform(Map<Object?, Object?> m) => IngestSnapshot(
+    batches: (m['batches'] as List<Object?>? ?? const <Object?>[])
+        .cast<Map<Object?, Object?>>()
+        .map(IngestBatch.fromPlatform)
+        .toList(growable: false),
+    overflowed: m['overflowed'] as bool? ?? false,
+  );
 }
 
 class CallStateEvent {

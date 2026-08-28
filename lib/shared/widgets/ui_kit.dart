@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/platform/native_call_bridge.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/formatters.dart';
 import '../../features/call_tracking/domain/call_entry.dart';
 import '../../features/recording/domain/recording_matcher.dart';
+import '../../features/recording/presentation/recording_player_widget.dart';
 
 /// Convenience accessors so widgets stop repeating `Theme.of(context)`.
 extension ThemeX on BuildContext {
@@ -229,14 +231,18 @@ class AppCard extends StatelessWidget {
 }
 
 /// One row in the call list.
-class CallRowTile extends StatelessWidget {
+///
+/// A [ConsumerWidget] so the recording can be played from the list itself. The
+/// alternative — opening the detail screen to hear thirty seconds of a call —
+/// is enough friction that staff stop checking their recordings at all.
+class CallRowTile extends ConsumerWidget {
   const CallRowTile({super.key, required this.entry, this.onTap});
 
   final CallEntry entry;
   final VoidCallback? onTap;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final dir = directionStyle(context, entry.row.direction);
     final up = uploadStyle(context, entry.uploadState);
 
@@ -284,6 +290,12 @@ class CallRowTile extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 8),
+            // The play control sits outside the row's InkWell so tapping it
+            // starts audio instead of opening the detail screen.
+            if (entry.recording != null) ...[
+              RecordingPlayButton(candidate: entry.recording!, size: 32),
+              const SizedBox(width: 10),
+            ],
             Column(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
@@ -300,14 +312,7 @@ class CallRowTile extends StatelessWidget {
                 Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    if (entry.recording != null) ...[
-                      Icon(
-                        Icons.play_circle_outline_rounded,
-                        size: 15,
-                        color: context.palette.answered,
-                      ),
-                      const SizedBox(width: 4),
-                    ] else if (entry.needsReview) ...[
+                    if (entry.needsReview) ...[
                       Icon(
                         Icons.help_outline_rounded,
                         size: 15,

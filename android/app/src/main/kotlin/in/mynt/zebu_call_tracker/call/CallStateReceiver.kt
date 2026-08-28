@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.telephony.TelephonyManager
 import android.util.Log
+import `in`.mynt.zebu_call_tracker.background.BackgroundScheduler
 
 /**
  * Background call-state entry point.
@@ -17,7 +18,8 @@ import android.util.Log
  *  - onReceive runs on the main thread with a ~10s budget, so no I/O beyond a
  *    small SharedPreferences write.
  *  - Android 12+ forbids starting a foreground service from a background
- *    broadcast, so nothing is started here.
+ *    broadcast, so nothing is started here. Enqueuing WorkManager work IS
+ *    allowed, and that is how the actual capture happens.
  *  - Reconciliation is cursor-based against the call log, which is itself
  *    durable, so deferring it loses no data.
  *
@@ -33,7 +35,15 @@ class CallStateReceiver : BroadcastReceiver() {
 
         // Never log the number — privacy requirement, and it is unused here.
         Log.i(TAG, "phone state -> $state")
-        CallStateJournal.record(context, state.lowercase(), System.currentTimeMillis())
+        val normalised = state.lowercase()
+        CallStateJournal.record(context, normalised, System.currentTimeMillis())
+
+        // IDLE is the transition that matters: the call has finished, so the
+        // log row and — critically — the dialer's recording file now exist.
+        // Capturing on RINGING/OFFHOOK would run before either is written.
+        if (normalised == "idle") {
+            BackgroundScheduler.enqueueNow(context, BackgroundScheduler.REASON_CALL_ENDED)
+        }
     }
 
     companion object {

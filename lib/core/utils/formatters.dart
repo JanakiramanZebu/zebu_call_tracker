@@ -38,6 +38,28 @@ abstract final class Fmt {
     return DateFormat('d MMMM').format(local);
   }
 
+  /// `just now`, `12 minutes ago`, `3 hours ago`, `yesterday`, `on 12 August`.
+  ///
+  /// Used for "when did this last happen" status lines, where an exact
+  /// timestamp reads as precision the user has to decode. Ages beyond a week
+  /// fall back to a date, because "9 days ago" is harder to place than the day
+  /// itself.
+  static String relative(DateTime utc) {
+    final delta = DateTime.now().toUtc().difference(utc);
+    if (delta.isNegative || delta.inMinutes < 1) return 'just now';
+    if (delta.inMinutes < 60) {
+      final m = delta.inMinutes;
+      return '$m minute${m == 1 ? '' : 's'} ago';
+    }
+    if (delta.inHours < 24) {
+      final h = delta.inHours;
+      return '$h hour${h == 1 ? '' : 's'} ago';
+    }
+    if (delta.inDays == 1) return 'yesterday';
+    if (delta.inDays < 7) return '${delta.inDays} days ago';
+    return 'on ${DateFormat('d MMMM').format(utc.toLocal())}';
+  }
+
   static String fullTimestamp(DateTime utc) =>
       DateFormat('HH:mm:ss').format(utc.toLocal());
 

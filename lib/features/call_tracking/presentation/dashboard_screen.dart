@@ -3,7 +3,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
 import '../../../core/utils/formatters.dart';
+import '../../../shared/widgets/loaders.dart';
 import '../../../shared/widgets/ui_kit.dart';
+import '../../auth/data/auth_controller.dart';
+import '../../permissions/presentation/permission_screen.dart';
 import '../data/call_feed.dart';
 import '../domain/call_entry.dart';
 import 'call_detail_screen.dart';
@@ -17,6 +20,7 @@ class DashboardScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final feed = ref.watch(callFeedProvider);
     final stats = ref.watch(todayStatsProvider);
+    final session = ref.watch(authControllerProvider).value;
 
     return Scaffold(
       appBar: AppBar(
@@ -24,7 +28,7 @@ class DashboardScreen extends ConsumerWidget {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Call Tracker'),
+            Text(session?.displayName ?? 'Call Tracker'),
             Text(
               DateFormat('EEEE, d MMMM').format(DateTime.now()),
               style: context.text.bodySmall?.copyWith(
@@ -44,7 +48,10 @@ class DashboardScreen extends ConsumerWidget {
       body: RefreshIndicator(
         onRefresh: () => ref.read(callFeedProvider.notifier).refresh(),
         child: feed.when(
-          loading: () => const Center(child: CircularProgressIndicator()),
+          // Skeleton rather than a spinner: the dashboard's layout is known
+          // ahead of the data, so the screen can settle in place instead of
+          // jumping when the first read lands.
+          loading: () => const DashboardSkeleton(),
           error: (e, _) => EmptyState(
             icon: Icons.error_outline_rounded,
             title: 'Could not read calls',
@@ -61,7 +68,11 @@ class DashboardScreen extends ConsumerWidget {
                     'Grant call log access so calls made on this device can be '
                     'tracked against your employee record.',
                 actionLabel: 'Review permissions',
-                onAction: () => ref.invalidate(permissionStatusProvider),
+                onAction: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const PermissionScreen(),
+                  ),
+                ),
               );
             }
 

@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../shared/widgets/ui_kit.dart';
 import '../../call_tracking/data/call_feed.dart';
 import '../../call_tracking/domain/call_entry.dart';
+import '../../background/presentation/background_card.dart';
 
 class SyncScreen extends ConsumerWidget {
   const SyncScreen({super.key});
@@ -60,6 +61,13 @@ class SyncScreen extends ConsumerWidget {
               ],
             ),
           ),
+          const SizedBox(height: 16),
+          const SectionLabel('Capture'),
+          const SizedBox(height: 8),
+          // Sync is where a user comes to ask "is this thing working?". With no
+          // server to report on, the honest answer is about capture: whether
+          // calls are still being picked up while the app is closed.
+          const BackgroundStatusCard(),
           const SizedBox(height: 16),
           const SectionLabel('Call metadata'),
           const SizedBox(height: 8),

@@ -16,6 +16,12 @@ import `in`.mynt.zebu_call_tracker.permissions.PermissionInspector
  * Incremental by contract: callers pass the highest DATE already ingested and
  * we return strictly newer rows, newest first, bounded by [limit]. The whole
  * history is never re-read.
+ *
+ * [beforeMillis] adds the other half — keyset pagination for the history list.
+ * Paging by growing [limit] and discarding the prefix re-reads (and re-parses)
+ * every earlier page, which is quadratic in the number of pages; asking for
+ * "older than the oldest row I already have" reads each row exactly once and is
+ * immune to rows being appended between pages.
  */
 object CallLogReader {
 
@@ -36,8 +42,15 @@ object CallLogReader {
     /**
      * @param sinceMillis exclusive lower bound on CallLog.Calls.DATE (epoch ms,
      *        device local clock). Pass 0 for a first-run backfill.
+     * @param beforeMillis exclusive UPPER bound, for paging backwards through
+     *        history. Pass 0 (or null from Dart) for "no upper bound".
      */
-    fun read(context: Context, sinceMillis: Long, limit: Int): List<Map<String, Any?>> {
+    fun read(
+        context: Context,
+        sinceMillis: Long,
+        limit: Int,
+        beforeMillis: Long = 0L,
+    ): List<Map<String, Any?>> {
         if (!PermissionInspector.isGranted(context, PermissionInspector.CALL_LOG)) {
             throw MissingPermission()
         }
@@ -55,11 +68,20 @@ object CallLogReader {
             .appendQueryParameter(CallLog.Calls.LIMIT_PARAM_KEY, limit.toString())
             .build()
 
+        // Both bounds go in the selection so the provider filters at the SQL
+        // layer; filtering in Kotlin would defeat LIMIT_PARAM_KEY entirely.
+        val selection = StringBuilder("${CallLog.Calls.DATE} > ?")
+        val args = mutableListOf(sinceMillis.toString())
+        if (beforeMillis > 0L) {
+            selection.append(" AND ${CallLog.Calls.DATE} < ?")
+            args += beforeMillis.toString()
+        }
+
         context.contentResolver.query(
             uri,
             PROJECTION,
-            "${CallLog.Calls.DATE} > ?",
-            arrayOf(sinceMillis.toString()),
+            selection.toString(),
+            args.toTypedArray(),
             "${CallLog.Calls.DATE} DESC",
         )?.use { cursor ->
             while (cursor.moveToNext()) {
@@ -68,6 +90,52 @@ object CallLogReader {
         }
         return rows
     }
+
+    /**
+     * Every call with [number], newest first — the history shown on a call's
+     * detail screen.
+     *
+     * Matched on the LAST TEN DIGITS rather than the stored string. The same
+     * person appears in the log as +919739787538, 09739787538 and 9739787538
+     * depending on how each call was placed, and an equality test would split
+     * one contact's history into three. Ten digits is the Indian subscriber
+     * number; comparing more would reintroduce the prefix problem.
+     *
+     * The provider has no "strip non-digits" function, so the comparison is a
+     * LIKE against the tail. That is a suffix match on an unindexed column, but
+     * it is bounded by [limit] and runs once per detail screen, not per row.
+     */
+    fun readForNumber(context: Context, number: String, limit: Int): List<Map<String, Any?>> {
+        if (!PermissionInspector.isGranted(context, PermissionInspector.CALL_LOG)) {
+            throw MissingPermission()
+        }
+
+        val digits = number.filter { it.isDigit() }
+        if (digits.length < MIN_MATCHABLE_DIGITS) return emptyList()
+        val tail = digits.takeLast(SUBSCRIBER_DIGITS)
+
+        val uri = CallLog.Calls.CONTENT_URI.buildUpon()
+            .appendQueryParameter(CallLog.Calls.LIMIT_PARAM_KEY, limit.toString())
+            .build()
+
+        val rows = mutableListOf<Map<String, Any?>>()
+        context.contentResolver.query(
+            uri,
+            PROJECTION,
+            "${CallLog.Calls.NUMBER} LIKE ?",
+            arrayOf("%$tail"),
+            "${CallLog.Calls.DATE} DESC",
+        )?.use { cursor ->
+            while (cursor.moveToNext()) {
+                rows += mapRow(cursor)
+            }
+        }
+        return rows
+    }
+
+    /** Below this a "number" is a service code or withheld — not a contact. */
+    private const val MIN_MATCHABLE_DIGITS = 7
+    private const val SUBSCRIBER_DIGITS = 10
 
     /** Total row count, for the capability probe / first-run backfill estimate. */
     fun count(context: Context): Int {

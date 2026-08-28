@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Zebu brand blue, the same #0037B7 the Flutter theme uses as primary. -->
+    <color name="ic_launcher_background">#0037B7</color>
+</resources>

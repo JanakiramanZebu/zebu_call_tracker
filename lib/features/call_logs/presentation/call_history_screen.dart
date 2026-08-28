@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/platform/native_call_bridge.dart';
+import '../../../shared/widgets/loaders.dart';
 import '../../../shared/widgets/ui_kit.dart';
 import '../../call_tracking/data/call_feed.dart';
 import '../../call_tracking/domain/call_entry.dart';
@@ -73,7 +74,7 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text('Calls')),
       body: feed.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
+        loading: () => const SkeletonList(),
         error: (e, _) => EmptyState(
           icon: Icons.error_outline_rounded,
           title: 'Could not read calls',
@@ -273,13 +274,7 @@ class _Footer extends StatelessWidget {
     if (loading) {
       return const Padding(
         padding: EdgeInsets.symmetric(vertical: 24),
-        child: Center(
-          child: SizedBox(
-            width: 20,
-            height: 20,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          ),
-        ),
+        child: InlineLoader(label: 'Loading more calls…'),
       );
     }
     if (hasMore) return const SizedBox(height: 24);

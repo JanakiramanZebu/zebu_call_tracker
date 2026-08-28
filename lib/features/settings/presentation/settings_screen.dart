@@ -2,7 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../../../core/config/app_config.dart';
 import '../../../shared/widgets/ui_kit.dart';
+import '../../auth/data/auth_controller.dart';
+import '../../auth/domain/session.dart';
+import '../../background/data/background_service.dart';
+import '../../background/presentation/background_card.dart';
 import '../../call_tracking/data/call_feed.dart';
 import '../../permissions/presentation/permission_screen.dart';
 
@@ -14,55 +19,14 @@ class SettingsScreen extends ConsumerWidget {
     final device = ref.watch(deviceInfoProvider).value;
     final perms = ref.watch(permissionStatusProvider).value;
     final feed = ref.watch(callFeedProvider).value;
+    final session = ref.watch(authControllerProvider).value;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Settings')),
       body: ListView(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
         children: [
-          AppCard(
-            child: Row(
-              children: [
-                Container(
-                  width: 48,
-                  height: 48,
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: context.colors.primary,
-                    shape: BoxShape.circle,
-                  ),
-                  child: Text(
-                    'ZB',
-                    style: context.text.titleMedium?.copyWith(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Not signed in',
-                        style: context.text.titleSmall?.copyWith(
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        'Sign-in activates once a server is configured',
-                        style: context.text.bodySmall?.copyWith(
-                          color: context.palette.muted,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
+          _AccountCard(session: session),
           const SizedBox(height: 12),
           AppCard(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
@@ -96,13 +60,23 @@ class SettingsScreen extends ConsumerWidget {
                     ],
                   ),
                 ),
-                StatusPill(label: 'Unregistered', color: context.palette.muted),
+                StatusPill(
+                  label: session == null ? 'Unregistered' : 'Registered',
+                  color: session == null
+                      ? context.palette.muted
+                      : context.palette.answered,
+                ),
               ],
             ),
           ),
           const SizedBox(height: 16),
           const SectionLabel('Tracking'),
           const SizedBox(height: 8),
+          // Above the permission rows on purpose: whether tracking survives the
+          // app being closed is the question a user actually has, and it is the
+          // one thing a green permission list does not answer.
+          const BackgroundStatusCard(),
+          const SizedBox(height: 12),
           AppCard(
             padding: EdgeInsets.zero,
             child: Column(
@@ -124,6 +98,15 @@ class SettingsScreen extends ConsumerWidget {
                   icon: Icons.graphic_eq_rounded,
                   label: 'Recording ingestion',
                   value: (perms?.readMediaAudio ?? false) ? 'On' : 'Off',
+                ),
+                _divider(context),
+                _Row(
+                  icon: Icons.autorenew_rounded,
+                  label: 'Run a check now',
+                  value: '',
+                  onTap: () => ref
+                      .read(backgroundControllerProvider.notifier)
+                      .start(reason: 'manual'),
                 ),
                 _divider(context),
                 _Row(
@@ -182,6 +165,21 @@ class SettingsScreen extends ConsumerWidget {
                   label: 'Open app permissions',
                   value: '',
                   onTap: openAppSettings,
+                ),
+                _divider(context),
+                _Row(
+                  icon: Icons.restart_alt_rounded,
+                  label: 'Redo setup walkthrough',
+                  value: '',
+                  onTap: () => ref.read(onboardingProvider.notifier).reset(),
+                ),
+                _divider(context),
+                _Row(
+                  icon: Icons.logout_rounded,
+                  label: 'Sign out',
+                  value: '',
+                  destructive: true,
+                  onTap: () => _confirmSignOut(context, ref),
                   last: true,
                 ),
               ],
@@ -190,7 +188,7 @@ class SettingsScreen extends ConsumerWidget {
           const SizedBox(height: 24),
           Center(
             child: Text(
-              'Call Tracker 1.0.0 · Internal build',
+              '${AppConfig.appName} · ${AppConfig.buildLabel}',
               style: context.text.bodySmall?.copyWith(
                 color: context.palette.muted,
               ),
@@ -201,9 +199,102 @@ class SettingsScreen extends ConsumerWidget {
     );
   }
 
+  /// Signing out clears the stored token and drops the cached feed, so a shared
+  /// handset does not show the previous user's calls. Confirmed first: the row
+  /// sits one tap away from the neutral ones above it, and coming back needs a
+  /// password the user may not have to hand.
+  Future<void> _confirmSignOut(BuildContext context, WidgetRef ref) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Sign out?'),
+        content: const Text(
+          'Calls already recorded on this device stay on it. You will need '
+          'your employee ID and password to sign back in.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+              minimumSize: const Size(0, 44),
+            ),
+            child: const Text('Sign out'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed ?? false) {
+      await ref.read(authControllerProvider.notifier).signOut();
+    }
+  }
+
   Widget _divider(BuildContext context) => Padding(
     padding: const EdgeInsets.only(left: 52),
     child: Divider(height: 1, color: context.colors.outlineVariant),
+  );
+}
+
+class _AccountCard extends StatelessWidget {
+  const _AccountCard({required this.session});
+
+  final Session? session;
+
+  @override
+  Widget build(BuildContext context) => AppCard(
+    child: Row(
+      children: [
+        Container(
+          width: 48,
+          height: 48,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: context.colors.primary,
+            shape: BoxShape.circle,
+          ),
+          child: Text(
+            session?.initials ?? 'ZB',
+            style: context.text.titleMedium?.copyWith(
+              color: Colors.white,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                session?.displayName ?? 'Not signed in',
+                style: context.text.titleSmall?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                session == null
+                    ? 'Sign in to register this device'
+                    : 'Employee ${session!.employeeId}',
+                style: context.text.bodySmall?.copyWith(
+                  color: context.palette.muted,
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (session != null)
+          StatusPill(
+            label: 'Active',
+            color: context.palette.answered,
+            icon: Icons.check_rounded,
+          ),
+      ],
+    ),
   );
 }
 
@@ -214,6 +305,7 @@ class _Row extends StatelessWidget {
     required this.value,
     this.onTap,
     this.last = false,
+    this.destructive = false,
   });
 
   final IconData icon;
@@ -222,6 +314,10 @@ class _Row extends StatelessWidget {
   final VoidCallback? onTap;
   final bool last;
 
+  /// Rendered in the error colour, so sign-out cannot be mistaken for one of
+  /// the neutral rows above it.
+  final bool destructive;
+
   @override
   Widget build(BuildContext context) => InkWell(
     onTap: onTap,
@@ -229,12 +325,19 @@ class _Row extends StatelessWidget {
       padding: const EdgeInsets.all(14),
       child: Row(
         children: [
-          Icon(icon, size: 19, color: context.palette.muted),
+          Icon(
+            icon,
+            size: 19,
+            color: destructive ? context.palette.missed : context.palette.muted,
+          ),
           const SizedBox(width: 14),
           Expanded(
             child: Text(
               label,
-              style: context.text.bodyLarge?.copyWith(fontSize: 15),
+              style: context.text.bodyLarge?.copyWith(
+                fontSize: 15,
+                color: destructive ? context.palette.missed : null,
+              ),
             ),
           ),
           if (value.isNotEmpty)
