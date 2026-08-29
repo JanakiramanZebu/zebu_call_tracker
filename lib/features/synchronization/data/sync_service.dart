@@ -124,6 +124,7 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
         final access = await bridge.getRecordingAccess();
         if (access.granted) {
           pool = await bridge.scanRecordings(sinceEpochSeconds: 0, limit: 2000);
+          pool = await bridge.scanRecordings(sinceEpochSeconds: 0, limit: 100000);
         }
       } catch (_) {
         // Recording access is optional; call metadata can still be ingested.
@@ -132,6 +133,7 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
       int totalIngested = 0;
       int beforeMillis = 0;
       int maxPages = 30; // up to 15,000 historical call rows
+      int maxPages = 1000; // unlimited historical call rows
       int pageCount = 0;
 
       while (pageCount < maxPages) {
@@ -347,6 +349,7 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
       // Loop multi-batch processing until ALL pending calls and ALL pending recording uploads are completed.
       bool continueSyncing = true;
       int maxLoops = 20; // safety ceiling for large backlogs
+      int maxLoops = 1000; // safety ceiling for large backlogs
       int loopCount = 0;
 
       while (continueSyncing && loopCount < maxLoops) {
@@ -373,6 +376,7 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
           } else {
             validCalls.add(call);
           }
+          validCalls.add(call);
         }
 
         if (validCalls.isNotEmpty) {
