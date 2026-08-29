@@ -1,7 +1,10 @@
 package `in`.mynt.zebu_call_tracker.platform
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import `in`.mynt.zebu_call_tracker.call.CallLogReader
 import `in`.mynt.zebu_call_tracker.call.CallStateJournal
 import `in`.mynt.zebu_call_tracker.call.CallStateMonitor
@@ -10,6 +13,7 @@ import `in`.mynt.zebu_call_tracker.call.Dialer
 import `in`.mynt.zebu_call_tracker.call.SimInfoReader
 import `in`.mynt.zebu_call_tracker.background.BackgroundScheduler
 import `in`.mynt.zebu_call_tracker.background.IngestStore
+import `in`.mynt.zebu_call_tracker.overlay.PostCallData
 import `in`.mynt.zebu_call_tracker.permissions.BatteryOptimization
 import `in`.mynt.zebu_call_tracker.permissions.PermissionInspector
 import `in`.mynt.zebu_call_tracker.recording.RecordingCapabilityProbe
@@ -32,9 +36,11 @@ import io.flutter.plugin.common.MethodChannel
  */
 class NativeBridge(private val context: Context) : MethodChannel.MethodCallHandler {
 
-    private lateinit var methodChannel: MethodChannel
-    private lateinit var eventChannel: EventChannel
-    private var monitor: CallStateMonitor? = null
+    private lateinit var methodChannel:  MethodChannel
+    private lateinit var eventChannel:   EventChannel
+    private lateinit var overlayChannel: EventChannel  // post-call "View Details" events
+    private var monitor:         CallStateMonitor?       = null
+    private var overlaySink:     EventChannel.EventSink? = null
 
     fun attach(messenger: BinaryMessenger) {
         methodChannel = MethodChannel(messenger, METHOD_CHANNEL)
@@ -63,13 +69,40 @@ class NativeBridge(private val context: Context) : MethodChannel.MethodCallHandl
                 monitor = null
             }
         })
+
+        overlayChannel = EventChannel(messenger, OVERLAY_CHANNEL)
+        overlayChannel.setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                overlaySink = events
+                // Deliver a pending event that arrived before Dart subscribed.
+                pendingOverlayEvent?.let { events?.success(it) }
+                pendingOverlayEvent = null
+            }
+            override fun onCancel(arguments: Any?) { overlaySink = null }
+        })
     }
 
     fun detach() {
         monitor?.stop()
         monitor = null
+        overlaySink = null
         methodChannel.setMethodCallHandler(null)
         eventChannel.setStreamHandler(null)
+        overlayChannel.setStreamHandler(null)
+    }
+
+    /**
+     * Called by [MainActivity] when it receives an intent with [EXTRA_OPEN_CALL].
+     * Pushes an event to the Dart overlay event stream so [HomeShell] can
+     * navigate to the matching [CallDetailScreen].
+     */
+    fun handleOverlayOpenCall(startedAtMillis: Long) {
+        val payload = mapOf("startedAtMillis" to startedAtMillis)
+        if (overlaySink != null) {
+            overlaySink!!.success(payload)
+        } else {
+            pendingOverlayEvent = payload   // deliver once Dart subscribes
+        }
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
@@ -209,6 +242,27 @@ class NativeBridge(private val context: Context) : MethodChannel.MethodCallHandl
                 "openVendorBackgroundSettings" ->
                     result.success(BatteryOptimization.openVendorSettings(context))
 
+                // --- post-call overlay permission ----------------------------
+                "checkOverlayPermission" ->
+                    result.success(Settings.canDrawOverlays(context))
+
+                "requestOverlayPermission" -> {
+                    // Opens the system "Display over other apps" settings page
+                    // for this specific package. Returns true if the intent
+                    // resolved (i.e. the settings page opened). The actual grant
+                    // state is polled by Dart via checkOverlayPermission on resume.
+                    val intent = Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:${context.packageName}"),
+                    ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+                    return try {
+                        context.startActivity(intent)
+                        result.success(true)
+                    } catch (_: Exception) {
+                        result.success(false)
+                    }
+                }
+
                 else -> result.notImplemented()
             }
         } catch (e: RecordingScanner.MissingPermission) {
@@ -237,7 +291,11 @@ class NativeBridge(private val context: Context) : MethodChannel.MethodCallHandl
     )
 
     companion object {
-        private const val METHOD_CHANNEL = "in.mynt.zebu_call_tracker/native"
-        private const val EVENT_CHANNEL = "in.mynt.zebu_call_tracker/call_state"
+        private const val METHOD_CHANNEL  = "in.mynt.zebu_call_tracker/native"
+        private const val EVENT_CHANNEL   = "in.mynt.zebu_call_tracker/call_state"
+        const val         OVERLAY_CHANNEL = "in.mynt.zebu_call_tracker/overlay_events"
+
+        /** Holds an overlay event until the Dart listener subscribes. */
+        private var pendingOverlayEvent: Map<String, Any>? = null
     }
 }

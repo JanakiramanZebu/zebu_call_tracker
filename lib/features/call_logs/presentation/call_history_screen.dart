@@ -30,20 +30,34 @@ class CallHistoryScreen extends ConsumerStatefulWidget {
   ConsumerState<CallHistoryScreen> createState() => _CallHistoryScreenState();
 }
 
-class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen> {
+class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
+    with WidgetsBindingObserver {
   final _scroll = ScrollController();
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _scroll.addListener(_maybeLoadMore);
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _scroll.removeListener(_maybeLoadMore);
     _scroll.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    // A permission grant in system settings will not be visible to this screen
+    // until the next call to the bridge. Refreshing on resume picks it up
+    // without requiring the user to manually pull-to-refresh.
+    if (state == AppLifecycleState.resumed && mounted) {
+      ref.read(callFeedProvider.notifier).refresh();
+    }
   }
 
   /// Fetch the next page while the user is still 600px from the end, so the

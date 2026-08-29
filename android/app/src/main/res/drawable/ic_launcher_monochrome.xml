@@ -1,21 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Themed-icon layer (Android 13+). Identical geometry to the foreground; the
-     launcher tints it, so the fill colour here is only a placeholder. -->
+<!-- Themed-icon layer (Android 13+). Call Tracker vector geometry. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
     <group
-        android:scaleX="1.94"
-        android:scaleY="1.94"
-        android:translateX="35.86"
-        android:translateY="21.12">
+        android:translateX="27"
+        android:translateY="27">
         <path
             android:fillColor="#FFFFFF"
-            android:pathData="M18.7,11.1 L0,5.1 L0,10.35 L12.95,14.5 L0,18.7 L0,23.95 L13.35,19.65 L18.7,17.95 Z" />
+            android:pathData="M13.25,24.19 C15.65,28.9 19.5,32.74 24.21,35.15 L27.88,31.48 C28.34,31.02 29.01,30.87 29.62,31.08 C31.57,31.72 33.68,32.07 35.83,32.07 C36.83,32.07 37.66,32.9 37.66,33.9 L37.66,39.69 C37.66,40.69 36.83,41.52 35.83,41.52 C20.55,41.52 8.18,29.15 8.18,13.87 C8.18,12.87 9.01,12.04 10.01,12.04 L15.8,12.04 C16.8,12.04 17.63,12.87 17.63,13.87 C17.63,16.03 17.97,18.13 18.62,20.08 C18.82,20.69 18.68,21.36 18.22,21.82 L13.25,24.19 Z" />
         <path
-            android:fillColor="#FFFFFF"
-            android:pathData="M0,23.95 L18.65,23.95 L18.65,28.8 L0,28.8 Z" />
+            android:fillColor="#00000000"
+            android:pathData="M27.5,12.04 C30.8,13.8 33.5,16.5 35.26,19.8 M24.5,16.04 C26.2,17 27.5,18.3 28.46,20"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2.5"
+            android:strokeLineCap="round" />
+        <path
+            android:fillColor="#00000000"
+            android:pathData="M22,28 L28,22 L33,26 L42,16 M36,16 L42,16 L42,22"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2.5"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
     </group>
 </vector>
+

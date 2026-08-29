@@ -113,6 +113,28 @@ abstract interface class NativeCallBridge {
 
   /// Opens the OEM background-restriction screen, falling back to app info.
   Future<bool> openVendorBackgroundSettings();
+
+  // --- post-call overlay ---------------------------------------------------
+
+  /// Returns true when [SYSTEM_ALERT_WINDOW] is held.
+  ///
+  /// This is polled on Settings screen resume, not broadcast, because Android
+  /// has no "overlay permission changed" callback.
+  Future<bool> checkOverlayPermission();
+
+  /// Opens the "Display over other apps" settings page for this package.
+  ///
+  /// Returns true if the intent resolved (settings page opened); false on
+  /// exotic OEM builds that lack the screen. The actual grant state must be
+  /// checked via [checkOverlayPermission] after the user returns.
+  Future<bool> requestOverlayPermission();
+
+  /// Emits an event when the user taps "View Details" on the post-call overlay.
+  ///
+  /// Each event is a `Map<String, Object?>` with `startedAtMillis` (int) —
+  /// use this to find the matching call entry in the local DB and push
+  /// [CallDetailScreen].
+  Stream<Map<String, Object?>> overlayEventStream();
 }
 
 class MethodChannelNativeCallBridge implements NativeCallBridge {
@@ -320,6 +342,25 @@ class MethodChannelNativeCallBridge implements NativeCallBridge {
   @override
   Future<bool> openVendorBackgroundSettings() =>
       _invoke<bool>('openVendorBackgroundSettings');
+
+  @override
+  Future<bool> checkOverlayPermission() =>
+      _invoke<bool>('checkOverlayPermission');
+
+  @override
+  Future<bool> requestOverlayPermission() =>
+      _invoke<bool>('requestOverlayPermission');
+
+  static const _overlayEvents =
+      EventChannel('in.mynt.zebu_call_tracker/overlay_events');
+
+  @override
+  Stream<Map<String, Object?>> overlayEventStream() =>
+      _overlayEvents
+          .receiveBroadcastStream()
+          .map((e) => (e as Map<Object?, Object?>).map(
+                (k, v) => MapEntry(k! as String, v),
+              ));
 }
 
 RecordingCandidate _candidateFromPlatform(Map<Object?, Object?> m) =>

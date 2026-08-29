@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -10,12 +10,42 @@ import '../../background/data/background_service.dart';
 import '../../background/presentation/background_card.dart';
 import '../../call_tracking/data/call_feed.dart';
 import '../../permissions/presentation/permission_screen.dart';
+import '../../synchronization/data/sync_service.dart';
 
-class SettingsScreen extends ConsumerWidget {
+class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends ConsumerState<SettingsScreen>
+    with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state == AppLifecycleState.resumed && mounted) {
+      // Permissions may have changed in the system settings panel.
+      ref.invalidate(permissionStatusProvider);
+      // Battery optimisation state may have changed too.
+      ref.invalidate(backgroundStatusProvider);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final device = ref.watch(deviceInfoProvider).value;
     final perms = ref.watch(permissionStatusProvider).value;
     final feed = ref.watch(callFeedProvider).value;
@@ -72,9 +102,6 @@ class SettingsScreen extends ConsumerWidget {
           const SizedBox(height: 16),
           const SectionLabel('Tracking'),
           const SizedBox(height: 8),
-          // Above the permission rows on purpose: whether tracking survives the
-          // app being closed is the question a user actually has, and it is the
-          // one thing a green permission list does not answer.
           const BackgroundStatusCard(),
           const SizedBox(height: 12),
           AppCard(
@@ -112,7 +139,13 @@ class SettingsScreen extends ConsumerWidget {
                 _Row(
                   icon: Icons.sync_rounded,
                   label: 'Sync & upload',
-                  value: 'Not configured',
+                  value: AppConfig.hasServer
+                      ? Uri.parse(AppConfig.apiBaseUrl).host
+                      : 'Not configured',
+                  onTap: () async {
+                    await ref.read(syncServiceProvider.notifier).triggerSync();
+                    ref.invalidate(syncCountersProvider);
+                  },
                   last: true,
                 ),
               ],
@@ -199,10 +232,6 @@ class SettingsScreen extends ConsumerWidget {
     );
   }
 
-  /// Signing out clears the stored token and drops the cached feed, so a shared
-  /// handset does not show the previous user's calls. Confirmed first: the row
-  /// sits one tap away from the neutral ones above it, and coming back needs a
-  /// password the user may not have to hand.
   Future<void> _confirmSignOut(BuildContext context, WidgetRef ref) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -234,9 +263,9 @@ class SettingsScreen extends ConsumerWidget {
   }
 
   Widget _divider(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(left: 52),
-    child: Divider(height: 1, color: context.colors.outlineVariant),
-  );
+        padding: const EdgeInsets.only(left: 52),
+        child: Divider(height: 1, color: context.colors.outlineVariant),
+      );
 }
 
 class _AccountCard extends StatelessWidget {
@@ -246,56 +275,60 @@ class _AccountCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => AppCard(
-    child: Row(
-      children: [
-        Container(
-          width: 48,
-          height: 48,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: context.colors.primary,
-            shape: BoxShape.circle,
-          ),
-          child: Text(
-            session?.initials ?? 'ZB',
-            style: context.text.titleMedium?.copyWith(
-              color: Colors.white,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ),
-        const SizedBox(width: 14),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                session?.displayName ?? 'Not signed in',
-                style: context.text.titleSmall?.copyWith(
+        child: Row(
+          children: [
+            Container(
+              width: 48,
+              height: 48,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: context.colors.primary,
+                shape: BoxShape.circle,
+              ),
+              child: Text(
+                session?.initials ?? 'ZB',
+                style: context.text.titleMedium?.copyWith(
+                  color: Colors.white,
                   fontWeight: FontWeight.w600,
                 ),
               ),
-              const SizedBox(height: 2),
-              Text(
-                session == null
-                    ? 'Sign in to register this device'
-                    : 'Employee ${session!.employeeId}',
-                style: context.text.bodySmall?.copyWith(
-                  color: context.palette.muted,
-                ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    session?.displayName ?? 'Not signed in',
+                    style: context.text.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Builder(builder: (context) {
+                    final currentSession = session;
+                    return Text(
+                      currentSession != null
+                          ? 'Employee ${currentSession.employeeId} · '
+                              '${currentSession.department ?? "Staff"}'
+                          : 'Sign in to register this device',
+                      style: context.text.bodySmall?.copyWith(
+                        color: context.palette.muted,
+                      ),
+                    );
+                  }),
+                ],
               ),
-            ],
-          ),
+            ),
+            if (session != null)
+              StatusPill(
+                label: 'Active',
+                color: context.palette.answered,
+                icon: Icons.check_rounded,
+              ),
+          ],
         ),
-        if (session != null)
-          StatusPill(
-            label: 'Active',
-            color: context.palette.answered,
-            icon: Icons.check_rounded,
-          ),
-      ],
-    ),
-  );
+      );
 }
 
 class _Row extends StatelessWidget {
@@ -313,48 +346,47 @@ class _Row extends StatelessWidget {
   final String value;
   final VoidCallback? onTap;
   final bool last;
-
-  /// Rendered in the error colour, so sign-out cannot be mistaken for one of
-  /// the neutral rows above it.
   final bool destructive;
 
   @override
   Widget build(BuildContext context) => InkWell(
-    onTap: onTap,
-    child: Padding(
-      padding: const EdgeInsets.all(14),
-      child: Row(
-        children: [
-          Icon(
-            icon,
-            size: 19,
-            color: destructive ? context.palette.missed : context.palette.muted,
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Text(
-              label,
-              style: context.text.bodyLarge?.copyWith(
-                fontSize: 15,
-                color: destructive ? context.palette.missed : null,
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Row(
+            children: [
+              Icon(
+                icon,
+                size: 19,
+                color: destructive
+                    ? context.palette.missed
+                    : context.palette.muted,
               ),
-            ),
-          ),
-          if (value.isNotEmpty)
-            Text(
-              value,
-              style: context.text.bodyMedium?.copyWith(
+              const SizedBox(width: 14),
+              Expanded(
+                child: Text(
+                  label,
+                  style: context.text.bodyLarge?.copyWith(
+                    fontSize: 15,
+                    color: destructive ? context.palette.missed : null,
+                  ),
+                ),
+              ),
+              if (value.isNotEmpty)
+                Text(
+                  value,
+                  style: context.text.bodyMedium?.copyWith(
+                    color: context.palette.muted,
+                  ),
+                ),
+              const SizedBox(width: 6),
+              Icon(
+                Icons.chevron_right_rounded,
+                size: 18,
                 color: context.palette.muted,
               ),
-            ),
-          const SizedBox(width: 6),
-          Icon(
-            Icons.chevron_right_rounded,
-            size: 18,
-            color: context.palette.muted,
+            ],
           ),
-        ],
-      ),
-    ),
-  );
+        ),
+      );
 }

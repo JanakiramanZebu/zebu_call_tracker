@@ -2,25 +2,22 @@ import 'package:flutter/material.dart';
 
 import 'ui_kit.dart';
 
-/// The Zebu mark, drawn rather than shipped as an asset.
+/// The official Call Tracker app icon glyph drawn natively in Flutter.
 ///
-/// The glyph is the same geometry as the launcher icon
-/// (`res/drawable/ic_launcher_foreground.xml`), transcribed once from
-/// design/zebu_logo.svg. Drawing it means the splash, the login header and the
-/// launcher can never drift apart, and the app carries no image asset that has
-/// to be re-exported per density.
+/// Transcribed directly from `res/drawable/ic_launcher_foreground.xml` so the app icon
+/// in Android launcher, the splash screen, and the in-app headers remain 100% identical.
 class ZebuMark extends StatelessWidget {
   const ZebuMark({super.key, this.size = 40, this.color});
 
-  /// Height of the glyph in logical pixels. Width follows the 18.7:23.7 ratio.
+  /// Size of the glyph in logical pixels. Aspect ratio is 1.0 (square).
   final double size;
   final Color? color;
 
   @override
   Widget build(BuildContext context) => CustomPaint(
-    size: Size(size * _ZebuMarkPainter.aspect, size),
-    painter: _ZebuMarkPainter(color ?? context.colors.primary),
-  );
+        size: Size(size, size),
+        painter: _ZebuMarkPainter(color ?? context.colors.primary),
+      );
 }
 
 class _ZebuMarkPainter extends CustomPainter {
@@ -28,56 +25,77 @@ class _ZebuMarkPainter extends CustomPainter {
 
   final Color color;
 
-  /// Source glyph bounds in design/zebu_logo.svg viewBox units.
-  static const _w = 18.7;
-  static const _h = 23.7;
-  static const _top = 5.1;
-  static const aspect = _w / _h;
-
-  static const _arrow = <Offset>[
-    Offset(18.7, 11.1),
-    Offset(0, 5.1),
-    Offset(0, 10.35),
-    Offset(12.95, 14.5),
-    Offset(0, 18.7),
-    Offset(0, 23.95),
-    Offset(13.35, 19.65),
-    Offset(18.7, 17.95),
-  ];
-
-  static const _bar = <Offset>[
-    Offset(0, 23.95),
-    Offset(18.65, 23.95),
-    Offset(18.65, 28.8),
-    Offset(0, 28.8),
-  ];
-
   @override
   void paint(Canvas canvas, Size size) {
-    final s = size.height / _h;
-    final paint = Paint()
+    // Target size scale factor from design viewBox (36x36)
+    final scale = size.height / 36.0;
+
+    canvas.save();
+    canvas.scale(scale, scale);
+    canvas.translate(-7.8, -9.5);
+
+    final fillPaint = Paint()
       ..color = color
+      ..style = PaintingStyle.fill
       ..isAntiAlias = true;
 
-    Path shape(List<Offset> pts) {
-      final path = Path();
-      for (var i = 0; i < pts.length; i++) {
-        final p = Offset(pts[i].dx * s, (pts[i].dy - _top) * s);
-        i == 0 ? path.moveTo(p.dx, p.dy) : path.lineTo(p.dx, p.dy);
-      }
-      return path..close();
-    }
+    final strokePaint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.4
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..isAntiAlias = true;
 
-    canvas
-      ..drawPath(shape(_arrow), paint)
-      ..drawPath(shape(_bar), paint);
+    // 1. Phone Receiver path from ic_launcher_foreground.xml
+    final phonePath = Path()
+      ..moveTo(13.25, 24.19)
+      ..cubicTo(15.65, 28.9, 19.5, 32.74, 24.21, 35.15)
+      ..lineTo(27.88, 31.48)
+      ..cubicTo(28.34, 31.02, 29.01, 30.87, 29.62, 31.08)
+      ..cubicTo(31.57, 31.72, 33.68, 32.07, 35.83, 32.07)
+      ..cubicTo(36.83, 32.07, 37.66, 32.9, 37.66, 33.9)
+      ..lineTo(37.66, 39.69)
+      ..cubicTo(37.66, 40.69, 36.83, 41.52, 35.83, 41.52)
+      ..cubicTo(20.55, 41.52, 8.18, 29.15, 8.18, 13.87)
+      ..cubicTo(8.18, 12.87, 9.01, 12.04, 10.01, 12.04)
+      ..lineTo(15.8, 12.04)
+      ..cubicTo(16.8, 12.04, 17.63, 12.87, 17.63, 13.87)
+      ..cubicTo(17.63, 16.03, 17.97, 18.13, 18.62, 20.08)
+      ..cubicTo(18.82, 20.69, 18.68, 21.36, 18.22, 21.82)
+      ..close();
+
+    canvas.drawPath(phonePath, fillPaint);
+
+    // 2. Signal Waves arc paths from ic_launcher_foreground.xml
+    final wavesPath = Path()
+      ..moveTo(27.5, 12.04)
+      ..cubicTo(30.8, 13.8, 33.5, 16.5, 35.26, 19.8)
+      ..moveTo(24.5, 16.04)
+      ..cubicTo(26.2, 17.0, 27.5, 18.3, 28.46, 20.0);
+
+    canvas.drawPath(wavesPath, strokePaint);
+
+    // 3. Tracking Chart Arrow polyline paths from ic_launcher_foreground.xml
+    final chartPath = Path()
+      ..moveTo(22.0, 28.0)
+      ..lineTo(28.0, 22.0)
+      ..lineTo(33.0, 26.0)
+      ..lineTo(42.0, 16.0)
+      ..moveTo(36.0, 16.0)
+      ..lineTo(42.0, 16.0)
+      ..lineTo(42.0, 22.0);
+
+    canvas.drawPath(chartPath, strokePaint);
+
+    canvas.restore();
   }
 
   @override
   bool shouldRepaint(_ZebuMarkPainter old) => old.color != color;
 }
 
-/// Mark on a brand-blue rounded tile — the app icon, reproduced in-app.
+/// Mark on a brand-blue rounded tile — the official App Icon reproduced in-app.
 class ZebuAppMark extends StatelessWidget {
   const ZebuAppMark({super.key, this.size = 72});
 
@@ -85,18 +103,18 @@ class ZebuAppMark extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
-    width: size,
-    height: size,
-    alignment: Alignment.center,
-    decoration: BoxDecoration(
-      color: context.colors.primary,
-      borderRadius: BorderRadius.circular(size * 0.24),
-    ),
-    child: ZebuMark(size: size * 0.5, color: Colors.white),
-  );
+        width: size,
+        height: size,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: context.colors.primary,
+          borderRadius: BorderRadius.circular(size * 0.24),
+        ),
+        child: ZebuMark(size: size * 0.52, color: Colors.white),
+      );
 }
 
-/// Mark + product name, used as the login header.
+/// Mark + product name, used as the login lockup header.
 class ZebuLockup extends StatelessWidget {
   const ZebuLockup({super.key, this.markSize = 34});
 
@@ -104,19 +122,19 @@ class ZebuLockup extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Row(
-    mainAxisSize: MainAxisSize.min,
-    crossAxisAlignment: CrossAxisAlignment.center,
-    children: [
-      ZebuMark(size: markSize),
-      SizedBox(width: markSize * 0.4),
-      Text(
-        'Call Tracker',
-        style: context.text.titleLarge?.copyWith(
-          fontWeight: FontWeight.w700,
-          letterSpacing: -0.4,
-          fontSize: markSize * 0.62,
-        ),
-      ),
-    ],
-  );
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          ZebuMark(size: markSize),
+          SizedBox(width: markSize * 0.4),
+          Text(
+            'Call Tracker',
+            style: context.text.titleLarge?.copyWith(
+              fontWeight: FontWeight.w700,
+              letterSpacing: -0.4,
+              fontSize: markSize * 0.62,
+            ),
+          ),
+        ],
+      );
 }

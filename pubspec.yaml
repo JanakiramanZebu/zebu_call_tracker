@@ -43,6 +43,7 @@ dependencies:
   intl: ^0.20.3
   package_info_plus: ^10.2.1
   path_provider: ^2.1.6
+  path: ^1.9.0
   device_info_plus: ^13.2.0
   permission_handler: 12.0.1
   # Local database. drift/drift_dev are PINNED as an exact pair and must be
@@ -66,6 +67,7 @@ dependencies:
   # Recording playback. ExoPlayer underneath, which resolves content:// URIs
   # directly, so MediaStore audio plays without copying the file out first.
   just_audio: ^0.10.6
+  flutter_local_notifications: ^18.0.1
 
 dev_dependencies:
   flutter_test:

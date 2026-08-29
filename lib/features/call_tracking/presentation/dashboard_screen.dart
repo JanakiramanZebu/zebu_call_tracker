@@ -12,9 +12,18 @@ import '../domain/call_entry.dart';
 import 'call_detail_screen.dart';
 
 class DashboardScreen extends ConsumerWidget {
-  const DashboardScreen({super.key, required this.onSeeAllCalls});
+  const DashboardScreen({
+    super.key,
+    required this.onSeeAllCalls,
+    this.pendingSyncCount = 0,
+  });
 
   final VoidCallback onSeeAllCalls;
+
+  /// Number of calls in the local outbox that have not yet been confirmed by
+  /// the server. Passed in from [HomeShell] which watches [syncCountersProvider]
+  /// so the badge stays in sync across tabs without re-reading the DB here.
+  final int pendingSyncCount;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -41,7 +50,7 @@ class DashboardScreen extends ConsumerWidget {
         actions: [
           Padding(
             padding: const EdgeInsets.only(right: 16),
-            child: _SyncBadge(pending: feed.value?.entries.length ?? 0),
+            child: _SyncBadge(pending: pendingSyncCount),
           ),
         ],
       ),
@@ -151,27 +160,37 @@ class _SyncBadge extends StatelessWidget {
   final int pending;
 
   @override
-  Widget build(BuildContext context) => Container(
-    height: 32,
-    padding: const EdgeInsets.symmetric(horizontal: 12),
-    decoration: BoxDecoration(
-      color: context.palette.tint,
-      borderRadius: BorderRadius.circular(8),
-    ),
-    child: Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(Icons.sync_rounded, size: 16, color: context.palette.answered),
-        const SizedBox(width: 8),
-        Text(
-          'Local',
-          style: context.text.labelMedium?.copyWith(
-            fontWeight: FontWeight.w600,
+  Widget build(BuildContext context) {
+    final hasPending = pending > 0;
+    final color = hasPending ? context.palette.waiting : context.palette.answered;
+    final icon = hasPending ? Icons.cloud_upload_outlined : Icons.cloud_done_rounded;
+    final label = hasPending ? '$pending pending' : 'Synced';
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 250),
+      height: 32,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withValues(alpha: 0.30), width: 1),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 15, color: color),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: context.text.labelMedium?.copyWith(
+              fontWeight: FontWeight.w600,
+              color: color,
+            ),
           ),
-        ),
-      ],
-    ),
-  );
+        ],
+      ),
+    );
+  }
 }
 
 /// Talk time leads the dashboard: it is the number a manager actually asks

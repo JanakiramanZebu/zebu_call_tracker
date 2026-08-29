@@ -3,15 +3,22 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'core/config/app_config.dart';
+import 'core/network/connectivity_service.dart';
+import 'core/notifications/notification_service.dart';
 import 'core/theme/app_theme.dart';
 import 'features/auth/data/auth_controller.dart';
 import 'features/auth/presentation/login_screen.dart';
 import 'features/auth/presentation/splash_screen.dart';
 import 'features/background/data/background_service.dart';
 import 'features/call_logs/presentation/call_history_screen.dart';
+import 'features/call_tracking/data/call_feed.dart';
+import 'features/call_tracking/domain/call_entry.dart';
+import 'features/call_tracking/presentation/call_detail_screen.dart';
 import 'features/call_tracking/presentation/dashboard_screen.dart';
 import 'features/permissions/presentation/permission_onboarding_screen.dart';
+import 'features/post_call/data/post_call_event_provider.dart';
 import 'features/settings/presentation/settings_screen.dart';
+import 'features/synchronization/data/sync_service.dart';
 import 'features/synchronization/presentation/sync_screen.dart';
 
 class CallTrackerApp extends StatelessWidget {
@@ -23,8 +30,6 @@ class CallTrackerApp extends StatelessWidget {
     debugShowCheckedModeBanner: false,
     theme: AppTheme.light(),
     darkTheme: AppTheme.dark(),
-    // Follows the device. Field staff work in varied light and the palette
-    // is defined for both, so there is no reason to force one.
     themeMode: ThemeMode.system,
     home: const AppGate(),
   );
@@ -53,9 +58,7 @@ class AppGate extends ConsumerWidget {
       data: (session) {
         if (session == null) return const LoginScreen(key: ValueKey('login'));
 
-        // Signed in: the permission walkthrough runs once per install. Its own
-        // provider is async (SharedPreferences), so hold the splash rather than
-        // flashing the walkthrough at a user who finished it months ago.
+        // Signed in: the permission walkthrough runs once per install.
         return ref
             .watch(onboardingProvider)
             .when(
@@ -72,9 +75,7 @@ class AppGate extends ConsumerWidget {
     // System chrome is set here rather than per screen. SystemChrome is
     // imperative underneath, so a value pushed by one screen's AnnotatedRegion
     // survives that screen being removed — which is how the splash's brand-blue
-    // navigation bar leaked into the login screen. Declaring the app-wide style
-    // at the root means every screen without an opinion gets the right one, and
-    // the splash's own region simply nests inside and wins while it is shown.
+    // navigation bar leaked into the login screen.
     final isLight = Theme.of(context).brightness == Brightness.light;
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: SystemUiOverlayStyle(
@@ -87,9 +88,6 @@ class AppGate extends ConsumerWidget {
             : Brightness.light,
         systemNavigationBarDividerColor: Colors.transparent,
       ),
-      // A cross-fade rather than a page transition: these are swaps of the whole
-      // app surface, not steps in a stack, and a slide would imply a back
-      // gesture that does not exist.
       child: AnimatedSwitcher(
         duration: const Duration(milliseconds: 220),
         child: screen,
@@ -112,22 +110,39 @@ class _HomeShellState extends ConsumerState<HomeShell>
     with WidgetsBindingObserver {
   int _index = 0;
 
+  /// Tracks the previous connectivity state so we only sync on the
+  /// offline → online transition, not on every emission.
+  bool? _wasConnected;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
 
-    // Background ingest is armed here rather than at launch: reaching this
-    // screen means the user is signed in and past the walkthrough, so calls
-    // captured from now on belong to a known employee record.
-    //
-    // Deferred past the first frame so neither the WorkManager enqueue nor the
-    // drain competes with building the dashboard.
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
+
+      // Initialize notifications on the first real frame.
+      await NotificationService.instance.initialize();
+
+      // Arm background ingest now that the user is signed in and past the
+      // permission walkthrough. Deferred past the first frame so it does not
+      // compete with the initial paint.
       final background = ref.read(backgroundControllerProvider.notifier);
       await background.start();
       await background.drain();
+
+      // Set up the connectivity listener for auto-sync.
+      ref.listen<AsyncValue<bool>>(connectivityProvider, _onConnectivityChanged);
+
+      // Set up the post-call overlay navigation listener.
+      ref.listen<AsyncValue<PostCallNavigationEvent>>(
+        postCallEventProvider,
+        (_, next) {
+          final event = next.asData?.value;
+          if (event != null) _openCallFromOverlay(event);
+        },
+      );
     });
   }
 
@@ -137,24 +152,108 @@ class _HomeShellState extends ConsumerState<HomeShell>
     super.dispose();
   }
 
+  /// Fires whenever the network state changes.
+  ///
+  /// Only triggers a sync on the offline → online transition so we are not
+  /// spamming the server every time the Riverpod provider re-emits the same
+  /// "connected" value.
+  void _onConnectivityChanged(
+    AsyncValue<bool>? previous,
+    AsyncValue<bool> next,
+  ) {
+    final isConnected = next.asData?.value;
+    if (isConnected == null) return;
+
+    final wasConnected = _wasConnected;
+    _wasConnected = isConnected;
+
+    if (isConnected && wasConnected == false) {
+      // Just came back online — drain the outbox.
+      _triggerAutoSync();
+    } else if (!isConnected) {
+      // Just went offline — show a reminder if there is pending data.
+      _maybeShowOfflineReminder();
+    }
+  }
+
+  Future<void> _triggerAutoSync() async {
+    if (!mounted) return;
+    await ref.read(backgroundControllerProvider.notifier).drain();
+    await ref.read(syncServiceProvider.notifier).triggerSync();
+    ref.invalidate(syncCountersProvider);
+  }
+
+  Future<void> _maybeShowOfflineReminder() async {
+    if (!mounted) return;
+    final counters = await ref.read(syncCountersProvider.future);
+    final waiting = counters['waiting'] ?? 0;
+    if (waiting > 0) {
+      await NotificationService.instance.showSyncReminder(waiting);
+    }
+  }
+
+  /// Called when the user taps "View Details" on the post-call overlay.
+  ///
+  /// Tries to find the exact call entry by [startedAtMillis]. If the feed has
+  /// it, navigates directly to [CallDetailScreen]. If not (the WorkManager
+  /// reconcile hasn't run yet), switches to the Calls tab so the user can
+  /// tap it once it appears.
+  void _openCallFromOverlay(PostCallNavigationEvent event) {
+    if (!mounted) return;
+
+    final entries = ref.read(callFeedProvider).value?.entries ?? const <CallEntry>[];
+    if (entries.isEmpty) {
+      setState(() => _index = 1);
+      return;
+    }
+
+    // Find the call by its start timestamp; fall back to the most recent one.
+    final match = entries.cast<CallEntry?>().firstWhere(
+      (e) => e!.row.dateMillis == event.startedAtMillis,
+      orElse: () => null,
+    );
+
+    if (match != null) {
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => CallDetailScreen(entry: match),
+        ),
+      );
+    } else {
+      // Reconcile hasn't run yet — switch to Calls tab.
+      setState(() => _index = 1);
+    }
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
-    // Coming back to the app is the moment anything captured while it was
-    // closed should appear. `drain` is a no-op when the worker captured
-    // nothing, so this is cheap on a resume that follows a quick app switch.
     if (state == AppLifecycleState.resumed && mounted) {
-      ref.read(backgroundControllerProvider.notifier).drain();
+      // Coming back to the app: fold in anything the background worker
+      // captured, then try to push any queued data to the server.
+      ref.read(backgroundControllerProvider.notifier).drain().then((_) {
+        if (!mounted) return;
+        ref.read(syncServiceProvider.notifier).triggerSync().then((_) {
+          if (mounted) ref.invalidate(syncCountersProvider);
+        });
+      });
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    // Watch sync counters so the badge rebuilds when the count changes.
+    final countersAsync = ref.watch(syncCountersProvider);
+    final waiting = countersAsync.asData?.value['waiting'] ?? 0;
+
     return Scaffold(
       body: IndexedStack(
         index: _index,
         children: [
-          DashboardScreen(onSeeAllCalls: () => setState(() => _index = 1)),
+          DashboardScreen(
+            onSeeAllCalls: () => setState(() => _index = 1),
+            pendingSyncCount: waiting,
+          ),
           const CallHistoryScreen(),
           const SyncScreen(),
           const SettingsScreen(),
@@ -163,23 +262,31 @@ class _HomeShellState extends ConsumerState<HomeShell>
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
         onDestinationSelected: (i) => setState(() => _index = i),
-        destinations: const [
-          NavigationDestination(
+        destinations: [
+          const NavigationDestination(
             icon: Icon(Icons.home_outlined),
             selectedIcon: Icon(Icons.home_rounded),
             label: 'Home',
           ),
-          NavigationDestination(
+          const NavigationDestination(
             icon: Icon(Icons.call_outlined),
             selectedIcon: Icon(Icons.call_rounded),
             label: 'Calls',
           ),
           NavigationDestination(
-            icon: Icon(Icons.sync_outlined),
-            selectedIcon: Icon(Icons.sync_rounded),
+            icon: Badge(
+              isLabelVisible: waiting > 0,
+              label: Text('$waiting'),
+              child: const Icon(Icons.sync_outlined),
+            ),
+            selectedIcon: Badge(
+              isLabelVisible: waiting > 0,
+              label: Text('$waiting'),
+              child: const Icon(Icons.sync_rounded),
+            ),
             label: 'Sync',
           ),
-          NavigationDestination(
+          const NavigationDestination(
             icon: Icon(Icons.settings_outlined),
             selectedIcon: Icon(Icons.settings_rounded),
             label: 'Settings',

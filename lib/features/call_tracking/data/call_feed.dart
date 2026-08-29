@@ -24,6 +24,7 @@ final permissionStatusProvider = FutureProvider.autoDispose<PermissionSnapshot>(
     // does not exist below API 33, and permission_handler already reports
     // "granted" there. Checking status never raises a dialog.
     final notifications = await Permission.notification.isGranted;
+    final overlay = await bridge.checkOverlayPermission();
     return PermissionSnapshot(
       readPhoneState: calls['readPhoneState'] ?? false,
       readCallLog: calls['readCallLog'] ?? false,
@@ -31,6 +32,7 @@ final permissionStatusProvider = FutureProvider.autoDispose<PermissionSnapshot>(
       readMediaAudio: recordings.granted,
       mediaPermissionName: recordings.permission,
       notifications: notifications,
+      overlayWindow: overlay,
     );
   },
 );
@@ -43,6 +45,7 @@ class PermissionSnapshot {
     required this.readMediaAudio,
     required this.mediaPermissionName,
     required this.notifications,
+    this.overlayWindow = false,
   });
 
   final bool readPhoneState;
@@ -52,6 +55,10 @@ class PermissionSnapshot {
   final String mediaPermissionName;
   final bool notifications;
 
+  /// SYSTEM_ALERT_WINDOW — for the post-call overlay card.
+  /// Defaults to false so existing call sites do not break.
+  final bool overlayWindow;
+
   /// Call log is the only hard requirement — everything else degrades.
   bool get canTrack => readCallLog;
 
@@ -60,11 +67,12 @@ class PermissionSnapshot {
     readContacts,
     readMediaAudio,
     notifications,
+    overlayWindow,
   ].where((g) => g).length;
 
   /// One per entry in `permissionAsks`; the phone/call-log pair counts as one
   /// ask because the user is shown one card for it.
-  static const total = 4;
+  static const total = 5;
 }
 
 /// The call feed: log rows joined to whatever recording matched them.

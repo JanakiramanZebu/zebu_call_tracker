@@ -47,6 +47,15 @@
     <!-- Sync/upload status notifications (runtime-requested on API 33+). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Post-call overlay (Truecaller-style card after each call).
+         Users grant this once via the "Display over other apps" settings page;
+         we open it with ACTION_MANAGE_OVERLAY_PERMISSION. Without it the
+         overlay silently does not appear — no crash, no permission dialog loop.
+         FOREGROUND_SERVICE_PHONE_CALL is declared because the overlay service
+         needs foreground on API 34+ when launched from a background receiver. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+
     <!-- Reboot recovery: re-arm the call-state receiver and resume the queue.
          Handler is strictly idempotent — see docs/architecture.md. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -95,6 +104,14 @@
                 <action android:name="android.intent.action.PHONE_STATE" />
             </intent-filter>
         </receiver>
+
+        <!-- Post-call overlay service. Launched by CallStateReceiver on IDLE;
+             draws a TYPE_APPLICATION_OVERLAY view via WindowManager. Never
+             kept running — dismisses itself after 8 seconds or on user tap. -->
+        <service
+            android:name=".overlay.PostCallOverlayService"
+            android:exported="false"
+            android:foregroundServiceType="phoneCall" />
 
         <!-- Reboot and app-update recovery. Both broadcasts are explicit
              wake-ups for a stopped package, so exported="true" is required:

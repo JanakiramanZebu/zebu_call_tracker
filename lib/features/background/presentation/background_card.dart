@@ -15,13 +15,15 @@ import '../data/background_service.dart';
 /// shows when the last capture happened and, when the OS is restricting it,
 /// says so and offers the fix.
 class BackgroundStatusCard extends ConsumerWidget {
-  const BackgroundStatusCard({super.key, this.onOpenSettings});
+  const BackgroundStatusCard({super.key, this.statusAsync, this.onOpenSettings});
 
+  final AsyncValue<BackgroundStatus>? statusAsync;
   final VoidCallback? onOpenSettings;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final status = ref.watch(backgroundStatusProvider);
+    final AsyncValue<BackgroundStatus> status =
+        statusAsync ?? ref.watch(backgroundStatusProvider);
 
     return status.when(
       loading: () => const AppCard(
@@ -183,8 +185,9 @@ class _Body extends ConsumerWidget {
   }
 
   String _subtitle(BackgroundStatus s) {
-    if (!s.hasRun) return 'Waiting for the first check';
-    final when = Fmt.relative(s.lastRunAtUtc!);
+    final lastRunAt = s.lastRunAtUtc;
+    if (lastRunAt == null) return 'Waiting for the first check';
+    final when = Fmt.relative(lastRunAt);
     return switch (s.lastRunReason) {
       'call-ended' => 'Last checked $when, after a call',
       'boot' => 'Last checked $when, after restart',

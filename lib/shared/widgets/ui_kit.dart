@@ -292,17 +292,17 @@ class CallRowTile extends ConsumerWidget {
             const SizedBox(width: 8),
             // The play control sits outside the row's InkWell so tapping it
             // starts audio instead of opening the detail screen.
-            if (entry.recording != null) ...[
-              RecordingPlayButton(candidate: entry.recording!, size: 32),
+            if (entry.recording case final rec?) ...[
+              RecordingPlayButton(candidate: rec, size: 32),
               const SizedBox(width: 10),
             ],
             Column(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
                 Text(
-                  entry.startedAtUtc == null
-                      ? '--:--'
-                      : Fmt.clock(entry.startedAtUtc!),
+                  entry.startedAtUtc != null
+                      ? Fmt.clock(entry.startedAtUtc!)
+                      : '--:--',
                   style: context.text.bodySmall?.copyWith(
                     color: context.palette.muted,
                     fontFeatures: const [FontFeature.tabularFigures()],
@@ -380,13 +380,13 @@ class EmptyState extends StatelessWidget {
               height: 1.5,
             ),
           ),
-          if (actionLabel != null) ...[
+          if (actionLabel case final labelText?) ...[
             const SizedBox(height: 24),
             SizedBox(
               width: 220,
               child: FilledButton(
                 onPressed: onAction,
-                child: Text(actionLabel!),
+                child: Text(labelText),
               ),
             ),
           ],

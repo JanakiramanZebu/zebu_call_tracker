@@ -63,6 +63,8 @@ mixin PermissionFlowMixin<T extends ConsumerStatefulWidget>
       switch (ask.kind) {
         case AskKind.backgroundActivity:
           await _requestBackground();
+        case AskKind.overlayWindow:
+          await _requestOverlay();
         case AskKind.runtime:
           await _requestRuntime(ask);
       }
@@ -74,11 +76,13 @@ mixin PermissionFlowMixin<T extends ConsumerStatefulWidget>
   Future<void> _requestBackground() async {
     final controller = ref.read(backgroundControllerProvider.notifier);
     final opened = await controller.requestBatteryExemption();
-    // Some OEM builds and MDM policies suppress the standard prompt entirely.
-    // Falling through to the vendor screen is better than a button that
-    // appears to do nothing at all.
     if (!opened) await controller.openVendorSettings();
-    // The answer arrives when the user returns; the resume observer re-reads.
+  }
+
+  Future<void> _requestOverlay() async {
+    final bridge = ref.read(nativeBridgeProvider);
+    await bridge.requestOverlayPermission();
+    // The user returns from Settings and the lifecycle observer re-reads.
   }
 
   Future<void> _requestRuntime(PermissionAsk ask) async {

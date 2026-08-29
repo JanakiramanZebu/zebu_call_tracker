@@ -6,11 +6,10 @@ import '../../call_tracking/data/call_feed.dart';
 
 /// How an ask is granted.
 ///
-/// Background activity is not a runtime permission and has no `request()` — it
-/// is a settings screen the user has to complete themselves. Modelling that
-/// difference here keeps the UI honest: the card can say "Open settings"
-/// instead of promising a dialog that will never appear.
-enum AskKind { runtime, backgroundActivity }
+/// [backgroundActivity] is a settings screen the user has to complete themselves.
+/// [overlayWindow] also goes to a settings screen (ACTION_MANAGE_OVERLAY_PERMISSION)
+/// rather than an Android runtime-permission dialog.
+enum AskKind { runtime, backgroundActivity, overlayWindow }
 
 /// One thing the app asks for, with the reason the user is being asked.
 ///
@@ -115,6 +114,17 @@ List<PermissionAsk> permissionAsks(
         'you noticing.',
     icon: Icons.notifications_none_rounded,
     granted: perms.notifications,
+  ),
+  PermissionAsk(
+    id: 'overlay',
+    kind: AskKind.overlayWindow,
+    title: 'Post-call card',
+    why:
+        'Shows a summary card immediately after each call — the contact name, '
+        'duration, and whether a recording was found. Works like the Truecaller '
+        'overlay. You can disable it here at any time.',
+    icon: Icons.picture_in_picture_rounded,
+    granted: perms.overlayWindow,
   ),
 ];
 

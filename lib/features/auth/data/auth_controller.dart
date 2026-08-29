@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../background/data/background_service.dart';
 import '../../call_tracking/data/call_feed.dart';
+import '../../synchronization/data/sync_service.dart';
 import '../domain/session.dart';
 import 'auth_repository.dart';
 
@@ -10,26 +11,17 @@ final authRepositoryProvider = Provider<AuthRepository>(
   (ref) => buildAuthRepository(),
 );
 
-/// The signed-in session, or null.
-///
-/// The controller's own state is only ever *restoring* (on launch) or settled.
-/// A sign-in attempt deliberately does NOT flip it back to loading: the login
-/// screen owns that spinner, and putting the whole app back on the splash for
-/// three quarters of a second would be a worse experience than a busy button.
 class AuthController extends AsyncNotifier<Session?> {
   @override
   Future<Session?> build() => ref.read(authRepositoryProvider).restore();
 
-  /// Throws [AuthFailure]; the caller renders the message.
   Future<Session> signIn({
-    required String employeeId,
-    required String password,
+    required String clientId,
+    required String mobileNumber,
+    required String deviceId,
   }) async {
     final repo = ref.read(authRepositoryProvider);
 
-    // Device identity is registered alongside the credentials, so the server
-    // can attribute calls to this handset. A device that cannot be read is not
-    // a reason to block sign-in.
     Map<String, Object?> device;
     try {
       device = await ref.read(deviceInfoProvider.future);
@@ -38,30 +30,92 @@ class AuthController extends AsyncNotifier<Session?> {
     }
 
     final session = await repo.signIn(
-      employeeId: employeeId,
-      password: password,
+      clientId: clientId,
+      mobileNumber: mobileNumber,
+      deviceId: deviceId,
       device: device,
     );
+
+    if (!session.deviceRegistered) {
+      try {
+        final deviceRepo = ref.read(deviceRepositoryProvider);
+        await deviceRepo.registerDevice(deviceInfo: device);
+      } catch (_) {
+        // Device registration attempt failed silently; will retry on sync
+      }
+    }
+
     state = AsyncData(session);
+
+    // Initial sync trigger in background after sign-in
+    Future.microtask(() async {
+      try {
+        await ref.read(syncServiceProvider.notifier).triggerSync();
+      } catch (_) {
+        // Sync trigger failed silently
+      }
+    });
+
+    return session;
+  }
+
+  Future<Session> signInWithPairingWord({
+    required String pairingWord,
+    required String employeeCode,
+    required String name,
+    required String phone,
+    required String department,
+    required String designation,
+    required String location,
+    required String mobileUniqueId,
+  }) async {
+    final repo = ref.read(authRepositoryProvider);
+
+    Map<String, Object?> device;
+    try {
+      device = await ref.read(deviceInfoProvider.future);
+    } on Object {
+      device = const {};
+    }
+
+    final session = await repo.signInWithPairingWord(
+      pairingWord: pairingWord,
+      employeeCode: employeeCode,
+      name: name,
+      phone: phone,
+      department: department,
+      designation: designation,
+      location: location,
+      deviceName: device['model'] as String? ?? 'Android Handset',
+      manufacturer: device['manufacturer'] as String? ?? 'Generic',
+      model: device['model'] as String? ?? 'Unknown',
+      osVersion: device['version'] as String? ?? '14',
+      appVersion: '1.0.0',
+      mobileUniqueId: mobileUniqueId,
+    );
+
+    state = AsyncData(session);
+
+    Future.microtask(() async {
+      try {
+        await ref.read(syncServiceProvider.notifier).triggerSync();
+      } catch (_) {}
+    });
+
     return session;
   }
 
   Future<void> signOut() async {
-    // Stop capturing FIRST. A handset with no signed-in employee has no record
-    // to attribute calls to, and continuing to snapshot them after sign-out
-    // would collect data with nowhere legitimate to send it.
     try {
       await ref.read(backgroundControllerProvider.notifier).stop();
     } on Object {
-      // A scheduler that refuses to cancel must not trap the user in a session
-      // they asked to leave.
+      // Ignore background stop error during sign out
     }
 
     await ref.read(authRepositoryProvider).signOut();
     state = const AsyncData(null);
-    // The next user of this handset must not inherit the previous one's call
-    // list, so the feed is dropped rather than left cached.
     ref.invalidate(callFeedProvider);
+    ref.invalidate(syncServiceProvider);
   }
 }
 
@@ -69,9 +123,6 @@ final authControllerProvider = AsyncNotifierProvider<AuthController, Session?>(
   AuthController.new,
 );
 
-/// True once the user has been walked through the permission screen at least
-/// once. Stored per install, not per session: the grants themselves are the
-/// real state, and this only decides whether the *walkthrough* is shown.
 class OnboardingController extends AsyncNotifier<bool> {
   static const _key = 'zebu.onboarding.permissions.v1';
 
@@ -87,7 +138,6 @@ class OnboardingController extends AsyncNotifier<bool> {
     state = const AsyncData(true);
   }
 
-  /// Used by "Redo setup" in Settings.
   Future<void> reset() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_key);

@@ -259,10 +259,10 @@ class InlineLoader extends StatelessWidget {
           color: context.colors.primary,
         ),
       ),
-      if (label != null) ...[
+      if (label case final text?) ...[
         const SizedBox(width: 10),
         Text(
-          label!,
+          text,
           style: context.text.bodySmall?.copyWith(color: context.palette.muted),
         ),
       ],
