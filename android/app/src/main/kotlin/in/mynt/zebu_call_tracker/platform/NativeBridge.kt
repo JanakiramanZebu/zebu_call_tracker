@@ -197,6 +197,25 @@ class NativeBridge(private val context: Context) : MethodChannel.MethodCallHandl
                     }
                 }
 
+                "exportRecordingBytes" -> {
+                    val id = (call.argument<Any>("mediaStoreId") as? Number)?.toLong()
+                    if (id == null) {
+                        result.error("INVALID_ARGUMENT", "mediaStoreId is required", null)
+                    } else {
+                        result.success(RecordingScanner.exportBytes(context, id))
+                    }
+                }
+
+                "exportRecordingToFile" -> {
+                    val id = (call.argument<Any>("mediaStoreId") as? Number)?.toLong()
+                    val path = call.argument<String>("destinationPath")
+                    if (id == null || path == null) {
+                        result.error("INVALID_ARGUMENT", "mediaStoreId and destinationPath are required", null)
+                    } else {
+                        result.success(RecordingScanner.exportToFile(context, id, path))
+                    }
+                }
+
                 "readCallStateJournal" -> result.success(CallStateJournal.read(context))
 
                 "clearCallStateJournal" -> {
@@ -219,17 +238,42 @@ class NativeBridge(private val context: Context) : MethodChannel.MethodCallHandl
                     result.success(null)
                 }
 
+                // --- auth & background sync ----------------------------------
+                "setAuthSession" -> {
+                    val token = call.argument<String>("token") ?: ""
+                    val apiBaseUrl = call.argument<String>("apiBaseUrl") ?: ""
+                    val deviceUuid = call.argument<String>("deviceUuid") ?: ""
+                    IngestStore.saveAuthSession(context, token, apiBaseUrl, deviceUuid)
+                    result.success(null)
+                }
+
+                "clearAuthSession" -> {
+                    IngestStore.clearAuthSession(context)
+                    result.success(null)
+                }
+
+                "getNativeSyncStatus" -> {
+                    result.success(IngestStore.getLastSyncInfo(context))
+                }
+
+                "triggerNativeSync" -> {
+                    BackgroundScheduler.enqueueSync(context)
+                    result.success(null)
+                }
+
                 "startBackgroundTracking" -> {
                     BackgroundScheduler.ensurePeriodic(context)
                     BackgroundScheduler.enqueueNow(
                         context,
                         call.argument<String>("reason") ?: BackgroundScheduler.REASON_APP_START,
                     )
+                    BackgroundScheduler.enqueueSync(context)
                     result.success(null)
                 }
 
                 "stopBackgroundTracking" -> {
                     BackgroundScheduler.cancelAll(context)
+                    IngestStore.clearAuthSession(context)
                     // Names resolved for the previous user must not survive into
                     // the next one's session on a shared handset.
                     ContactResolver.clearCache()

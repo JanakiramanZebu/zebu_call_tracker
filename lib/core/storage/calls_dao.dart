@@ -19,6 +19,10 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
         .getSingleOrNull();
   }
 
+  Future<List<LocalCall>> findByIdempotencyKeys(List<String> keys) {
+    return (select(_table)..where((t) => t.idempotencyKey.isIn(keys))).get();
+  }
+
   Future<List<LocalCall>> getPendingCalls(int limit) {
     final now = DateTime.now().toUtc();
     return (select(_table)
@@ -99,6 +103,22 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
     );
   }
 
+  Future<void> updateRecordingInfo({
+    required String idempotencyKey,
+    required String recordingPath,
+    required int mediaStoreId,
+  }) async {
+    await (update(_table)..where((t) => t.idempotencyKey.equals(idempotencyKey)))
+        .write(
+      LocalCallsCompanion(
+        hasRecording: const Value(true),
+        recordingPath: Value(recordingPath),
+        recordingMediaStoreId: Value(mediaStoreId),
+        recordingUploadStatus: const Value('pending'),
+      ),
+    );
+  }
+
   Future<Map<String, int>> getSyncCounters() async {
     final all = await select(_table).get();
     int uploaded = 0;
@@ -131,4 +151,108 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
               t.syncState.equals('synced')))
         .get();
   }
+
+  /// Calls that connected but have not yet been linked to a recording candidate.
+  Future<List<LocalCall>> getCallsNeedingRecordingMatch({int limit = 100}) {
+    return (select(_table)
+          ..where((t) =>
+              t.durationSeconds.isBiggerThanValue(0) &
+              (t.hasRecording.equals(false) | t.recordingMediaStoreId.isNull()))
+          ..orderBy([(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)])
+          ..limit(limit))
+        .get();
+  }
+
+  Future<List<LocalCall>> getOutboxItems({String? filter}) {
+    var query = select(_table);
+    if (filter == 'pending') {
+      query.where((t) =>
+          t.syncState.equals('pending') |
+          t.syncState.equals('failed_retryable') |
+          t.syncState.equals('uploading'));
+    } else if (filter == 'failed') {
+      query.where((t) =>
+          t.syncState.equals('failed_permanent') |
+          t.syncState.equals('failed_retryable'));
+    } else if (filter == 'synced') {
+      query.where((t) => t.syncState.equals('synced'));
+    }
+    query.orderBy([(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)]);
+    return query.get();
+  }
+
+  Future<void> retryCall(String idempotencyKey) async {
+    await (update(_table)..where((t) => t.idempotencyKey.equals(idempotencyKey)))
+        .write(
+      const LocalCallsCompanion(
+        syncState: Value('pending'),
+        nextAttemptAt: Value(null),
+        lastErrorCode: Value(null),
+      ),
+    );
+  }
+
+  Future<int> retryAllFailed() async {
+    return (update(_table)
+          ..where((t) =>
+              t.syncState.equals('failed_permanent') |
+              t.syncState.equals('failed_retryable')))
+        .write(
+      const LocalCallsCompanion(
+        syncState: Value('pending'),
+        nextAttemptAt: Value(null),
+        lastErrorCode: Value(null),
+      ),
+    );
+  }
+
+  Future<List<LocalCall>> getCallsBetween(DateTime startUtc, DateTime endUtc) {
+    return (select(_table)
+          ..where((t) =>
+              t.startedAt.isBiggerOrEqualValue(startUtc) &
+              t.startedAt.isSmallerOrEqualValue(endUtc))
+          ..orderBy([(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)]))
+        .get();
+  }
+
+  Stream<Map<String, int>> watchSyncCounters() {
+    return select(_table).watch().map((all) {
+      int uploaded = 0;
+      int waiting = 0;
+      int failed = 0;
+
+      for (final c in all) {
+        if (c.syncState == 'synced') {
+          uploaded++;
+        } else if (c.syncState == 'failed_permanent') {
+          failed++;
+        } else {
+          waiting++;
+        }
+      }
+
+      return {
+        'uploaded': uploaded,
+        'waiting': waiting,
+        'failed': failed,
+        'total': all.length,
+      };
+    });
+  }
+
+  Stream<List<LocalCall>> watchAllCalls() {
+    return (select(_table)
+          ..orderBy([(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)]))
+        .watch();
+  }
+
+  Future<int> getUnsyncedCount() async {
+    final unsynced = await (select(_table)..where((t) => t.syncState.isNotValue('synced'))).get();
+    return unsynced.length;
+  }
+
+  Future<int> deleteSyncedCalls() async {
+    return (delete(_table)..where((t) => t.syncState.equals('synced'))).go();
+  }
 }
+

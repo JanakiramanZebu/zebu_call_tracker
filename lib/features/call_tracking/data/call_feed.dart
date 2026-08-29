@@ -1,7 +1,10 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:uuid/uuid.dart';
 
 import '../../../core/platform/native_call_bridge.dart';
+import '../../../core/storage/database_providers.dart';
 import '../../recording/domain/recording_matcher.dart';
 import '../domain/call_entry.dart';
 
@@ -141,9 +144,25 @@ class CallFeed extends AsyncNotifier<CallFeedState> {
           ])
         : const <String, String>{};
 
+    final dao = ref.read(callsDaoProvider);
+    const uuid = Uuid();
+    const dnsNamespace = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+
+    final validRows = rows.where((r) => r.dateMillis != null).toList();
+    final keys = validRows.map((r) {
+      final date = DateTime.fromMillisecondsSinceEpoch(r.dateMillis!).toUtc();
+      final extId = 'android-${r.dateMillis}-${r.number}';
+      return uuid.v5(dnsNamespace, 'zebu:call:$extId:${date.millisecondsSinceEpoch}');
+    }).toList();
+
+    final localCalls = await dao.findByIdempotencyKeys(keys);
+    final localCallMap = {for (final lc in localCalls) lc.idempotencyKey: lc};
+
     final entries = <CallEntry>[];
-    for (final row in rows) {
-      if (row.dateMillis == null) continue;
+    for (int i = 0; i < validRows.length; i++) {
+      final row = validRows[i];
+      final key = keys[i];
+      final localCall = localCallMap[key];
 
       final name = row.number == null ? null : names[row.number!];
       final match = matcher.match(
@@ -156,7 +175,18 @@ class CallFeed extends AsyncNotifier<CallFeedState> {
         _pool,
       );
 
-      entries.add(CallEntry(row: row, match: match, contactName: name));
+      UploadState state = UploadState.pending;
+      if (localCall != null) {
+        if (localCall.syncState == 'synced') {
+          state = UploadState.uploaded;
+        } else if (localCall.syncState == 'failed_permanent' || localCall.syncState == 'failed_retryable') {
+          state = UploadState.failed;
+        } else if (localCall.syncState == 'uploading') {
+          state = UploadState.uploading;
+        }
+      }
+
+      entries.add(CallEntry(row: row, match: match, uploadState: state, contactName: name));
     }
 
     return CallFeedState(
@@ -261,10 +291,63 @@ final callFeedProvider = AsyncNotifierProvider<CallFeed, CallFeedState>(
   CallFeed.new,
 );
 
+enum DashboardPeriod { today, yesterday, week, month }
+
+class DashboardPeriodController extends Notifier<DashboardPeriod> {
+  @override
+  DashboardPeriod build() => DashboardPeriod.yesterday;
+
+  void select(DashboardPeriod period) => state = period;
+}
+
+final dashboardPeriodProvider =
+    NotifierProvider<DashboardPeriodController, DashboardPeriod>(
+  DashboardPeriodController.new,
+);
+
+class PeriodRangeInfo {
+  const PeriodRangeInfo({
+    required this.start,
+    required this.end,
+    required this.formattedRange,
+  });
+
+  final DateTime start;
+  final DateTime end;
+  final String formattedRange;
+}
+
+final periodRangeInfoProvider = Provider<PeriodRangeInfo>((ref) {
+  final period = ref.watch(dashboardPeriodProvider);
+  final now = DateTime.now();
+  final startOfToday = DateTime(now.year, now.month, now.day);
+  final endOfToday = DateTime(now.year, now.month, now.day, 23, 59, 59);
+
+  final (start, end) = switch (period) {
+    DashboardPeriod.today => (startOfToday, endOfToday),
+    DashboardPeriod.yesterday => (
+        startOfToday.subtract(const Duration(days: 1)),
+        DateTime(now.year, now.month, now.day - 1, 23, 59, 59),
+      ),
+    DashboardPeriod.week => (
+        startOfToday.subtract(Duration(days: (now.weekday - 1).clamp(0, 6))),
+        endOfToday,
+      ),
+    DashboardPeriod.month => (DateTime(now.year, now.month, 1), endOfToday),
+  };
+
+  final dateFormat = DateFormat('dd-MMM-yyyy hh:mm a');
+  final formatted =
+      '${dateFormat.format(start)} - ${dateFormat.format(end)}';
+
+  return PeriodRangeInfo(
+    start: start,
+    end: end,
+    formattedRange: formatted,
+  );
+});
+
 /// Today's aggregates for the dashboard.
-///
-/// Recomputed only when the feed changes, and in a single pass over the day's
-/// entries — see [CallStats.from].
 final todayStatsProvider = Provider<CallStats>((ref) {
   final feed = ref.watch(callFeedProvider).value;
   if (feed == null) return CallStats.empty;
@@ -275,6 +358,23 @@ final todayStatsProvider = Provider<CallStats>((ref) {
     feed.entries.where((e) {
       final local = e.startedAtUtc?.toLocal();
       return local != null && !local.isBefore(startOfToday);
+    }),
+  );
+});
+
+/// Local period aggregates for the dashboard computed directly
+/// from local database call records within the active range.
+final periodStatsProvider = Provider<CallStats>((ref) {
+  final feed = ref.watch(callFeedProvider).value;
+  if (feed == null) return CallStats.empty;
+
+  final rangeInfo = ref.watch(periodRangeInfoProvider);
+
+  return CallStats.from(
+    feed.entries.where((e) {
+      final local = e.startedAtUtc?.toLocal();
+      if (local == null) return false;
+      return !local.isBefore(rangeInfo.start) && !local.isAfter(rangeInfo.end);
     }),
   );
 });

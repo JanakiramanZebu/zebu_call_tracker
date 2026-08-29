@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../../core/config/app_config.dart';
 import '../../background/data/background_service.dart';
 import '../../call_tracking/data/call_feed.dart';
 import '../../synchronization/data/sync_service.dart';
@@ -13,7 +14,20 @@ final authRepositoryProvider = Provider<AuthRepository>(
 
 class AuthController extends AsyncNotifier<Session?> {
   @override
-  Future<Session?> build() => ref.read(authRepositoryProvider).restore();
+  Future<Session?> build() async {
+    final session = await ref.read(authRepositoryProvider).restore();
+    if (session != null && session.token.isNotEmpty) {
+      try {
+        final deviceUuid = await ref.read(deviceRepositoryProvider).getDeviceUuid();
+        await ref.read(nativeBridgeProvider).setAuthSession(
+          token: session.token,
+          apiBaseUrl: AppConfig.apiBaseUrl,
+          deviceUuid: deviceUuid,
+        );
+      } catch (_) {}
+    }
+    return session;
+  }
 
   Future<Session> signIn({
     required String clientId,
@@ -47,6 +61,16 @@ class AuthController extends AsyncNotifier<Session?> {
 
     state = AsyncData(session);
 
+    // Synchronize native background worker credentials
+    try {
+      final deviceUuid = await ref.read(deviceRepositoryProvider).getDeviceUuid();
+      await ref.read(nativeBridgeProvider).setAuthSession(
+        token: session.token,
+        apiBaseUrl: AppConfig.apiBaseUrl,
+        deviceUuid: deviceUuid,
+      );
+    } catch (_) {}
+
     // Initial sync trigger in background after sign-in
     Future.microtask(() async {
       try {
@@ -63,10 +87,12 @@ class AuthController extends AsyncNotifier<Session?> {
     required String pairingWord,
     required String employeeCode,
     required String name,
+    String? email,
     required String phone,
     required String department,
     required String designation,
     required String location,
+    String? managerName,
     required String mobileUniqueId,
   }) async {
     final repo = ref.read(authRepositoryProvider);
@@ -82,19 +108,31 @@ class AuthController extends AsyncNotifier<Session?> {
       pairingWord: pairingWord,
       employeeCode: employeeCode,
       name: name,
+      email: email,
       phone: phone,
       department: department,
       designation: designation,
       location: location,
+      managerName: managerName,
       deviceName: device['model'] as String? ?? 'Android Handset',
       manufacturer: device['manufacturer'] as String? ?? 'Generic',
       model: device['model'] as String? ?? 'Unknown',
       osVersion: device['version'] as String? ?? '14',
-      appVersion: '1.0.0',
+      appVersion: '1.4.2',
       mobileUniqueId: mobileUniqueId,
     );
 
     state = AsyncData(session);
+
+    // Synchronize native background worker credentials
+    try {
+      final deviceUuid = await ref.read(deviceRepositoryProvider).getDeviceUuid();
+      await ref.read(nativeBridgeProvider).setAuthSession(
+        token: session.token,
+        apiBaseUrl: AppConfig.apiBaseUrl,
+        deviceUuid: deviceUuid,
+      );
+    } catch (_) {}
 
     Future.microtask(() async {
       try {
@@ -108,6 +146,7 @@ class AuthController extends AsyncNotifier<Session?> {
   Future<void> signOut() async {
     try {
       await ref.read(backgroundControllerProvider.notifier).stop();
+      await ref.read(nativeBridgeProvider).clearAuthSession();
     } on Object {
       // Ignore background stop error during sign out
     }

@@ -213,6 +213,37 @@ object RecordingScanner {
         }
     }
 
+    /**
+     * Reads recording audio bytes from ContentResolver so they can be exported to temp file for upload.
+     */
+    fun exportBytes(context: Context, mediaStoreId: Long): ByteArray? {
+        if (!hasPermission(context)) throw MissingPermission()
+        return try {
+            context.contentResolver.openInputStream(uriFor(mediaStoreId))?.use { input ->
+                input.readBytes()
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Streams recording audio bytes directly to a file to avoid Binder TransactionTooLargeException.
+     */
+    fun exportToFile(context: Context, mediaStoreId: Long, destinationPath: String): Boolean {
+        if (!hasPermission(context)) throw MissingPermission()
+        return try {
+            context.contentResolver.openInputStream(uriFor(mediaStoreId))?.use { input ->
+                java.io.File(destinationPath).outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     private fun Cursor.getStringOrNull(column: String): String? =
         getColumnIndex(column).takeIf { it >= 0 }?.let { if (isNull(it)) null else getString(it) }
 

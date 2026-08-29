@@ -1,4 +1,4 @@
-﻿package `in`.mynt.zebu_call_tracker.call
+package `in`.mynt.zebu_call_tracker.call
 
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -46,7 +46,12 @@ class CallStateReceiver : BroadcastReceiver() {
         // log row and — critically — the dialer's recording file now exist.
         // Capturing on RINGING/OFFHOOK would run before either is written.
         if (normalised == "idle") {
+            // First queue the native ingest worker so capture happens immediately
             BackgroundScheduler.enqueueNow(context, BackgroundScheduler.REASON_CALL_ENDED)
+            
+            // Queue the native outbox sync worker
+            BackgroundScheduler.enqueueSync(context)
+            
             showPostCallOverlay(context)
         }
     }

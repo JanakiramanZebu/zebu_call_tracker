@@ -68,6 +68,7 @@ dependencies:
   # directly, so MediaStore audio plays without copying the file out first.
   just_audio: ^0.10.6
   flutter_local_notifications: ^18.0.1
+  workmanager: ^0.10.9
 
 dev_dependencies:
   flutter_test:

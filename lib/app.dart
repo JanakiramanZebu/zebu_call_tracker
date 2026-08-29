@@ -17,7 +17,6 @@ import 'features/call_tracking/presentation/call_detail_screen.dart';
 import 'features/call_tracking/presentation/dashboard_screen.dart';
 import 'features/permissions/presentation/permission_onboarding_screen.dart';
 import 'features/post_call/data/post_call_event_provider.dart';
-import 'features/settings/presentation/settings_screen.dart';
 import 'features/synchronization/data/sync_service.dart';
 import 'features/synchronization/presentation/sync_screen.dart';
 
@@ -131,12 +130,15 @@ class _HomeShellState extends ConsumerState<HomeShell>
       final background = ref.read(backgroundControllerProvider.notifier);
       await background.start();
       await background.drain();
+      await ref.read(syncServiceProvider.notifier).ingestNativeCallLogs();
+      await ref.read(syncServiceProvider.notifier).triggerSync();
+      ref.invalidate(syncCountersProvider);
 
       // Set up the connectivity listener for auto-sync.
-      ref.listen<AsyncValue<bool>>(connectivityProvider, _onConnectivityChanged);
+      ref.listenManual<AsyncValue<bool>>(connectivityProvider, _onConnectivityChanged);
 
       // Set up the post-call overlay navigation listener.
-      ref.listen<AsyncValue<PostCallNavigationEvent>>(
+      ref.listenManual<AsyncValue<PostCallNavigationEvent>>(
         postCallEventProvider,
         (_, next) {
           final event = next.asData?.value;
@@ -179,6 +181,7 @@ class _HomeShellState extends ConsumerState<HomeShell>
   Future<void> _triggerAutoSync() async {
     if (!mounted) return;
     await ref.read(backgroundControllerProvider.notifier).drain();
+    await ref.read(syncServiceProvider.notifier).ingestNativeCallLogs();
     await ref.read(syncServiceProvider.notifier).triggerSync();
     ref.invalidate(syncCountersProvider);
   }
@@ -233,8 +236,11 @@ class _HomeShellState extends ConsumerState<HomeShell>
       // captured, then try to push any queued data to the server.
       ref.read(backgroundControllerProvider.notifier).drain().then((_) {
         if (!mounted) return;
-        ref.read(syncServiceProvider.notifier).triggerSync().then((_) {
-          if (mounted) ref.invalidate(syncCountersProvider);
+        ref.read(syncServiceProvider.notifier).ingestNativeCallLogs().then((_) {
+          if (!mounted) return;
+          ref.read(syncServiceProvider.notifier).triggerSync().then((_) {
+            if (mounted) ref.invalidate(syncCountersProvider);
+          });
         });
       });
     }
@@ -256,7 +262,6 @@ class _HomeShellState extends ConsumerState<HomeShell>
           ),
           const CallHistoryScreen(),
           const SyncScreen(),
-          const SettingsScreen(),
         ],
       ),
       bottomNavigationBar: NavigationBar(
@@ -264,14 +269,14 @@ class _HomeShellState extends ConsumerState<HomeShell>
         onDestinationSelected: (i) => setState(() => _index = i),
         destinations: [
           const NavigationDestination(
-            icon: Icon(Icons.home_outlined),
-            selectedIcon: Icon(Icons.home_rounded),
-            label: 'Home',
+            icon: Icon(Icons.bar_chart_outlined),
+            selectedIcon: Icon(Icons.bar_chart_rounded),
+            label: 'Analytics',
           ),
           const NavigationDestination(
             icon: Icon(Icons.call_outlined),
             selectedIcon: Icon(Icons.call_rounded),
-            label: 'Calls',
+            label: 'Call History',
           ),
           NavigationDestination(
             icon: Badge(
@@ -285,11 +290,6 @@ class _HomeShellState extends ConsumerState<HomeShell>
               child: const Icon(Icons.sync_rounded),
             ),
             label: 'Sync',
-          ),
-          const NavigationDestination(
-            icon: Icon(Icons.settings_outlined),
-            selectedIcon: Icon(Icons.settings_rounded),
-            label: 'Settings',
           ),
         ],
       ),

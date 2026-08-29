@@ -1,8 +1,9 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../../../core/config/app_config.dart';
+import '../../../core/storage/database_providers.dart';
 import '../../../shared/widgets/ui_kit.dart';
 import '../../auth/data/auth_controller.dart';
 import '../../auth/domain/session.dart';
@@ -11,6 +12,7 @@ import '../../background/presentation/background_card.dart';
 import '../../call_tracking/data/call_feed.dart';
 import '../../permissions/presentation/permission_screen.dart';
 import '../../synchronization/data/sync_service.dart';
+import '../../synchronization/presentation/outbox_queue_screen.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -152,22 +154,27 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             ),
           ),
           const SizedBox(height: 16),
-          const SectionLabel('Data'),
+          const SectionLabel('Data & Storage'),
           const SizedBox(height: 8),
           AppCard(
             padding: EdgeInsets.zero,
             child: Column(
               children: [
                 _Row(
-                  icon: Icons.list_alt_rounded,
-                  label: 'Calls loaded',
-                  value: '${feed?.entries.length ?? 0}',
+                  icon: Icons.inventory_2_outlined,
+                  label: 'Call metadata outbox',
+                  value: 'View queue',
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const OutboxQueueScreen(),
+                    ),
+                  ),
                 ),
                 _divider(context),
                 _Row(
-                  icon: Icons.audio_file_outlined,
-                  label: 'Recordings discovered',
-                  value: '${feed?.recordingPoolSize ?? 0}',
+                  icon: Icons.list_alt_rounded,
+                  label: 'Calls loaded',
+                  value: '${feed?.entries.length ?? 0}',
                 ),
                 _divider(context),
                 _Row(
@@ -233,13 +240,58 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   }
 
   Future<void> _confirmSignOut(BuildContext context, WidgetRef ref) async {
+    final dao = ref.read(callsDaoProvider);
+    final unsyncedCount = await dao.getUnsyncedCount();
+
+    if (!context.mounted) return;
+
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Sign out?'),
-        content: const Text(
-          'Calls already recorded on this device stay on it. You will need '
-          'your employee ID and password to sign back in.',
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (unsyncedCount > 0) ...[
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: context.palette.waiting.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: context.palette.waiting.withValues(alpha: 0.3),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.warning_amber_rounded,
+                      color: context.palette.waiting,
+                      size: 20,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '$unsyncedCount calls waiting in local outbox.',
+                        style: TextStyle(
+                          color: context.palette.waiting,
+                          fontWeight: FontWeight.w600,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
+            Text(
+              unsyncedCount > 0
+                  ? 'Calls in the outbox will remain stored safely on this device and will not be lost, but they will not sync until an employee signs back in.'
+                  : 'Calls already recorded on this device stay on it. You will need your employee ID and password to sign back in.',
+            ),
+          ],
         ),
         actions: [
           TextButton(
@@ -258,6 +310,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       ),
     );
     if (confirmed ?? false) {
+      if (context.mounted) {
+        Navigator.of(context).popUntil((route) => route.isFirst);
+      }
       await ref.read(authControllerProvider.notifier).signOut();
     }
   }

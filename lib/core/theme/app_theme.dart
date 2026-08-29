@@ -63,7 +63,7 @@ class AppPalette extends ThemeExtension<AppPalette> {
   /// Low-contrast wash for icon chips and progress tracks.
   final Color tint;
 
-  static const _light = AppPalette(
+  static const light = AppPalette(
     answered: AppColors.answered,
     missed: AppColors.missed,
     waiting: AppColors.waiting,
@@ -73,7 +73,7 @@ class AppPalette extends ThemeExtension<AppPalette> {
     tint: Color(0x0A141414),
   );
 
-  static const _dark = AppPalette(
+  static const dark = AppPalette(
     answered: AppColors.answered,
     missed: AppColors.missedDark,
     waiting: AppColors.waiting,
@@ -123,7 +123,7 @@ abstract final class AppTheme {
 
   static ThemeData _build(Brightness brightness) {
     final isLight = brightness == Brightness.light;
-    final palette = isLight ? AppPalette._light : AppPalette._dark;
+    final palette = isLight ? AppPalette.light : AppPalette.dark;
 
     final scheme =
         ColorScheme.fromSeed(

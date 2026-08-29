@@ -22,10 +22,12 @@ abstract interface class AuthRepository {
     required String pairingWord,
     required String employeeCode,
     required String name,
+    String? email,
     required String phone,
     required String department,
     required String designation,
     required String location,
+    String? managerName,
     required String deviceName,
     required String manufacturer,
     required String model,
@@ -171,10 +173,12 @@ class RemoteAuthRepository implements AuthRepository {
     required String pairingWord,
     required String employeeCode,
     required String name,
+    String? email,
     required String phone,
     required String department,
     required String designation,
     required String location,
+    String? managerName,
     required String deviceName,
     required String manufacturer,
     required String model,
@@ -187,16 +191,23 @@ class RemoteAuthRepository implements AuthRepository {
           ? mobileUniqueId
           : await _deviceUuidStore.getOrCreateUuid();
 
+      final formattedPhone = phone.startsWith('+')
+          ? phone
+          : '+91${phone.replaceAll(RegExp(r'\D'), '')}';
+
       final response = await _apiClient.post<Map<String, dynamic>>(
         ApiEndpoints.registerMobile,
         data: {
           'pairing_word': pairingWord,
           'employee_code': employeeCode,
           'name': name,
-          'phone': phone,
+          if (email != null && email.trim().isNotEmpty) 'email': email.trim(),
+          'phone': formattedPhone,
           'department': department,
           'designation': designation,
           'location': location,
+          if (managerName != null && managerName.trim().isNotEmpty)
+            'manager_name': managerName.trim(),
           'device_name': deviceName,
           'manufacturer': manufacturer,
           'model': model,
@@ -389,7 +400,7 @@ class LocalAuthRepository implements AuthRepository {
   const LocalAuthRepository(this._store);
 
   final SessionStore _store;
-  static final clientIdPattern = RegExp(r'^[A-Z0-9]{2,16}$', caseSensitive: false);
+  static final clientIdPattern = RegExp(r'^[ZJ][A-Z0-9]{1,15}$', caseSensitive: false);
   static final mobileNumberPattern = RegExp(r'^[6-9]\d{9}$');
 
   @override
@@ -445,10 +456,12 @@ class LocalAuthRepository implements AuthRepository {
     required String pairingWord,
     required String employeeCode,
     required String name,
+    String? email,
     required String phone,
     required String department,
     required String designation,
     required String location,
+    String? managerName,
     required String deviceName,
     required String manufacturer,
     required String model,

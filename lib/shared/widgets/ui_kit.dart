@@ -12,7 +12,7 @@ import '../../features/recording/presentation/recording_player_widget.dart';
 extension ThemeX on BuildContext {
   ColorScheme get colors => Theme.of(this).colorScheme;
   TextTheme get text => Theme.of(this).textTheme;
-  AppPalette get palette => Theme.of(this).extension<AppPalette>()!;
+  AppPalette get palette => Theme.of(this).extension<AppPalette>() ?? AppPalette.light;
 }
 
 /// A rounded, tinted icon container — the app's one repeated visual motif.
@@ -71,8 +71,8 @@ class StatusPill extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          ?(icon == null ? null : Icon(icon, size: 13, color: fg)),
-          ?(icon == null ? null : const SizedBox(width: 5)),
+          if (icon != null) Icon(icon, size: 13, color: fg),
+          if (icon != null) const SizedBox(width: 5),
           Text(
             label,
             style: context.text.labelSmall?.copyWith(

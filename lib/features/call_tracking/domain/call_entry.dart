@@ -77,8 +77,14 @@ class CallStats {
     required this.incoming,
     required this.outgoing,
     required this.missed,
+    required this.rejected,
+    required this.neverAttended,
+    required this.notPickupByClient,
+    required this.uniqueCalls,
     required this.answered,
     required this.talkTimeSeconds,
+    required this.incomingDurationSeconds,
+    required this.outgoingDurationSeconds,
     required this.recordingsMatched,
     required this.recordingsNeedReview,
     required this.recordingsAbsent,
@@ -87,13 +93,19 @@ class CallStats {
   final int incoming;
   final int outgoing;
   final int missed;
+  final int rejected;
+  final int neverAttended;
+  final int notPickupByClient;
+  final int uniqueCalls;
   final int answered;
   final int talkTimeSeconds;
+  final int incomingDurationSeconds;
+  final int outgoingDurationSeconds;
   final int recordingsMatched;
   final int recordingsNeedReview;
   final int recordingsAbsent;
 
-  int get total => incoming + outgoing + missed;
+  int get total => incoming + outgoing + missed + rejected;
 
   int get averageDurationSeconds =>
       answered == 0 ? 0 : talkTimeSeconds ~/ answered;
@@ -102,8 +114,14 @@ class CallStats {
     incoming: 0,
     outgoing: 0,
     missed: 0,
+    rejected: 0,
+    neverAttended: 0,
+    notPickupByClient: 0,
+    uniqueCalls: 0,
     answered: 0,
     talkTimeSeconds: 0,
+    incomingDurationSeconds: 0,
+    outgoingDurationSeconds: 0,
     recordingsMatched: 0,
     recordingsNeedReview: 0,
     recordingsAbsent: 0,
@@ -113,30 +131,56 @@ class CallStats {
     var incoming = 0,
         outgoing = 0,
         missed = 0,
+        rejected = 0,
+        neverAttended = 0,
+        notPickupByClient = 0,
         answered = 0,
         talk = 0,
+        incomingTalk = 0,
+        outgoingTalk = 0,
         matched = 0,
         review = 0,
         absent = 0;
 
+    final uniqueNumbers = <String>{};
+
     for (final e in entries) {
+      final number = e.row.number?.trim() ?? '';
+      if (number.isNotEmpty) {
+        uniqueNumbers.add(number);
+      }
+
       switch (e.row.direction) {
         case CallDirection.incoming:
           incoming++;
+          if (e.isConnected) {
+            incomingTalk += e.durationSeconds;
+          } else {
+            neverAttended++;
+          }
         case CallDirection.outgoing:
           outgoing++;
+          if (e.isConnected) {
+            outgoingTalk += e.durationSeconds;
+          } else {
+            notPickupByClient++;
+          }
         case CallDirection.missed:
+          missed++;
+          neverAttended++;
         case CallDirection.rejected:
         case CallDirection.blocked:
-          missed++;
+          rejected++;
         case CallDirection.voicemail:
         case CallDirection.unknown:
           break;
       }
+
       if (e.isConnected) {
         answered++;
         talk += e.durationSeconds;
       }
+
       switch (e.match.status) {
         case RecordingMatchStatus.matched:
           matched++;
@@ -152,8 +196,14 @@ class CallStats {
       incoming: incoming,
       outgoing: outgoing,
       missed: missed,
+      rejected: rejected,
+      neverAttended: neverAttended,
+      notPickupByClient: notPickupByClient,
+      uniqueCalls: uniqueNumbers.length,
       answered: answered,
       talkTimeSeconds: talk,
+      incomingDurationSeconds: incomingTalk,
+      outgoingDurationSeconds: outgoingTalk,
       recordingsMatched: matched,
       recordingsNeedReview: review,
       recordingsAbsent: absent,

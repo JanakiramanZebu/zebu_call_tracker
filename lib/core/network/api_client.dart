@@ -55,12 +55,11 @@ class ApiClient {
           return handler.next(options);
         },
         onResponse: (response, handler) async {
-          // If status is 401 and code is TOKEN_EXPIRED, handle refresh
-          final data = response.data;
-          if (response.statusCode == 401 && data is Map<String, dynamic>) {
-            final errorMap = data['error'];
-            final code = errorMap is Map ? errorMap['code'] : null;
-            if (code == 'TOKEN_EXPIRED') {
+          if (response.statusCode == 401) {
+            final path = response.requestOptions.path;
+            if (!path.contains('/auth/login') &&
+                !path.contains('/mobile/register') &&
+                !path.contains('/auth/refresh')) {
               final refreshed = await _refreshTokensSingleFlight();
               if (refreshed) {
                 final retriedResponse = await _retryRequest(response.requestOptions);
@@ -72,20 +71,18 @@ class ApiClient {
         },
         onError: (DioException error, handler) async {
           if (error.response?.statusCode == 401) {
-            final data = error.response?.data;
-            if (data is Map<String, dynamic>) {
-              final errorMap = data['error'];
-              final code = errorMap is Map ? errorMap['code'] : null;
-              if (code == 'TOKEN_EXPIRED') {
-                final refreshed = await _refreshTokensSingleFlight();
-                if (refreshed) {
-                  try {
-                    final retriedResponse =
-                        await _retryRequest(error.requestOptions);
-                    return handler.resolve(retriedResponse);
-                  } on DioException catch (retryErr) {
-                    return handler.next(retryErr);
-                  }
+            final path = error.requestOptions.path;
+            if (!path.contains('/auth/login') &&
+                !path.contains('/mobile/register') &&
+                !path.contains('/auth/refresh')) {
+              final refreshed = await _refreshTokensSingleFlight();
+              if (refreshed) {
+                try {
+                  final retriedResponse =
+                      await _retryRequest(error.requestOptions);
+                  return handler.resolve(retriedResponse);
+                } on DioException catch (retryErr) {
+                  return handler.next(retryErr);
                 }
               }
             }

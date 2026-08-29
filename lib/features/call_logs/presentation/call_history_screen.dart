@@ -7,11 +7,10 @@ import '../../../shared/widgets/ui_kit.dart';
 import '../../call_tracking/data/call_feed.dart';
 import '../../call_tracking/domain/call_entry.dart';
 import '../../call_tracking/presentation/call_detail_screen.dart';
+import '../../settings/presentation/settings_screen.dart';
 
 enum CallFilter { all, incoming, outgoing, missed }
 
-/// Riverpod 3 moved StateProvider to the legacy barrel, so the filter is a
-/// plain Notifier rather than an import of deprecated API.
 class CallFilterController extends Notifier<CallFilter> {
   @override
   CallFilter build() => CallFilter.all;
@@ -33,6 +32,9 @@ class CallHistoryScreen extends ConsumerStatefulWidget {
 class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
     with WidgetsBindingObserver {
   final _scroll = ScrollController();
+  final _searchController = TextEditingController();
+  bool _isSearching = false;
+  String _searchQuery = '';
 
   @override
   void initState() {
@@ -46,22 +48,18 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
     WidgetsBinding.instance.removeObserver(this);
     _scroll.removeListener(_maybeLoadMore);
     _scroll.dispose();
+    _searchController.dispose();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
-    // A permission grant in system settings will not be visible to this screen
-    // until the next call to the bridge. Refreshing on resume picks it up
-    // without requiring the user to manually pull-to-refresh.
     if (state == AppLifecycleState.resumed && mounted) {
       ref.read(callFeedProvider.notifier).refresh();
     }
   }
 
-  /// Fetch the next page while the user is still 600px from the end, so the
-  /// list never visibly stalls on a device holding thousands of rows.
   void _maybeLoadMore() {
     if (!_scroll.hasClients) return;
     if (_scroll.position.pixels >= _scroll.position.maxScrollExtent - 600) {
@@ -69,16 +67,27 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
     }
   }
 
-  bool _matches(CallEntry e, CallFilter filter) => switch (filter) {
-    CallFilter.all => true,
-    CallFilter.incoming => e.row.direction == CallDirection.incoming,
-    CallFilter.outgoing => e.row.direction == CallDirection.outgoing,
-    CallFilter.missed => const {
-      CallDirection.missed,
-      CallDirection.rejected,
-      CallDirection.blocked,
-    }.contains(e.row.direction),
-  };
+  bool _matches(CallEntry e, CallFilter filter, String query) {
+    // Check direction filter
+    final filterMatch = switch (filter) {
+      CallFilter.all => true,
+      CallFilter.incoming => e.row.direction == CallDirection.incoming,
+      CallFilter.outgoing => e.row.direction == CallDirection.outgoing,
+      CallFilter.missed => const {
+        CallDirection.missed,
+        CallDirection.rejected,
+        CallDirection.blocked,
+      }.contains(e.row.direction),
+    };
+    if (!filterMatch) return false;
+
+    // Check search query
+    if (query.trim().isEmpty) return true;
+    final q = query.toLowerCase().trim();
+    final name = (e.contactName ?? e.row.cachedName ?? '').toLowerCase();
+    final phone = (e.row.number ?? '').toLowerCase();
+    return name.contains(q) || phone.contains(q);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -86,7 +95,74 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
     final filter = ref.watch(callFilterProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Calls')),
+      appBar: AppBar(
+        title: _isSearching
+            ? TextField(
+                controller: _searchController,
+                autofocus: true,
+                style: const TextStyle(fontSize: 16),
+                decoration: InputDecoration(
+                  hintText: 'Search by name or number…',
+                  border: InputBorder.none,
+                  hintStyle: TextStyle(color: context.palette.muted),
+                ),
+                onChanged: (val) => setState(() => _searchQuery = val),
+              )
+            : const Text('Calls'),
+        actions: [
+          IconButton(
+            icon: Icon(_isSearching ? Icons.close_rounded : Icons.search_rounded),
+            onPressed: () {
+              setState(() {
+                if (_isSearching) {
+                  _isSearching = false;
+                  _searchQuery = '';
+                  _searchController.clear();
+                } else {
+                  _isSearching = true;
+                }
+              });
+            },
+            tooltip: _isSearching ? 'Close search' : 'Search calls',
+          ),
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert_rounded),
+            onSelected: (value) {
+              if (value == 'settings') {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const SettingsScreen(),
+                  ),
+                );
+              } else if (value == 'refresh') {
+                ref.read(callFeedProvider.notifier).refresh();
+              }
+            },
+            itemBuilder: (context) => [
+              const PopupMenuItem(
+                value: 'settings',
+                child: Row(
+                  children: [
+                    Icon(Icons.settings_outlined, size: 20),
+                    SizedBox(width: 10),
+                    Text('Settings'),
+                  ],
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'refresh',
+                child: Row(
+                  children: [
+                    Icon(Icons.refresh_rounded, size: 20),
+                    SizedBox(width: 10),
+                    Text('Refresh calls'),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
       body: feed.when(
         loading: () => const SkeletonList(),
         error: (e, _) => EmptyState(
@@ -109,7 +185,10 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
 
           final groups = state.grouped
               .map(
-                (g) => (g.$1, g.$2.where((e) => _matches(e, filter)).toList()),
+                (g) => (
+                  g.$1,
+                  g.$2.where((e) => _matches(e, filter, _searchQuery)).toList(),
+                ),
               )
               .where((g) => g.$2.isNotEmpty)
               .toList();
@@ -123,10 +202,14 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
               ),
               Expanded(
                 child: groups.isEmpty
-                    ? const EmptyState(
+                    ? EmptyState(
                         icon: Icons.filter_list_off_rounded,
-                        title: 'No calls match',
-                        message: 'Try a different filter.',
+                        title: _searchQuery.isNotEmpty
+                            ? 'No calls found'
+                            : 'No calls match',
+                        message: _searchQuery.isNotEmpty
+                            ? 'Try searching with a different keyword.'
+                            : 'Try a different filter.',
                       )
                     : RefreshIndicator(
                         onRefresh: () =>
@@ -134,7 +217,6 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
                         child: ListView.builder(
                           controller: _scroll,
                           padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
-                          // +1 for the trailing loader row.
                           itemCount: groups.length + 1,
                           itemBuilder: (context, index) {
                             if (index == groups.length) {

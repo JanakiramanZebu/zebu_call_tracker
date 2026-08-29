@@ -78,6 +78,15 @@ abstract interface class NativeCallBridge {
   /// Streaming SHA-256, computed natively so multi-megabyte audio never crosses
   /// the platform channel. Null when the file has since been deleted.
   Future<({String checksum, int bytesRead})?> hashRecording(int mediaStoreId);
+
+  /// Exports raw recording bytes via ContentResolver so the file can be stored
+  /// in a temporary location for Dio upload.
+  Future<List<int>?> exportRecordingBytes(int mediaStoreId);
+
+  /// Exports raw recording bytes natively to a destination path, bypassing
+  /// memory limits of MethodChannel that cause TransactionTooLargeException.
+  Future<bool> exportRecordingToFile(int mediaStoreId, String destinationPath);
+
   Future<Map<String, Object?>> getDeviceInfo();
   Future<CallStateJournal> readCallStateJournal();
   Future<void> clearCallStateJournal();
@@ -101,6 +110,22 @@ abstract interface class NativeCallBridge {
   /// Call only after the batches have been folded in — this is not idempotent
   /// with respect to unprocessed data.
   Future<void> clearIngestBatches();
+
+  /// Saves active auth session and device credentials for autonomous native sync.
+  Future<void> setAuthSession({
+    required String token,
+    required String apiBaseUrl,
+    required String deviceUuid,
+  });
+
+  /// Clears native auth credentials on sign out.
+  Future<void> clearAuthSession();
+
+  /// Reads last native sync attempt status and timestamps.
+  Future<Map<String, Object?>> getNativeSyncStatus();
+
+  /// Enqueues immediate native background sync worker.
+  Future<void> triggerNativeSync();
 
   /// Arms the periodic sweep and runs one capture now. Idempotent.
   Future<void> startBackgroundTracking({String reason = 'app-start'});
@@ -287,6 +312,24 @@ class MethodChannelNativeCallBridge implements NativeCallBridge {
   }
 
   @override
+  Future<List<int>?> exportRecordingBytes(int mediaStoreId) async {
+    final bytes = await _method.invokeMethod<Uint8List?>(
+      'exportRecordingBytes',
+      {'mediaStoreId': mediaStoreId},
+    );
+    return bytes;
+  }
+
+  @override
+  Future<bool> exportRecordingToFile(int mediaStoreId, String destinationPath) async {
+    final success = await _method.invokeMethod<bool>(
+      'exportRecordingToFile',
+      {'mediaStoreId': mediaStoreId, 'destinationPath': destinationPath},
+    );
+    return success ?? false;
+  }
+
+  @override
   Future<Map<String, Object?>> getDeviceInfo() async {
     final raw = await _invoke<Map<Object?, Object?>>('getDeviceInfo');
     return raw.map((k, v) => MapEntry(k! as String, v));
@@ -323,6 +366,35 @@ class MethodChannelNativeCallBridge implements NativeCallBridge {
   @override
   Future<void> clearIngestBatches() async {
     await _method.invokeMethod<void>('clearIngestBatches');
+  }
+
+  @override
+  Future<void> setAuthSession({
+    required String token,
+    required String apiBaseUrl,
+    required String deviceUuid,
+  }) async {
+    await _invoke<void>('setAuthSession', {
+      'token': token,
+      'apiBaseUrl': apiBaseUrl,
+      'deviceUuid': deviceUuid,
+    });
+  }
+
+  @override
+  Future<void> clearAuthSession() async {
+    await _method.invokeMethod<void>('clearAuthSession');
+  }
+
+  @override
+  Future<Map<String, Object?>> getNativeSyncStatus() async {
+    final raw = await _invoke<Map<Object?, Object?>>('getNativeSyncStatus');
+    return raw.map((k, v) => MapEntry(k! as String, v));
+  }
+
+  @override
+  Future<void> triggerNativeSync() async {
+    await _method.invokeMethod<void>('triggerNativeSync');
   }
 
   @override

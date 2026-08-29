@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:io';
 
 import 'package:drift/drift.dart' hide Column;
@@ -10,23 +10,14 @@ import '../../../core/network/api_client.dart';
 import '../../../core/notifications/notification_service.dart';
 import '../../../core/platform/native_call_bridge.dart';
 import '../../../core/storage/app_database.dart';
-import '../../../core/storage/calls_dao.dart';
+import '../../../core/storage/database_providers.dart';
 import '../../auth/data/auth_repository.dart';
 import '../../call_tracking/data/call_feed.dart';
 import '../../device/data/device_repository.dart';
 import '../../recording/domain/recording_matcher.dart';
 import 'sync_repository.dart';
 
-final appDatabaseProvider = Provider<AppDatabase>((ref) {
-  final db = AppDatabase();
-  ref.onDispose(() => db.close());
-  return db;
-});
 
-final callsDaoProvider = Provider<CallsDao>((ref) {
-  final db = ref.watch(appDatabaseProvider);
-  return CallsDao(db);
-});
 
 final syncRepositoryProvider = Provider<SyncRepository>((ref) {
   const store = SecureSessionStore();
@@ -40,13 +31,36 @@ final deviceRepositoryProvider = Provider<DeviceRepository>((ref) {
   return DeviceRepository(apiClient: client);
 });
 
-/// Shared sync counters — used by both the Dashboard badge and the Sync screen.
-///
-/// Lives here rather than in sync_screen.dart so either tab can import it
-/// without creating a circular dependency.
-final syncCountersProvider = FutureProvider.autoDispose<Map<String, int>>((ref) {
+/// Shared sync counters — stream-backed for instant UI updates.
+final syncCountersProvider = StreamProvider.autoDispose<Map<String, int>>((ref) {
   final dao = ref.watch(callsDaoProvider);
-  return dao.getSyncCounters();
+  return dao.watchSyncCounters();
+});
+
+enum OutboxFilter { all, pending, failed, synced }
+
+class OutboxFilterController extends Notifier<OutboxFilter> {
+  @override
+  OutboxFilter build() => OutboxFilter.pending;
+
+  void select(OutboxFilter filter) => state = filter;
+}
+
+final outboxFilterProvider =
+    NotifierProvider<OutboxFilterController, OutboxFilter>(
+  OutboxFilterController.new,
+);
+
+final outboxItemsProvider = FutureProvider.autoDispose<List<LocalCall>>((ref) async {
+  final dao = ref.watch(callsDaoProvider);
+  final filter = ref.watch(outboxFilterProvider);
+  final filterKey = switch (filter) {
+    OutboxFilter.all => null,
+    OutboxFilter.pending => 'pending',
+    OutboxFilter.failed => 'failed',
+    OutboxFilter.synced => 'synced',
+  };
+  return dao.getOutboxItems(filter: filterKey);
 });
 
 class SyncResultSummary {
@@ -78,6 +92,20 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
   @override
   Future<SyncResultSummary?> build() async => null;
 
+  Future<void> retryCall(String idempotencyKey) async {
+    final dao = ref.read(callsDaoProvider);
+    await dao.retryCall(idempotencyKey);
+    ref.invalidate(outboxItemsProvider);
+    await triggerSync();
+  }
+
+  Future<void> retryAllFailed() async {
+    final dao = ref.read(callsDaoProvider);
+    await dao.retryAllFailed();
+    ref.invalidate(outboxItemsProvider);
+    await triggerSync();
+  }
+
   /// Ingests new native call logs into local database outbox.
   ///
   /// Also performs recording association: for each newly inserted call that
@@ -90,97 +118,162 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
     final matcher = ref.read(recordingMatcherProvider);
 
     try {
-      final rows = await bridge.readCallLog(sinceMillis: 0, limit: 200);
-
-      // Scan the recording pool once for the whole ingest batch.
+      // Scan the recording pool once for the whole ingest operation.
       List<RecordingCandidate> pool = const [];
       try {
         final access = await bridge.getRecordingAccess();
         if (access.granted) {
-          pool = await bridge.scanRecordings(sinceEpochSeconds: 0, limit: 400);
+          pool = await bridge.scanRecordings(sinceEpochSeconds: 0, limit: 2000);
         }
       } catch (_) {
         // Recording access is optional; call metadata can still be ingested.
       }
 
-      int count = 0;
+      int totalIngested = 0;
+      int beforeMillis = 0;
+      int maxPages = 30; // up to 15,000 historical call rows
+      int pageCount = 0;
 
-      for (final r in rows) {
-        if (r.dateMillis == null) continue;
-        final date = DateTime.fromMillisecondsSinceEpoch(r.dateMillis!).toUtc();
-
-        final extId = 'android-${r.dateMillis}-${r.number}';
-        final idempotencyKey = _uuid.v5(
-          _dnsNamespace,
-          'zebu:call:$extId:${date.millisecondsSinceEpoch}',
+      while (pageCount < maxPages) {
+        pageCount++;
+        final rows = await bridge.readCallLog(
+          sinceMillis: 0,
+          beforeMillis: beforeMillis,
+          limit: 500,
         );
 
-        final existing = await dao.findByIdempotencyKey(idempotencyKey);
-        if (existing != null) continue;
+        if (rows.isEmpty) break;
 
-        final directionStr = switch (r.direction) {
-          CallDirection.incoming => 'incoming',
-          CallDirection.outgoing => 'outgoing',
-          _ => 'unknown',
-        };
+        int pageIngested = 0;
+        for (final r in rows) {
+          if (r.dateMillis == null) continue;
+          final date = DateTime.fromMillisecondsSinceEpoch(r.dateMillis!).toUtc();
 
-        final statusStr = switch (r.direction) {
-          CallDirection.missed => 'missed',
-          CallDirection.rejected => 'rejected',
-          _ => 'ended',
-        };
+          final extId = 'android-${r.dateMillis}-${r.number}';
+          final idempotencyKey = _uuid.v5(
+            _dnsNamespace,
+            'zebu:call:$extId:${date.millisecondsSinceEpoch}',
+          );
 
-        final durationSecs = r.durationSeconds ?? 0;
-        final hasConnected = durationSecs > 0;
+          final existing = await dao.findByIdempotencyKey(idempotencyKey);
+          if (existing != null) {
+            // Check if unlinked call can now be linked to a recording candidate
+            if ((!existing.hasRecording || existing.recordingMediaStoreId == null) &&
+                pool.isNotEmpty &&
+                (r.durationSeconds ?? 0) > 0) {
+              final callForMatch = CallForMatching(
+                startedAtEpochMillis: r.dateMillis!,
+                durationSeconds: r.durationSeconds ?? 0,
+                normalizedNumber: r.number,
+                contactName: r.cachedName,
+              );
+              final result = matcher.match(callForMatch, pool);
+              if (result.status == RecordingMatchStatus.matched && result.candidate != null) {
+                try {
+                  final recPath = await bridge.getRecordingUri(result.candidate!.mediaStoreId);
+                  await dao.updateRecordingInfo(
+                    idempotencyKey: idempotencyKey,
+                    recordingPath: recPath,
+                    mediaStoreId: result.candidate!.mediaStoreId,
+                  );
+                } catch (_) {}
+              }
+            }
+            continue;
+          }
 
-        // --- Recording association ---
-        RecordingCandidate? matched;
-        if (hasConnected && pool.isNotEmpty) {
+          final directionStr = switch (r.direction) {
+            CallDirection.incoming => 'incoming',
+            CallDirection.outgoing => 'outgoing',
+            _ => 'unknown',
+          };
+
+          final statusStr = switch (r.direction) {
+            CallDirection.missed => 'missed',
+            CallDirection.rejected => 'rejected',
+            _ => 'ended',
+          };
+
+          final durationSecs = r.durationSeconds ?? 0;
+          final hasConnected = durationSecs > 0;
+
+          // --- Recording association ---
+          RecordingCandidate? matched;
+          if (hasConnected && pool.isNotEmpty) {
+            final callForMatch = CallForMatching(
+              startedAtEpochMillis: r.dateMillis!,
+              durationSeconds: durationSecs,
+              normalizedNumber: r.number,
+              contactName: r.cachedName,
+            );
+            final result = matcher.match(callForMatch, pool);
+            if (result.status == RecordingMatchStatus.matched) {
+              matched = result.candidate;
+            }
+          }
+
+          String? recordingPath;
+          if (matched != null) {
+            try {
+              recordingPath = await bridge.getRecordingUri(matched.mediaStoreId);
+            } catch (_) {
+              matched = null;
+            }
+          }
+
+          await dao.insertOrUpdateCall(
+            LocalCallsCompanion.insert(
+              idempotencyKey: idempotencyKey,
+              externalCallId: Value(extId),
+              phoneNumber: r.number ?? 'Unknown',
+              normalizedPhoneNumber: Value(r.number),
+              contactName: Value(r.cachedName),
+              direction: directionStr,
+              status: statusStr,
+              startedAt: date,
+              durationSeconds: Value(durationSecs),
+              hasRecording: Value(matched != null),
+              recordingPath: Value(recordingPath),
+              recordingMediaStoreId: Value(matched?.mediaStoreId),
+              simSlot: const Value(1),
+              clientCreatedAt: DateTime.now().toUtc(),
+            ),
+          );
+          pageIngested++;
+        }
+
+        totalIngested += pageIngested;
+
+        final lastDate = rows.last.dateMillis;
+        if (lastDate == null || lastDate == beforeMillis) break;
+        beforeMillis = lastDate;
+      }
+
+      // Secondary retroactive pass: re-scan database calls that connected but lack recording link
+      if (pool.isNotEmpty) {
+        final unlinked = await dao.getCallsNeedingRecordingMatch();
+        for (final call in unlinked) {
           final callForMatch = CallForMatching(
-            startedAtEpochMillis: r.dateMillis!,
-            durationSeconds: durationSecs,
-            normalizedNumber: r.number,
-            contactName: r.cachedName,
+            startedAtEpochMillis: call.startedAt.millisecondsSinceEpoch,
+            durationSeconds: call.durationSeconds,
+            normalizedNumber: call.normalizedPhoneNumber,
+            contactName: call.contactName,
           );
           final result = matcher.match(callForMatch, pool);
-          if (result.status == RecordingMatchStatus.matched) {
-            matched = result.candidate;
+          if (result.status == RecordingMatchStatus.matched && result.candidate != null) {
+            try {
+              final recPath = await bridge.getRecordingUri(result.candidate!.mediaStoreId);
+              await dao.updateRecordingInfo(
+                idempotencyKey: call.idempotencyKey,
+                recordingPath: recPath,
+                mediaStoreId: result.candidate!.mediaStoreId,
+              );
+            } catch (_) {}
           }
         }
-
-        // Build the content:// URI if we have a match; fall back to null so
-        // the upload step can detect "file not found" correctly.
-        String? recordingPath;
-        if (matched != null) {
-          try {
-            recordingPath = await bridge.getRecordingUri(matched.mediaStoreId);
-          } catch (_) {
-            // URI resolution failed — treat as no recording.
-            matched = null;
-          }
-        }
-
-        await dao.insertOrUpdateCall(
-          LocalCallsCompanion.insert(
-            idempotencyKey: idempotencyKey,
-            externalCallId: Value(extId),
-            phoneNumber: r.number ?? 'Unknown',
-            normalizedPhoneNumber: Value(r.number),
-            contactName: Value(r.cachedName),
-            direction: directionStr,
-            status: statusStr,
-            startedAt: date,
-            durationSeconds: Value(durationSecs),
-            hasRecording: Value(matched != null),
-            recordingPath: Value(recordingPath),
-            recordingMediaStoreId: Value(matched?.mediaStoreId),
-            simSlot: const Value(1),
-            clientCreatedAt: DateTime.now().toUtc(),
-          ),
-        );
-        count++;
       }
-      return count;
+
+      return totalIngested;
     } catch (_) {
       return 0;
     }
@@ -205,6 +298,7 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
     final dao = ref.read(callsDaoProvider);
     final notif = NotificationService.instance;
 
+    int totalAttemptedCalls = 0;
     int syncedCount = 0;
     int failedCount = 0;
     int uploadedRecordingsCount = 0;
@@ -248,125 +342,139 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
       }
 
       final deviceUuid = await deviceRepo.getDeviceUuid();
-
-      // Step 3: Metadata Batch Sync.
-      final pendingCalls =
-          await dao.getPendingCalls(status.policy.recommendedBatchSize);
-
-      final validCalls = <LocalCall>[];
-      final maxAgeDays = status.policy.maxCallAgeDays;
-      final nowUtc = DateTime.now().toUtc();
-
-      for (final call in pendingCalls) {
-        final ageInDays = nowUtc.difference(call.startedAt).inDays;
-        if (ageInDays > maxAgeDays) {
-          await dao.markFailed(
-            idempotencyKey: call.idempotencyKey,
-            errorCode: 'SYNC_POLICY_VIOLATION',
-            retryable: false,
-          );
-          failedCount++;
-        } else {
-          validCalls.add(call);
-        }
-      }
-
-      if (validCalls.isNotEmpty) {
-        final batchResult = await syncRepo.syncBatch(
-          deviceUuid: deviceUuid,
-          calls: validCalls,
-        );
-
-        for (final item in batchResult.successful) {
-          await dao.markSynced(
-            idempotencyKey: item.idempotencyKey,
-            serverCallId: item.callId,
-            revision: item.revision,
-          );
-          syncedCount++;
-        }
-
-        for (final item in batchResult.duplicates) {
-          await dao.markSynced(
-            idempotencyKey: item.idempotencyKey,
-            serverCallId: item.callId,
-            revision: item.revision,
-          );
-          syncedCount++;
-        }
-
-        for (final item in batchResult.failed) {
-          await dao.markFailed(
-            idempotencyKey: item.idempotencyKey,
-            errorCode: item.errorCode,
-            retryable: item.retryable,
-          );
-          failedCount++;
-        }
-      }
-
-      // Step 4: Recording Audio Uploads.
-      //
-      // recordingPath stores a content:// URI on Android. We stream it through
-      // the native bridge hash call (which reads via ContentResolver) and
-      // then upload via a temp-copy path so Dio's MultipartFile can read it.
-      final pendingUploads = await dao.getPendingRecordingUploads();
       final bridge = ref.read(nativeBridgeProvider);
 
-      for (final rec in pendingUploads) {
-        if (rec.serverCallId == null) continue;
+      // Loop multi-batch processing until ALL pending calls and ALL pending recording uploads are completed.
+      bool continueSyncing = true;
+      int maxLoops = 20; // safety ceiling for large backlogs
+      int loopCount = 0;
 
-        final mediaStoreId = rec.recordingMediaStoreId;
-        if (mediaStoreId == null) {
-          // No MediaStore ID — mark explicitly as no-recording.
-          await syncRepo.updateCallNoRecording(rec.serverCallId!);
-          await dao.setHasRecording(rec.idempotencyKey, false);
-          continue;
+      while (continueSyncing && loopCount < maxLoops) {
+        loopCount++;
+        continueSyncing = false;
+
+        // Step 3: Metadata Batch Sync.
+        final pendingCalls =
+            await dao.getPendingCalls(status.policy.recommendedBatchSize);
+
+        final validCalls = <LocalCall>[];
+        final maxAgeDays = status.policy.maxCallAgeDays;
+        final nowUtc = DateTime.now().toUtc();
+
+        for (final call in pendingCalls) {
+          final ageInDays = nowUtc.difference(call.startedAt).inDays;
+          if (ageInDays > maxAgeDays) {
+            await dao.markFailed(
+              idempotencyKey: call.idempotencyKey,
+              errorCode: 'SYNC_POLICY_VIOLATION',
+              retryable: false,
+            );
+            failedCount++;
+          } else {
+            validCalls.add(call);
+          }
         }
 
-        // Hash the recording natively (reads via ContentResolver).
-        final hash = await bridge.hashRecording(mediaStoreId);
-        if (hash == null) {
-          // File was deleted by the dialer since we found it.
-          await syncRepo.updateCallNoRecording(rec.serverCallId!);
-          await dao.setHasRecording(rec.idempotencyKey, false);
-          continue;
-        }
-
-        // Resolve to a content:// URI for upload.
-        final contentUri = rec.recordingPath ??
-            await bridge.getRecordingUri(mediaStoreId);
-
-        // Copy from ContentResolver → a temp file that Dio can open as
-        // a plain File. The content URI lives in the dialer's private
-        // storage, so we cannot pass it to File() directly.
-        final tempDir = Directory.systemTemp;
-        final ext = _extensionFrom(contentUri);
-        final tempFile = File(
-          '${tempDir.path}/rec_${mediaStoreId}_${DateTime.now().millisecondsSinceEpoch}.$ext',
-        );
-
-        try {
-          await _copyContentUri(bridge, mediaStoreId, tempFile);
-
-          final uploaded = await syncRepo.uploadRecording(
-            serverCallId: rec.serverCallId!,
-            audioFile: tempFile,
-            checksumSha256: hash.checksum,
-            durationSeconds: rec.durationSeconds,
+        if (validCalls.isNotEmpty) {
+          totalAttemptedCalls += validCalls.length;
+          final batchResult = await syncRepo.syncBatch(
+            deviceUuid: deviceUuid,
+            calls: validCalls,
           );
 
-          if (uploaded) {
-            await dao.markRecordingUploaded(rec.idempotencyKey);
-            uploadedRecordingsCount++;
+          for (final item in batchResult.successful) {
+            await dao.markSynced(
+              idempotencyKey: item.idempotencyKey,
+              serverCallId: item.callId,
+              revision: item.revision,
+            );
+            syncedCount++;
           }
-        } finally {
-          if (await tempFile.exists()) await tempFile.delete();
+
+          for (final item in batchResult.duplicates) {
+            await dao.markSynced(
+              idempotencyKey: item.idempotencyKey,
+              serverCallId: item.callId,
+              revision: item.revision,
+            );
+            syncedCount++;
+          }
+
+          for (final item in batchResult.failed) {
+            await dao.markFailed(
+              idempotencyKey: item.idempotencyKey,
+              errorCode: item.errorCode,
+              retryable: item.retryable,
+            );
+            failedCount++;
+          }
+
+          // If there were valid calls processed, check if more remain in next loop
+          if (batchResult.successful.isNotEmpty || batchResult.duplicates.isNotEmpty) {
+            continueSyncing = true;
+          }
+        }
+
+        // Step 4: Recording Audio Uploads.
+        final pendingUploads = await dao.getPendingRecordingUploads();
+
+        if (pendingUploads.isNotEmpty) {
+          for (final rec in pendingUploads) {
+            if (rec.serverCallId == null) continue;
+
+            final mediaStoreId = rec.recordingMediaStoreId;
+            if (mediaStoreId == null) {
+              // No MediaStore ID — mark explicitly as no-recording.
+              await syncRepo.updateCallNoRecording(rec.serverCallId!);
+              await dao.setHasRecording(rec.idempotencyKey, false);
+              continue;
+            }
+
+            // Hash the recording natively (reads via ContentResolver).
+            final hash = await bridge.hashRecording(mediaStoreId);
+            if (hash == null) {
+              // File was deleted by the dialer since we found it.
+              await syncRepo.updateCallNoRecording(rec.serverCallId!);
+              await dao.setHasRecording(rec.idempotencyKey, false);
+              continue;
+            }
+
+            // Resolve to a content:// URI for upload.
+            final contentUri = rec.recordingPath ??
+                await bridge.getRecordingUri(mediaStoreId);
+
+            final tempDir = Directory.systemTemp;
+            final ext = _extensionFrom(contentUri);
+            final tempFile = File(
+              '${tempDir.path}/rec_${mediaStoreId}_${DateTime.now().millisecondsSinceEpoch}.$ext',
+            );
+
+            try {
+              await _copyContentUri(bridge, mediaStoreId, tempFile);
+
+              final uploaded = await syncRepo.uploadRecording(
+                serverCallId: rec.serverCallId!,
+                audioFile: tempFile,
+                checksumSha256: hash.checksum,
+                durationSeconds: rec.durationSeconds,
+              );
+
+              if (uploaded) {
+                await dao.markRecordingUploaded(rec.idempotencyKey);
+                uploadedRecordingsCount++;
+                continueSyncing = true;
+              }
+            } catch (e) {
+              // Log or ignore so one bad file doesn't stop the whole queue
+            } finally {
+              if (await tempFile.exists()) await tempFile.delete();
+            }
+          }
         }
       }
 
       final summary = SyncResultSummary(
-        attemptedCalls: validCalls.length,
+        attemptedCalls: totalAttemptedCalls,
         syncedCalls: syncedCount,
         failedCalls: failedCount,
         uploadedRecordings: uploadedRecordingsCount,
@@ -387,7 +495,7 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
       return summary;
     } catch (e) {
       final summary = SyncResultSummary(
-        attemptedCalls: 0,
+        attemptedCalls: totalAttemptedCalls,
         syncedCalls: syncedCount,
         failedCalls: failedCount,
         uploadedRecordings: uploadedRecordingsCount,
@@ -415,25 +523,32 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
     int mediaStoreId,
     File dest,
   ) async {
-    // Try fetching via a dedicated native export method if it exists.
-    // NativeCallBridge.exportRecording is our new method; fall back gracefully.
     try {
-      final bytes = await (bridge as dynamic).exportRecordingBytes(mediaStoreId) as List<int>?;
+      final success = await bridge.exportRecordingToFile(mediaStoreId, dest.path);
+      if (success) {
+        return;
+      }
+    } catch (_) {
+      // Fall through to legacy exportBytes or file copy
+    }
+
+    try {
+      final bytes = await bridge.exportRecordingBytes(mediaStoreId);
       if (bytes != null && bytes.isNotEmpty) {
         await dest.writeAsBytes(bytes);
         return;
       }
     } catch (_) {
-      // Method not available on this bridge version — fall through.
+      // Fall through to filesystem copy if native export fails
     }
 
-    // Last resort: treat recordingPath as a direct filesystem path (works on
-    // devices where the dialer writes to a shared folder, e.g. DCIM/Call
-    // Recordings on older Samsung firmware).
     final uri = await bridge.getRecordingUri(mediaStoreId);
-    if (!uri.startsWith('content://')) {
+    if (!uri.startsWith('content://') && await File(uri).exists()) {
       await File(uri).copy(dest.path);
+      return;
     }
+
+    throw Exception('Could not read recording audio for mediaStoreId: $mediaStoreId');
   }
 
   static String _extensionFrom(String uri) {

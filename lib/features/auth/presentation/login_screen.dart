@@ -30,17 +30,21 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   final _pairingWordController = TextEditingController();
   final _employeeCodeController = TextEditingController();
   final _nameController = TextEditingController();
+  final _emailController = TextEditingController();
   final _phoneController = TextEditingController();
   final _departmentController = TextEditingController();
   final _designationController = TextEditingController();
   final _locationController = TextEditingController();
+  final _managerNameController = TextEditingController();
 
   final _employeeFocus = FocusNode();
   final _nameFocus = FocusNode();
+  final _emailFocus = FocusNode();
   final _phoneFocus = FocusNode();
   final _departmentFocus = FocusNode();
   final _designationFocus = FocusNode();
   final _locationFocus = FocusNode();
+  final _managerFocus = FocusNode();
 
   bool _busy = false;
   AuthFailure? _failure;
@@ -50,17 +54,21 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     _pairingWordController.dispose();
     _employeeCodeController.dispose();
     _nameController.dispose();
+    _emailController.dispose();
     _phoneController.dispose();
     _departmentController.dispose();
     _designationController.dispose();
     _locationController.dispose();
+    _managerNameController.dispose();
 
     _employeeFocus.dispose();
     _nameFocus.dispose();
+    _emailFocus.dispose();
     _phoneFocus.dispose();
     _departmentFocus.dispose();
     _designationFocus.dispose();
     _locationFocus.dispose();
+    _managerFocus.dispose();
     super.dispose();
   }
 
@@ -79,19 +87,23 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       final pairingWord = _pairingWordController.text.trim().toUpperCase();
       final employeeCode = _employeeCodeController.text.trim().toUpperCase();
       final name = _nameController.text.trim();
+      final email = _emailController.text.trim();
       final rawPhone = _phoneController.text.trim();
       final department = _departmentController.text.trim();
       final designation = _designationController.text.trim();
       final location = _locationController.text.trim();
+      final managerName = _managerNameController.text.trim();
 
       await ref.read(authControllerProvider.notifier).signInWithPairingWord(
             pairingWord: pairingWord,
             employeeCode: employeeCode,
             name: name,
+            email: email.isEmpty ? null : email,
             phone: rawPhone,
             department: department,
             designation: designation,
             location: location,
+            managerName: managerName.isEmpty ? null : managerName,
             mobileUniqueId: deviceUuid,
           );
     } on AuthFailure catch (e) {
@@ -124,6 +136,15 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   String? _validateFullName(String? v) {
     if (v == null || v.trim().isEmpty) return 'Enter your Full Name';
     if (v.trim().length < 2) return 'Full Name must be at least 2 characters';
+    return null;
+  }
+
+  String? _validateEmail(String? v) {
+    if (v == null || v.trim().isEmpty) return null;
+    final clean = v.trim();
+    if (!RegExp(r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$').hasMatch(clean)) {
+      return 'Enter a valid email address';
+    }
     return null;
   }
 
@@ -346,6 +367,24 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                                   prefixIcon: Icons.person_outline_rounded,
                                 ),
                                 validator: _validateFullName,
+                                onFieldSubmitted: (_) => _emailFocus.requestFocus(),
+                              ),
+                              const SizedBox(height: 14),
+
+                              const _FieldLabel('Email Address (Optional)'),
+                              TextFormField(
+                                controller: _emailController,
+                                focusNode: _emailFocus,
+                                enabled: !_busy,
+                                autocorrect: false,
+                                keyboardType: TextInputType.emailAddress,
+                                textInputAction: TextInputAction.next,
+                                decoration: _buildInputDecoration(
+                                  context,
+                                  hint: 'e.g. ravi.kumar@example.com',
+                                  prefixIcon: Icons.email_outlined,
+                                ),
+                                validator: _validateEmail,
                                 onFieldSubmitted: (_) => _phoneFocus.requestFocus(),
                               ),
                               const SizedBox(height: 14),
@@ -412,13 +451,29 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                                 focusNode: _locationFocus,
                                 enabled: !_busy,
                                 textCapitalization: TextCapitalization.words,
-                                textInputAction: TextInputAction.done,
+                                textInputAction: TextInputAction.next,
                                 decoration: _buildInputDecoration(
                                   context,
                                   hint: 'e.g. Chennai or Head Office',
                                   prefixIcon: Icons.location_on_outlined,
                                 ),
                                 validator: _validateLocation,
+                                onFieldSubmitted: (_) => _managerFocus.requestFocus(),
+                              ),
+                              const SizedBox(height: 14),
+
+                              const _FieldLabel('Reporting Manager Name (Optional)'),
+                              TextFormField(
+                                controller: _managerNameController,
+                                focusNode: _managerFocus,
+                                enabled: !_busy,
+                                textCapitalization: TextCapitalization.words,
+                                textInputAction: TextInputAction.done,
+                                decoration: _buildInputDecoration(
+                                  context,
+                                  hint: 'e.g. Priya Sharma',
+                                  prefixIcon: Icons.supervisor_account_outlined,
+                                ),
                                 onFieldSubmitted: (_) => _submit(),
                               ),
                             ],

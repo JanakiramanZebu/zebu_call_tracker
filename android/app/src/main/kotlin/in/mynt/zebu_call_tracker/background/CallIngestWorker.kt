@@ -71,10 +71,14 @@ class CallIngestWorker(
             )
             IngestStore.recordRun(context, STATUS_OK, reason)
 
+            // Trigger native auto-sync to upload call outbox immediately
+            BackgroundScheduler.enqueueSync(context)
+
             // Never log a number or a contact name — counts only.
             Log.i(TAG, "ingest[$reason]: ${calls.size} calls, ${recordings.size} recordings")
             Result.success()
         } catch (e: SecurityException) {
+
             // A permission revoked mid-run. Same reasoning as above: retrying
             // will not get it back.
             IngestStore.recordRun(context, STATUS_BLOCKED, reason)

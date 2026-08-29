@@ -14,6 +14,15 @@ abstract final class Fmt {
     return '${s}s';
   }
 
+  /// `0h 17m 24s` exact format matching the analytics cards.
+  static String exactDuration(int seconds) {
+    if (seconds <= 0) return '0h  0m 0s';
+    final h = seconds ~/ 3600;
+    final m = (seconds % 3600) ~/ 60;
+    final s = seconds % 60;
+    return '${h}h  ${m}m ${s}s';
+  }
+
   /// `02:18` style, for the talk-time hero where the unit labels sit separately.
   static (String hours, String minutes) talkTime(int seconds) {
     final h = seconds ~/ 3600;

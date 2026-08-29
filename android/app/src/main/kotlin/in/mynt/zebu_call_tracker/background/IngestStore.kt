@@ -157,12 +157,74 @@ object IngestStore {
             .apply()
     }
 
+    // ------------------------------------------------------------- auth & sync session
+
+    private const val KEY_AUTH_TOKEN = "auth_token"
+    private const val KEY_API_BASE_URL = "api_base_url"
+    private const val KEY_DEVICE_UUID = "device_uuid"
+    private const val KEY_LAST_SYNC_AT = "last_sync_at_millis"
+    private const val KEY_LAST_SYNC_STATUS = "last_sync_status"
+    private const val KEY_LAST_SYNCED_COUNT = "last_synced_count"
+    private const val KEY_LAST_SYNC_ERROR = "last_sync_error"
+
+    fun saveAuthSession(
+        context: Context,
+        token: String,
+        apiBaseUrl: String,
+        deviceUuid: String,
+    ) {
+        prefs(context).edit()
+            .putString(KEY_AUTH_TOKEN, token)
+            .putString(KEY_API_BASE_URL, apiBaseUrl)
+            .putString(KEY_DEVICE_UUID, deviceUuid)
+            .apply()
+    }
+
+    fun clearAuthSession(context: Context) {
+        prefs(context).edit()
+            .remove(KEY_AUTH_TOKEN)
+            .remove(KEY_API_BASE_URL)
+            .remove(KEY_DEVICE_UUID)
+            .apply()
+    }
+
+    fun getAuthToken(context: Context): String? =
+        prefs(context).getString(KEY_AUTH_TOKEN, null)
+
+    fun getApiBaseUrl(context: Context): String? =
+        prefs(context).getString(KEY_API_BASE_URL, null)
+
+    fun getDeviceUuid(context: Context): String? =
+        prefs(context).getString(KEY_DEVICE_UUID, null)
+
+    fun recordSyncOutcome(
+        context: Context,
+        status: String,
+        syncedCount: Int,
+        error: String? = null,
+    ) {
+        prefs(context).edit()
+            .putLong(KEY_LAST_SYNC_AT, System.currentTimeMillis())
+            .putString(KEY_LAST_SYNC_STATUS, status)
+            .putInt(KEY_LAST_SYNCED_COUNT, syncedCount)
+            .putString(KEY_LAST_SYNC_ERROR, error)
+            .apply()
+    }
+
+    fun getLastSyncInfo(context: Context): Map<String, Any?> {
+        val p = prefs(context)
+        return mapOf(
+            "lastSyncAtMillis" to p.getLong(KEY_LAST_SYNC_AT, 0L),
+            "lastSyncStatus" to p.getString(KEY_LAST_SYNC_STATUS, null),
+            "lastSyncedCount" to p.getInt(KEY_LAST_SYNCED_COUNT, 0),
+            "lastSyncError" to p.getString(KEY_LAST_SYNC_ERROR, null),
+        )
+    }
+
     private fun JSONArray.toMapList(): List<Map<String, Any?>> =
         (0 until length()).map { i ->
             val o = getJSONObject(i)
             o.keys().asSequence().associateWith { k ->
-                // JSONObject.NULL is not Kotlin null and would cross the
-                // platform channel as an opaque object.
                 if (o.isNull(k)) null else o.get(k)
             }
         }
