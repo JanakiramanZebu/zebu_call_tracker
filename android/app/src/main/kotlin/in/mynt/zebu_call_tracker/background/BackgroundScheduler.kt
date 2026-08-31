@@ -59,6 +59,7 @@ object BackgroundScheduler {
 
         val request = OneTimeWorkRequestBuilder<CallSyncWorker>()
             .setConstraints(constraints)
+            .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
             .addTag(TAG_SYNC)
             .build()

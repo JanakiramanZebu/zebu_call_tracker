@@ -209,6 +209,13 @@ class _HomeShellState extends ConsumerState<HomeShell>
           });
         });
       });
+    } else if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.detached) {
+      // Trigger native expedited worker so upload continues uninterrupted when closed/backgrounded
+      try {
+        ref.read(nativeBridgeProvider).triggerNativeSync();
+      } catch (_) {}
     }
   }
 

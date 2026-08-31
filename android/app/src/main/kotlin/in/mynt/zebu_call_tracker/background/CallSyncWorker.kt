@@ -35,8 +35,48 @@ class CallSyncWorker(
     params: WorkerParameters,
 ) : CoroutineWorker(context, params) {
 
+    override suspend fun getForegroundInfo(): androidx.work.ForegroundInfo {
+        val channelId = "sync_progress"
+        val notifyId = 1003
+        val notificationManager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && notificationManager != null) {
+            val channel = NotificationChannel(
+                channelId,
+                "Sync Progress",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Shows live call uploading status and remaining count."
+                setShowBadge(false)
+            }
+            notificationManager.createNotificationChannel(channel)
+        }
+
+        val notification = NotificationCompat.Builder(applicationContext, channelId)
+            .setSmallIcon(android.R.drawable.stat_sys_upload)
+            .setContentTitle("Call Syncing Active")
+            .setContentText("Uploading calls in background...")
+            .setProgress(0, 0, true)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            androidx.work.ForegroundInfo(notifyId, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else {
+            androidx.work.ForegroundInfo(notifyId, notification)
+        }
+    }
+
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val context = applicationContext
+        try {
+            setForeground(getForegroundInfo())
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not set foreground info: $e")
+        }
+
         val rawBaseUrl = IngestStore.getApiBaseUrl(context)
         val token = IngestStore.getAuthToken(context)
         val deviceUuid = IngestStore.getDeviceUuid(context) ?: "android-device"

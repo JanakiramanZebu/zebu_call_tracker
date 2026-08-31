@@ -113,6 +113,12 @@
             android:exported="false"
             android:foregroundServiceType="phoneCall" />
 
+        <!-- WorkManager Foreground Service for uninterrupted data sync when app is backgrounded or closed -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
+
         <!-- Reboot and app-update recovery. Both broadcasts are explicit
              wake-ups for a stopped package, so exported="true" is required:
              the sender is the system. -->

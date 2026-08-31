@@ -68,7 +68,7 @@ List<PermissionAsk> permissionAsks(
     title: 'Phone & call log',
     why:
         'Detects when a call starts and ends, and reads its final duration and '
-        'status. Without this, nothing is tracked.',
+        'status. Required for core call tracking.',
     icon: Icons.phone_outlined,
     granted: perms.readCallLog && perms.readPhoneState,
     essential: true,
@@ -78,53 +78,55 @@ List<PermissionAsk> permissionAsks(
     kind: AskKind.backgroundActivity,
     title: 'Background activity',
     why:
-        'Lets tracking run when the app is closed. Without it Android delays '
-        'the check for hours, by which time your dialer may have deleted the '
-        "call's recording.",
+        'Lets syncing and tracking run reliably when the app is closed. '
+        'Required to prevent the OS from pausing upload jobs.',
     icon: Icons.battery_saver_rounded,
     granted: background?.ignoringBatteryOptimizations ?? false,
+    essential: true,
   ),
   PermissionAsk(
     id: 'contacts',
     permission: Permission.contacts,
     title: 'Contacts',
     why:
-        'Shows a name instead of a bare number. Declining keeps the number; '
-        'only the name is missing.',
+        'Resolves client names against phone numbers in call logs and reports. '
+        'Required for accurate caller identification.',
     icon: Icons.contacts_outlined,
     granted: perms.readContacts,
+    essential: true,
   ),
   PermissionAsk(
     id: 'recordings',
     permission: Permission.audio,
     title: 'Recordings on this device',
     why:
-        "Finds call recordings your phone's own dialer already made, so they "
-        'can be filed against the right call. The app never records anything '
-        'itself.',
+        'Discovers audio files saved by the system dialer to sync them alongside '
+        'the call records. Required for recording uploads.',
     icon: Icons.graphic_eq_rounded,
     granted: perms.readMediaAudio,
+    essential: true,
   ),
   PermissionAsk(
     id: 'notifications',
     permission: Permission.notification,
     title: 'Notifications',
     why:
-        'Tells you when an upload fails, so calls do not sit unsynced without '
-        'you noticing.',
+        'Displays real-time upload progress, sync status, and remaining calls. '
+        'Required to keep you informed of sync activity.',
     icon: Icons.notifications_none_rounded,
     granted: perms.notifications,
+    essential: true,
   ),
   PermissionAsk(
     id: 'overlay',
     kind: AskKind.overlayWindow,
     title: 'Post-call card',
     why:
-        'Shows a summary card immediately after each call — the contact name, '
-        'duration, and whether a recording was found. Works like the Truecaller '
-        'overlay. You can disable it here at any time.',
+        'Shows a summary card immediately after each call for instant logging '
+        'and verification. Required for immediate post-call action.',
     icon: Icons.picture_in_picture_rounded,
     granted: perms.overlayWindow,
+    essential: true,
   ),
 ];
 

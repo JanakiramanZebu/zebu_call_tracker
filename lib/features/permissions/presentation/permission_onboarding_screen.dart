@@ -54,9 +54,6 @@ class _PermissionOnboardingScreenState
           ),
           data: (perms) {
             final asks = permissionAsks(perms, background: background);
-            final essentialGranted = asks
-                .where((a) => a.essential)
-                .every((a) => a.granted);
             final grantedCount = asks.where((a) => a.granted).length;
             final allGranted = grantedCount == asks.length;
 
@@ -70,7 +67,7 @@ class _PermissionOnboardingScreenState
                       AskProgress(granted: grantedCount, total: asks.length),
                       const SizedBox(height: 16),
                       const Text(
-                        'Each permission is requested only when it is needed. You can decline optional permissions — tracking works with essential call logs.',
+                        'All permissions are required for full autonomous call logging, recording uploads, and background syncing.',
                         style: TextStyle(
                           color: AppTokens.textSecondary,
                           fontSize: 13,
@@ -91,7 +88,6 @@ class _PermissionOnboardingScreenState
                   ),
                 ),
                 _Footer(
-                  essentialGranted: essentialGranted,
                   allGranted: allGranted,
                   finishing: _finishing,
                   onContinue: _finish,
@@ -127,7 +123,7 @@ class _Header extends StatelessWidget {
             ),
             SizedBox(height: 4),
             Text(
-              'Zebu Call Tracker requires system permissions to log calls and match recordings automatically.',
+              'Zebu Call Tracker requires system permissions to log calls, upload recordings, and sync data in the background.',
               style: TextStyle(
                 color: AppTokens.textMuted,
                 fontSize: 13,
@@ -141,13 +137,11 @@ class _Header extends StatelessWidget {
 
 class _Footer extends StatelessWidget {
   const _Footer({
-    required this.essentialGranted,
     required this.allGranted,
     required this.finishing,
     required this.onContinue,
   });
 
-  final bool essentialGranted;
   final bool allGranted;
   final bool finishing;
   final VoidCallback onContinue;
@@ -162,7 +156,7 @@ class _Footer extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (!essentialGranted)
+            if (!allGranted)
               const Padding(
                 padding: EdgeInsets.only(bottom: 12),
                 child: Row(
@@ -175,7 +169,7 @@ class _Footer extends StatelessWidget {
                     SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        'Phone & call log permission is required to proceed.',
+                        'All permissions are required to activate automatic call tracking.',
                         style: TextStyle(
                           color: AppTokens.warning,
                           fontSize: 12,
@@ -187,9 +181,9 @@ class _Footer extends StatelessWidget {
                 ),
               ),
             LoadingFilledButton(
-              label: allGranted ? 'Start tracking' : 'Continue',
+              label: 'Start tracking',
               loading: finishing,
-              onPressed: essentialGranted ? onContinue : null,
+              onPressed: allGranted ? onContinue : null,
             ),
           ],
         ),
