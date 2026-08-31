@@ -186,6 +186,7 @@ object IngestStore {
     // ------------------------------------------------------------- auth & sync session
 
     private const val KEY_AUTH_TOKEN = "auth_token"
+    private const val KEY_REFRESH_TOKEN = "refresh_token"
     private const val KEY_API_BASE_URL = "api_base_url"
     private const val KEY_DEVICE_UUID = "device_uuid"
     private const val KEY_LAST_SYNC_AT = "last_sync_at_millis"
@@ -196,19 +197,37 @@ object IngestStore {
     fun saveAuthSession(
         context: Context,
         token: String,
+        refreshToken: String?,
         apiBaseUrl: String,
         deviceUuid: String,
     ) {
-        prefs(context).edit()
-            .putString(KEY_AUTH_TOKEN, token)
-            .putString(KEY_API_BASE_URL, apiBaseUrl)
-            .putString(KEY_DEVICE_UUID, deviceUuid)
-            .apply()
+        prefs(context).edit().apply {
+            putString(KEY_AUTH_TOKEN, token)
+            if (!refreshToken.isNullOrBlank()) {
+                putString(KEY_REFRESH_TOKEN, refreshToken)
+            }
+            putString(KEY_API_BASE_URL, apiBaseUrl)
+            putString(KEY_DEVICE_UUID, deviceUuid)
+        }.apply()
+    }
+
+    fun updateAuthTokens(
+        context: Context,
+        accessToken: String,
+        refreshToken: String?,
+    ) {
+        prefs(context).edit().apply {
+            putString(KEY_AUTH_TOKEN, accessToken)
+            if (!refreshToken.isNullOrBlank()) {
+                putString(KEY_REFRESH_TOKEN, refreshToken)
+            }
+        }.apply()
     }
 
     fun clearAuthSession(context: Context) {
         prefs(context).edit()
             .remove(KEY_AUTH_TOKEN)
+            .remove(KEY_REFRESH_TOKEN)
             .remove(KEY_API_BASE_URL)
             .remove(KEY_DEVICE_UUID)
             .apply()
@@ -216,6 +235,9 @@ object IngestStore {
 
     fun getAuthToken(context: Context): String? =
         prefs(context).getString(KEY_AUTH_TOKEN, null)
+
+    fun getRefreshToken(context: Context): String? =
+        prefs(context).getString(KEY_REFRESH_TOKEN, null)
 
     fun getApiBaseUrl(context: Context): String? =
         prefs(context).getString(KEY_API_BASE_URL, null)

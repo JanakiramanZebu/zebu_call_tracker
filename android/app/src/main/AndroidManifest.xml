@@ -136,6 +136,16 @@
             </intent-filter>
         </receiver>
 
+        <!-- Network restoration recovery receiver -->
+        <receiver
+            android:name=".background.NetworkRecoveryReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.net.conn.CONNECTIVITY_CHANGE" />
+            </intent-filter>
+        </receiver>
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

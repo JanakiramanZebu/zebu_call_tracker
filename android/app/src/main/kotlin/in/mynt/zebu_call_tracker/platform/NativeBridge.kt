@@ -13,6 +13,11 @@ import `in`.mynt.zebu_call_tracker.call.Dialer
 import `in`.mynt.zebu_call_tracker.call.SimInfoReader
 import `in`.mynt.zebu_call_tracker.background.BackgroundScheduler
 import `in`.mynt.zebu_call_tracker.background.IngestStore
+import `in`.mynt.zebu_call_tracker.background.NativeCallOutboxDao
+import `in`.mynt.zebu_call_tracker.background.SyncCoordinator
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import `in`.mynt.zebu_call_tracker.overlay.PostCallData
 import `in`.mynt.zebu_call_tracker.permissions.BatteryOptimization
 import `in`.mynt.zebu_call_tracker.permissions.PermissionInspector
@@ -242,9 +247,10 @@ class NativeBridge(private val context: Context) : MethodChannel.MethodCallHandl
                 // --- auth & background sync ----------------------------------
                 "setAuthSession" -> {
                     val token = call.argument<String>("token") ?: ""
+                    val refreshToken = call.argument<String>("refreshToken")
                     val apiBaseUrl = call.argument<String>("apiBaseUrl") ?: ""
                     val deviceUuid = call.argument<String>("deviceUuid") ?: ""
-                    IngestStore.saveAuthSession(context, token, apiBaseUrl, deviceUuid)
+                    IngestStore.saveAuthSession(context, token, refreshToken, apiBaseUrl, deviceUuid)
                     result.success(null)
                 }
 
@@ -257,7 +263,14 @@ class NativeBridge(private val context: Context) : MethodChannel.MethodCallHandl
                     result.success(IngestStore.getLastSyncInfo(context))
                 }
 
+                "getNativeSyncCounters" -> {
+                    result.success(NativeCallOutboxDao.getSyncCounters(context))
+                }
+
                 "triggerNativeSync" -> {
+                    CoroutineScope(Dispatchers.IO).launch {
+                        SyncCoordinator.runSync(context, "manual_sync_now")
+                    }
                     BackgroundScheduler.enqueueSync(context)
                     result.success(null)
                 }
@@ -268,6 +281,9 @@ class NativeBridge(private val context: Context) : MethodChannel.MethodCallHandl
                         context,
                         call.argument<String>("reason") ?: BackgroundScheduler.REASON_APP_START,
                     )
+                    CoroutineScope(Dispatchers.IO).launch {
+                        SyncCoordinator.runSync(context, "app_start")
+                    }
                     BackgroundScheduler.enqueueSync(context)
                     result.success(null)
                 }

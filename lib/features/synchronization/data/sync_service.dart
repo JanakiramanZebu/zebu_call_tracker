@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:drift/drift.dart' hide Column;
@@ -9,7 +8,6 @@ import 'package:uuid/uuid.dart';
 
 import '../../../core/config/app_config.dart';
 import '../../../core/network/api_client.dart';
-import '../../../core/notifications/notification_service.dart';
 import '../../../core/platform/native_call_bridge.dart';
 import '../../../core/storage/app_database.dart';
 import '../../../core/storage/database_providers.dart';
@@ -380,204 +378,29 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
     _isProcessing = true;
     state = const AsyncLoading();
 
-    final syncRepo = ref.read(syncRepositoryProvider);
-    final deviceRepo = ref.read(deviceRepositoryProvider);
-    final dao = ref.read(callsDaoProvider);
-    final notif = NotificationService.instance;
-
-    int totalAttemptedCalls = 0;
-    int syncedCount = 0;
-    int failedCount = 0;
-    int uploadedRecordingsCount = 0;
-    String? clockSkewWarning;
-
     try {
-      debugPrint('[SYNC] SYNC START - Ingesting native call logs and checking recovery...');
-      // Step 1: Ingest latest call logs from handset (with recording matching).
+      debugPrint('[SYNC] SYNC START - Ingesting native call logs and triggering native SyncCoordinator...');
       await ingestNativeCallLogs();
+      await ref.read(nativeBridgeProvider).triggerNativeSync();
 
-      // Recover any stuck in-flight 'uploading' records back to 'pending'
-      await dao.recoverStuckUploadingCalls();
-      // Retry any previously failed calls
-      await dao.retryAllFailed();
-
-      // Step 2: Check server status and registration.
-      final status = await syncRepo.getSyncStatus();
-
-      if (status.deviceStatus == 'REVOKED') {
-        const summary = SyncResultSummary(
-          attemptedCalls: 0,
-          syncedCalls: 0,
-          failedCalls: 0,
-          uploadedRecordings: 0,
-          deviceRevoked: true,
-          errorMessage: 'This device has been revoked by an administrator.',
-        );
-        state = AsyncData(summary);
-        return summary;
-      }
-
-      if (!status.deviceRegistered) {
-        final info = await ref.read(deviceInfoProvider.future);
-        await deviceRepo.registerDevice(deviceInfo: info);
-      }
-
-      // Check clock skew.
-      final serverDt = DateTime.tryParse(status.serverTime)?.toUtc();
-      if (serverDt != null) {
-        final diffMinutes =
-            DateTime.now().toUtc().difference(serverDt).inMinutes.abs();
-        if (diffMinutes > status.policy.maxClockSkewMinutes) {
-          clockSkewWarning =
-              'Device clock skew is $diffMinutes minutes from server clock. '
-              'Please adjust device time.';
-        }
-      }
-
-      final deviceUuid = await deviceRepo.getDeviceUuid();
-      final bridge = ref.read(nativeBridgeProvider);
-
-      // Step 3: Sequential One-By-One Upload Loop (concurrency = 1).
-      debugPrint('[SYNC] Starting sequential one-by-one upload loop...');
-
-      final pendingOutbox = await dao.getOutboxItems(filter: 'pending');
-      final totalToSync = pendingOutbox.length;
-      int currentUploaded = 0;
-
-      if (totalToSync > 0) {
-        await notif.showSyncProgress(
-          current: 0,
-          total: totalToSync,
-          statusText: 'Starting sync · $totalToSync calls remaining',
-        );
-      }
-
-      while (true) {
-        final call = await dao.claimNextPendingCall();
-        if (call == null) {
-          // No more pending or retryable records ready to upload.
-          break;
-        }
-
-        totalAttemptedCalls++;
-        final remaining = (totalToSync - currentUploaded - 1).clamp(0, totalToSync);
-
-        await notif.showSyncProgress(
-          current: currentUploaded,
-          total: totalToSync,
-          statusText: 'Uploading ${call.phoneNumber} · $remaining remaining',
-        );
-
-        debugPrint('[SYNC] UPLOAD START - IdempotencyKey: ${call.idempotencyKey}, Local ID: ${call.localId}, Phone: ${call.phoneNumber}');
-
-        final result = await syncRepo.uploadSingleCall(
-          deviceUuid: deviceUuid,
-          call: call,
-        );
-
-        if (result.isSuccess) {
-          final serverId = result.callId ?? 'synced-${call.localId}';
-          await dao.markSynced(
-            idempotencyKey: call.idempotencyKey,
-            serverCallId: serverId,
-            revision: result.revision,
-          );
-          syncedCount++;
-          currentUploaded++;
-          final left = (totalToSync - currentUploaded).clamp(0, totalToSync);
-
-          await notif.showSyncProgress(
-            current: currentUploaded,
-            total: totalToSync,
-            statusText: 'Synced ${call.phoneNumber} · $left remaining',
-          );
-          debugPrint('[SYNC] UPLOAD SUCCESS - Local ID: ${call.localId}, Server ID: $serverId');
-
-          // Step 4: Recording Audio Upload if present.
-          if (call.hasRecording && call.recordingMediaStoreId != null) {
-            final mediaStoreId = call.recordingMediaStoreId!;
-            final hash = await bridge.hashRecording(mediaStoreId);
-            if (hash != null) {
-              final contentUri = call.recordingPath ??
-                  await bridge.getRecordingUri(mediaStoreId);
-
-              final tempDir = Directory.systemTemp;
-              final ext = _extensionFrom(contentUri);
-              final tempFile = File(
-                '${tempDir.path}/rec_${mediaStoreId}_${DateTime.now().millisecondsSinceEpoch}.$ext',
-              );
-
-              try {
-                await _copyContentUri(bridge, mediaStoreId, tempFile);
-
-                final uploaded = await syncRepo.uploadRecording(
-                  serverCallId: serverId,
-                  audioFile: tempFile,
-                  checksumSha256: hash.checksum,
-                  durationSeconds: call.durationSeconds,
-                );
-
-                if (uploaded) {
-                  await dao.markRecordingUploaded(call.idempotencyKey);
-                  uploadedRecordingsCount++;
-                  debugPrint('[SYNC] RECORDING UPLOAD SUCCESS - Local ID: ${call.localId}');
-                }
-              } catch (e) {
-                debugPrint('[SYNC] RECORDING UPLOAD ERROR - Local ID: ${call.localId}, Error: $e');
-              } finally {
-                if (await tempFile.exists()) await tempFile.delete();
-              }
-            }
-          }
-        } else {
-          await dao.markFailed(
-            idempotencyKey: call.idempotencyKey,
-            errorCode: result.errorCode ?? 'UNKNOWN_ERROR',
-            retryable: result.isRetryable,
-          );
-          failedCount++;
-          debugPrint('[SYNC] UPLOAD FAILED - Local ID: ${call.localId}, Code: ${result.errorCode}, Retryable: ${result.isRetryable}');
-          if (result.isRetryable) {
-            debugPrint('[SYNC] RETRY SCHEDULED - Local ID: ${call.localId}');
-          }
-        }
-      }
-
-      await notif.cancelSyncProgress();
-
-      // Retention policy: automatically purge synced records older than 180 days (6 months)
-      final purgeCutoff = DateTime.now().toUtc().subtract(const Duration(days: 180));
-      await dao.deleteSyncedCallsOlderThan(purgeCutoff);
-      await dao.deletePermanentFailuresOlderThan(purgeCutoff);
-
+      // Check counters from SQLite
+      final counters = await ref.read(callsDaoProvider).getSyncCounters();
       final summary = SyncResultSummary(
-        attemptedCalls: totalAttemptedCalls,
-        syncedCalls: syncedCount,
-        failedCalls: failedCount,
-        uploadedRecordings: uploadedRecordingsCount,
-        clockSkewWarning: clockSkewWarning,
+        attemptedCalls: counters['total'] ?? 0,
+        syncedCalls: counters['uploaded'] ?? 0,
+        failedCalls: counters['failed'] ?? 0,
+        uploadedRecordings: 0,
       );
 
       state = AsyncData(summary);
-      debugPrint('[SYNC] SYNC STOP - Attempted: $totalAttemptedCalls, Synced: $syncedCount, Failed: $failedCount, Recordings: $uploadedRecordingsCount');
-
-      // Notify user if calls were synced
-      if (summary.isSuccess) {
-        await notif.cancelSyncReminder();
-        await notif.showSyncSuccess(
-          syncedCalls: syncedCount,
-          uploadedRecordings: uploadedRecordingsCount,
-        );
-      }
-
       return summary;
     } catch (e) {
       debugPrint('[SYNC] SYNC ERROR: $e');
       final summary = SyncResultSummary(
-        attemptedCalls: totalAttemptedCalls,
-        syncedCalls: syncedCount,
-        failedCalls: failedCount,
-        uploadedRecordings: uploadedRecordingsCount,
+        attemptedCalls: 0,
+        syncedCalls: 0,
+        failedCalls: 0,
+        uploadedRecordings: 0,
         errorMessage: e.toString(),
       );
       state = AsyncData(summary);
@@ -585,60 +408,8 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
     } finally {
       _isProcessing = false;
       ref.invalidate(outboxItemsProvider);
+      ref.invalidate(syncCountersProvider);
     }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Helpers
-  // ---------------------------------------------------------------------------
-
-  /// Copies the audio pointed to by [mediaStoreId] from the Android
-  /// ContentResolver into [dest].  Uses the native bridge's hash-read path
-  /// which already opens the content:// URI; here we only need the bytes.
-  ///
-  /// This is a best-effort fallback: if the native side has no dedicated copy
-  /// method we derive the file path from the content URI stored in the DB and
-  /// try a plain File copy. On Android 10+ that path is not accessible to
-  /// non-owner apps, so this branch will throw — which the upload loop catches.
-  Future<void> _copyContentUri(
-    NativeCallBridge bridge,
-    int mediaStoreId,
-    File dest,
-  ) async {
-    try {
-      final success = await bridge.exportRecordingToFile(mediaStoreId, dest.path);
-      if (success) {
-        return;
-      }
-    } catch (_) {
-      // Fall through to legacy exportBytes or file copy
-    }
-
-    try {
-      final bytes = await bridge.exportRecordingBytes(mediaStoreId);
-      if (bytes != null && bytes.isNotEmpty) {
-        await dest.writeAsBytes(bytes);
-        return;
-      }
-    } catch (_) {
-      // Fall through to filesystem copy if native export fails
-    }
-
-    final uri = await bridge.getRecordingUri(mediaStoreId);
-    if (!uri.startsWith('content://') && await File(uri).exists()) {
-      await File(uri).copy(dest.path);
-      return;
-    }
-
-    throw Exception('Could not read recording audio for mediaStoreId: $mediaStoreId');
-  }
-
-  static String _extensionFrom(String uri) {
-    final lower = uri.toLowerCase();
-    for (final ext in ['m4a', 'aac', 'amr', 'mp3', 'opus', 'ogg', 'wav', '3gp', 'mp4']) {
-      if (lower.contains(ext)) return ext;
-    }
-    return 'm4a'; // safe default for most Android dialers
   }
 }
 

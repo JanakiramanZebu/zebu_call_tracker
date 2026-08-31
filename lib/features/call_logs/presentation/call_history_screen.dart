@@ -202,9 +202,9 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
       body: feed.when(
         loading: () => const SkeletonList(),
         error: (e, _) => EmptyState(
-          icon: Icons.error_outline_rounded,
+          icon: Icons.storage_rounded,
           title: 'Could not load call history',
-          message: '$e',
+          message: 'A temporary storage issue was detected. Tap below to reload or repair local data.',
           actionLabel: 'Try again',
           onAction: () => ref.read(callFeedProvider.notifier).refresh(),
         ),

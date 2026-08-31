@@ -156,7 +156,13 @@ class CallFeed extends AsyncNotifier<CallFeedState> {
       return uuid.v5(dnsNamespace, 'zebu:call:$extId:${date.millisecondsSinceEpoch}');
     }).toList();
 
-    final localCalls = await dao.findByIdempotencyKeys(keys);
+    List<LocalCall> localCalls = const [];
+    try {
+      localCalls = await dao.findByIdempotencyKeys(keys);
+    } catch (e) {
+      // Storage failure diagnostics are tracked without crashing the whole feed pipeline
+      localCalls = const [];
+    }
     final localCallMap = {for (final lc in localCalls) lc.idempotencyKey: lc};
 
     final entries = <CallEntry>[];

@@ -1,43 +1,11 @@
-import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:workmanager/workmanager.dart';
-
-import '../../../core/notifications/notification_service.dart';
-import '../../../core/storage/database_providers.dart';
-import '../../synchronization/data/sync_service.dart';
-import 'background_service.dart';
+// Native background execution redesign:
+// All background synchronization is managed natively by Android WorkManager (CallSyncWorker)
+// and SyncCoordinator. Flutter background isolates are disabled to prevent duplicate sync tasks
+// and memory overhead.
 
 const String backgroundSyncTaskName = "sync_calls_task";
 
 @pragma('vm:entry-point')
 void callbackDispatcher() {
-  Workmanager().executeTask((task, inputData) async {
-    WidgetsFlutterBinding.ensureInitialized();
-    await NotificationService.instance.initialize();
-    
-    final container = ProviderContainer();
-    
-    try {
-      final bgNotifier = container.read(backgroundControllerProvider.notifier);
-      await bgNotifier.drain();
-
-      final syncNotifier = container.read(syncServiceProvider.notifier);
-      await syncNotifier.ingestNativeCallLogs();
-      await syncNotifier.triggerSync();
-
-      // Ensure local database remains lean even during offline or periodic background sweeps
-      final dao = container.read(callsDaoProvider);
-      final purgeCutoff = DateTime.now().toUtc().subtract(const Duration(days: 180));
-      await dao.deleteSyncedCallsOlderThan(purgeCutoff);
-      await dao.deletePermanentFailuresOlderThan(purgeCutoff);
-
-      return Future.value(true);
-    } catch (err) {
-      // If sync fails due to network, workmanager can retry based on policy.
-      return Future.value(false);
-    } finally {
-      container.dispose();
-    }
-  });
+  // No-op: Native Android WorkManager handles background execution.
 }
-

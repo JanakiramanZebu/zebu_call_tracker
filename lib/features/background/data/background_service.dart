@@ -1,11 +1,9 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:workmanager/workmanager.dart';
 
 import '../../../core/platform/native_call_bridge.dart';
 import '../../../core/storage/database_providers.dart';
 import '../../call_tracking/data/call_feed.dart';
 import '../../synchronization/data/sync_service.dart';
-import 'background_sync.dart';
 
 
 /// Whether background ingest can run, and what it last did.
@@ -35,17 +33,6 @@ class BackgroundController extends AsyncNotifier<void> {
   /// would attribute them to no employee record.
   Future<void> start({String reason = 'app-start'}) async {
     await ref.read(nativeBridgeProvider).startBackgroundTracking(reason: reason);
-    try {
-      await Workmanager().registerPeriodicTask(
-        "periodic_sync_calls_task",
-        backgroundSyncTaskName,
-        frequency: const Duration(minutes: 15),
-        existingWorkPolicy: ExistingPeriodicWorkPolicy.keep,
-        constraints: Constraints(
-          networkType: NetworkType.connected,
-        ),
-      );
-    } catch (_) {}
     ref.invalidate(backgroundStatusProvider);
   }
 

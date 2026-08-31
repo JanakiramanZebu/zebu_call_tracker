@@ -21,6 +21,7 @@ class AuthController extends AsyncNotifier<Session?> {
         final deviceUuid = await ref.read(deviceRepositoryProvider).getDeviceUuid();
         await ref.read(nativeBridgeProvider).setAuthSession(
           token: session.token,
+          refreshToken: session.refreshToken,
           apiBaseUrl: AppConfig.apiBaseUrl,
           deviceUuid: deviceUuid,
         );
@@ -66,6 +67,7 @@ class AuthController extends AsyncNotifier<Session?> {
       final deviceUuid = await ref.read(deviceRepositoryProvider).getDeviceUuid();
       await ref.read(nativeBridgeProvider).setAuthSession(
         token: session.token,
+        refreshToken: session.refreshToken,
         apiBaseUrl: AppConfig.apiBaseUrl,
         deviceUuid: deviceUuid,
       );
@@ -129,6 +131,7 @@ class AuthController extends AsyncNotifier<Session?> {
       final deviceUuid = await ref.read(deviceRepositoryProvider).getDeviceUuid();
       await ref.read(nativeBridgeProvider).setAuthSession(
         token: session.token,
+        refreshToken: session.refreshToken,
         apiBaseUrl: AppConfig.apiBaseUrl,
         deviceUuid: deviceUuid,
       );

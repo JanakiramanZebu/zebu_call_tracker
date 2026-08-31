@@ -116,6 +116,7 @@ abstract interface class NativeCallBridge {
   /// Saves active auth session and device credentials for autonomous native sync.
   Future<void> setAuthSession({
     required String token,
+    String? refreshToken,
     required String apiBaseUrl,
     required String deviceUuid,
   });
@@ -375,11 +376,13 @@ class MethodChannelNativeCallBridge implements NativeCallBridge {
   @override
   Future<void> setAuthSession({
     required String token,
+    String? refreshToken,
     required String apiBaseUrl,
     required String deviceUuid,
   }) async {
     await _invoke<void>('setAuthSession', {
       'token': token,
+      if (refreshToken != null) 'refreshToken': refreshToken,
       'apiBaseUrl': apiBaseUrl,
       'deviceUuid': deviceUuid,
     });

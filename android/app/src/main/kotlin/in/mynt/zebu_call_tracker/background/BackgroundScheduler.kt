@@ -50,6 +50,22 @@ object BackgroundScheduler {
     }
 
     /**
+     * Enqueues delayed call ingest pass to handle OEM dialer MediaStore indexing delays.
+     */
+    fun enqueueDelayedIngest(context: Context, delaySeconds: Long, reason: String) {
+        val workName = "zebu.call-ingest.delayed.${delaySeconds}s"
+        val request = OneTimeWorkRequestBuilder<CallIngestWorker>()
+            .setInputData(Data.Builder().putString(CallIngestWorker.KEY_REASON, reason).build())
+            .setInitialDelay(delaySeconds, TimeUnit.SECONDS)
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+            .addTag(TAG_INGEST)
+            .build()
+
+        WorkManager.getInstance(context)
+            .enqueueUniqueWork(workName, ExistingWorkPolicy.REPLACE, request)
+    }
+
+    /**
      * Enqueues immediate native call sync with connected network constraint.
      */
     fun enqueueSync(context: Context) {
@@ -69,7 +85,7 @@ object BackgroundScheduler {
     }
 
     fun ensurePeriodic(context: Context) {
-        val request = PeriodicWorkRequestBuilder<CallIngestWorker>(6, TimeUnit.HOURS)
+        val request = PeriodicWorkRequestBuilder<CallIngestWorker>(15, TimeUnit.MINUTES)
             .setInputData(
                 Data.Builder()
                     .putString(CallIngestWorker.KEY_REASON, REASON_PERIODIC)
@@ -80,7 +96,7 @@ object BackgroundScheduler {
                     .setRequiresBatteryNotLow(true)
                     .build(),
             )
-            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 5, TimeUnit.MINUTES)
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
             .addTag(TAG_INGEST)
             .build()
 

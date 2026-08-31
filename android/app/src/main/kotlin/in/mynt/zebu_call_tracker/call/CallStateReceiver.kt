@@ -46,8 +46,12 @@ class CallStateReceiver : BroadcastReceiver() {
         // log row and — critically — the dialer's recording file now exist.
         // Capturing on RINGING/OFFHOOK would run before either is written.
         if (normalised == "idle") {
-            // First queue the native ingest worker so capture happens immediately
+            // Queue immediate native ingest worker
             BackgroundScheduler.enqueueNow(context, BackgroundScheduler.REASON_CALL_ENDED)
+            
+            // Queue delayed ingest passes to capture late MediaStore indexing by OEM dialers
+            BackgroundScheduler.enqueueDelayedIngest(context, 10L, "${BackgroundScheduler.REASON_CALL_ENDED}_delay_10s")
+            BackgroundScheduler.enqueueDelayedIngest(context, 30L, "${BackgroundScheduler.REASON_CALL_ENDED}_delay_30s")
             
             // Queue the native outbox sync worker
             BackgroundScheduler.enqueueSync(context)
@@ -104,15 +108,19 @@ class CallStateReceiver : BroadcastReceiver() {
             startedAtMillis = startedAt,
         )
 
-        val serviceIntent = PostCallData.intoIntent(context, data)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            // startForegroundService is needed on O+ when the service will call
-            // startForeground(); the service itself does so only on API 34+, but
-            // it is safe to use startForegroundService on O–13 as well since the
-            // service always calls startForeground within 5 seconds.
-            context.startForegroundService(serviceIntent)
-        } else {
-            context.startService(serviceIntent)
+        try {
+            val serviceIntent = PostCallData.intoIntent(context, data)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                // startForegroundService is needed on O+ when the service will call
+                // startForeground(); the service itself does so only on API 34+, but
+                // it is safe to use startForegroundService on O–13 as well since the
+                // service always calls startForeground within 5 seconds.
+                context.startForegroundService(serviceIntent)
+            } else {
+                context.startService(serviceIntent)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "PostCallOverlay service could not be started from background: ${e.message}")
         }
     }
 
