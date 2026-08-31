@@ -1,15 +1,17 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 abstract final class _Ch {
   static const syncReminder = 'sync_reminder';
   static const syncStatus = 'sync_status';
+  static const syncProgress = 'sync_progress';
 }
 
 abstract final class _Id {
   static const reminder = 1001;
   static const success = 1002;
+  static const progress = 1003;
 }
 
 class NotificationService {
@@ -57,6 +59,60 @@ class NotificationService {
         enableVibration: false,
       ),
     );
+    await platform.createNotificationChannel(
+      const AndroidNotificationChannel(
+        _Ch.syncProgress,
+        'Sync progress',
+        description: 'Displays live progress during call upload synchronization.',
+        importance: Importance.low,
+        playSound: false,
+        enableVibration: false,
+      ),
+    );
+  }
+
+  Future<void> showSyncProgress({
+    required int current,
+    required int total,
+    String? statusText,
+  }) async {
+    if (!_ready) return;
+    final remaining = (total - current).clamp(0, total);
+    final percent = total > 0 ? ((current / total) * 100).toInt().clamp(0, 100) : 0;
+    final subtitle = statusText ?? '$current of $total synced ($remaining remaining)';
+
+    await _plugin.show(
+      _Id.progress,
+      'Syncing calls & recordings ($percent%)',
+      subtitle,
+      NotificationDetails(
+        android: AndroidNotificationDetails(
+          _Ch.syncProgress,
+          'Sync progress',
+          channelDescription: 'Displays live progress during call upload synchronization.',
+          importance: Importance.low,
+          priority: Priority.low,
+          showProgress: true,
+          maxProgress: total,
+          progress: current,
+          ongoing: true,
+          autoCancel: false,
+          onlyAlertOnce: true,
+          icon: '@mipmap/ic_launcher',
+          color: const Color(0xFF6750A4),
+        ),
+        iOS: const DarwinNotificationDetails(
+          presentAlert: false,
+          presentBadge: false,
+          presentSound: false,
+        ),
+      ),
+    );
+  }
+
+  Future<void> cancelSyncProgress() async {
+    if (!_ready) return;
+    await _plugin.cancel(_Id.progress);
   }
 
   Future<void> showSyncReminder(int pendingCount) async {

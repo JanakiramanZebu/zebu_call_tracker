@@ -1,4 +1,5 @@
 import '../../../core/platform/native_call_bridge.dart';
+import '../../../core/storage/app_database.dart';
 import '../../recording/domain/recording_matcher.dart';
 
 /// Where a call record stands with the server.
@@ -189,6 +190,87 @@ class CallStats {
         case RecordingMatchStatus.unmatched:
         case RecordingMatchStatus.notFound:
           absent++;
+      }
+    }
+
+    return CallStats(
+      incoming: incoming,
+      outgoing: outgoing,
+      missed: missed,
+      rejected: rejected,
+      neverAttended: neverAttended,
+      notPickupByClient: notPickupByClient,
+      uniqueCalls: uniqueNumbers.length,
+      answered: answered,
+      talkTimeSeconds: talk,
+      incomingDurationSeconds: incomingTalk,
+      outgoingDurationSeconds: outgoingTalk,
+      recordingsMatched: matched,
+      recordingsNeedReview: review,
+      recordingsAbsent: absent,
+    );
+  }
+
+  factory CallStats.fromLocalCalls(Iterable<LocalCall> calls) {
+    var incoming = 0,
+        outgoing = 0,
+        missed = 0,
+        rejected = 0,
+        neverAttended = 0,
+        notPickupByClient = 0,
+        answered = 0,
+        talk = 0,
+        incomingTalk = 0,
+        outgoingTalk = 0,
+        matched = 0,
+        review = 0,
+        absent = 0;
+
+    final uniqueNumbers = <String>{};
+
+    for (final c in calls) {
+      final number = c.phoneNumber.trim();
+      if (number.isNotEmpty && number != 'Unknown' && number != 'withheld') {
+        uniqueNumbers.add(number);
+      }
+
+      final dir = c.direction.toLowerCase();
+      final status = c.status.toLowerCase();
+      final isConnected = c.durationSeconds > 0;
+
+      final isMissed = dir == 'missed' || status == 'missed';
+      final isRejected = dir == 'rejected' || status == 'rejected';
+
+      if (isMissed) {
+        missed++;
+        neverAttended++;
+      } else if (isRejected) {
+        rejected++;
+      } else if (dir == 'incoming') {
+        incoming++;
+        if (isConnected) {
+          incomingTalk += c.durationSeconds;
+        } else {
+          neverAttended++;
+        }
+      } else if (dir == 'outgoing') {
+        outgoing++;
+        if (isConnected) {
+          outgoingTalk += c.durationSeconds;
+        } else {
+          notPickupByClient++;
+        }
+      }
+
+      if (isConnected) {
+        answered++;
+        talk += c.durationSeconds;
+      }
+
+      if (c.hasRecording) {
+        matched++;
+      } else {
+        absent++;
       }
     }
 

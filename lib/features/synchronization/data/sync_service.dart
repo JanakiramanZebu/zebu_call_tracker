@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:drift/drift.dart' hide Column;
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
@@ -226,15 +227,17 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
           }
 
           final directionStr = switch (r.direction) {
-            CallDirection.incoming => 'incoming',
             CallDirection.outgoing => 'outgoing',
-            _ => 'unknown',
+            CallDirection.incoming => 'incoming',
+            CallDirection.missed => 'incoming',
+            CallDirection.rejected => 'incoming',
+            _ => 'incoming',
           };
 
           final statusStr = switch (r.direction) {
             CallDirection.missed => 'missed',
             CallDirection.rejected => 'rejected',
-            _ => 'ended',
+            _ => (r.durationSeconds ?? 0) > 0 ? 'completed' : 'missed',
           };
 
           final durationSecs = r.durationSeconds ?? 0;
@@ -348,8 +351,22 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
     }
   }
 
-  /// Triggers full sync according to Section 11.2 of Mobile API Guide.
+  bool _isProcessing = false;
+
+  /// Triggers full sync with strict sequential one-by-one uploads (concurrency = 1)
+  /// and granular server confirmation.
   Future<SyncResultSummary> triggerSync() async {
+    if (_isProcessing) {
+      debugPrint('[SYNC] Sync already in progress, skipping concurrent trigger.');
+      return state.value ??
+          const SyncResultSummary(
+            attemptedCalls: 0,
+            syncedCalls: 0,
+            failedCalls: 0,
+            uploadedRecordings: 0,
+          );
+    }
+
     if (!AppConfig.hasServer) {
       return const SyncResultSummary(
         attemptedCalls: 0,
@@ -360,6 +377,7 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
       );
     }
 
+    _isProcessing = true;
     state = const AsyncLoading();
 
     final syncRepo = ref.read(syncRepositoryProvider);
@@ -374,10 +392,16 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
     String? clockSkewWarning;
 
     try {
+      debugPrint('[SYNC] SYNC START - Ingesting native call logs and checking recovery...');
       // Step 1: Ingest latest call logs from handset (with recording matching).
       await ingestNativeCallLogs();
 
-      // Step 2: Check server status and limits.
+      // Recover any stuck in-flight 'uploading' records back to 'pending'
+      await dao.recoverStuckUploadingCalls();
+      // Retry any previously failed calls
+      await dao.retryAllFailed();
+
+      // Step 2: Check server status and registration.
       final status = await syncRepo.getSyncStatus();
 
       if (status.deviceStatus == 'REVOKED') {
@@ -413,138 +437,115 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
       final deviceUuid = await deviceRepo.getDeviceUuid();
       final bridge = ref.read(nativeBridgeProvider);
 
-      // Loop multi-batch processing until ALL pending calls and ALL pending recording uploads are completed.
-      bool continueSyncing = true;
-      int maxLoops = 20; // safety ceiling for large backlogs
-      int loopCount = 0;
+      // Step 3: Sequential One-By-One Upload Loop (concurrency = 1).
+      debugPrint('[SYNC] Starting sequential one-by-one upload loop...');
 
-      while (continueSyncing && loopCount < maxLoops) {
-        loopCount++;
-        continueSyncing = false;
+      final pendingOutbox = await dao.getOutboxItems(filter: 'pending');
+      final totalToSync = pendingOutbox.length;
+      int currentUploaded = 0;
 
-        // Step 3: Metadata Batch Sync.
-        final pendingCalls =
-            await dao.getPendingCalls(status.policy.recommendedBatchSize);
+      if (totalToSync > 0) {
+        await notif.showSyncProgress(
+          current: 0,
+          total: totalToSync,
+          statusText: 'Starting sync · $totalToSync calls remaining',
+        );
+      }
 
-        final validCalls = <LocalCall>[];
-        final maxAgeDays = status.policy.maxCallAgeDays;
-        final nowUtc = DateTime.now().toUtc();
-
-        for (final call in pendingCalls) {
-          final ageInDays = nowUtc.difference(call.startedAt).inDays;
-          if (ageInDays > maxAgeDays) {
-            await dao.markFailed(
-              idempotencyKey: call.idempotencyKey,
-              errorCode: 'SYNC_POLICY_VIOLATION',
-              retryable: false,
-            );
-            failedCount++;
-          } else {
-            validCalls.add(call);
-          }
-          validCalls.add(call);
+      while (true) {
+        final call = await dao.claimNextPendingCall();
+        if (call == null) {
+          // No more pending or retryable records ready to upload.
+          break;
         }
 
-        if (validCalls.isNotEmpty) {
-          totalAttemptedCalls += validCalls.length;
-          final batchResult = await syncRepo.syncBatch(
-            deviceUuid: deviceUuid,
-            calls: validCalls,
+        totalAttemptedCalls++;
+        final remaining = (totalToSync - currentUploaded - 1).clamp(0, totalToSync);
+
+        await notif.showSyncProgress(
+          current: currentUploaded,
+          total: totalToSync,
+          statusText: 'Uploading ${call.phoneNumber} · $remaining remaining',
+        );
+
+        debugPrint('[SYNC] UPLOAD START - IdempotencyKey: ${call.idempotencyKey}, Local ID: ${call.localId}, Phone: ${call.phoneNumber}');
+
+        final result = await syncRepo.uploadSingleCall(
+          deviceUuid: deviceUuid,
+          call: call,
+        );
+
+        if (result.isSuccess) {
+          final serverId = result.callId ?? 'synced-${call.localId}';
+          await dao.markSynced(
+            idempotencyKey: call.idempotencyKey,
+            serverCallId: serverId,
+            revision: result.revision,
           );
+          syncedCount++;
+          currentUploaded++;
+          final left = (totalToSync - currentUploaded).clamp(0, totalToSync);
 
-          for (final item in batchResult.successful) {
-            await dao.markSynced(
-              idempotencyKey: item.idempotencyKey,
-              serverCallId: item.callId,
-              revision: item.revision,
-            );
-            syncedCount++;
-          }
+          await notif.showSyncProgress(
+            current: currentUploaded,
+            total: totalToSync,
+            statusText: 'Synced ${call.phoneNumber} · $left remaining',
+          );
+          debugPrint('[SYNC] UPLOAD SUCCESS - Local ID: ${call.localId}, Server ID: $serverId');
 
-          for (final item in batchResult.duplicates) {
-            await dao.markSynced(
-              idempotencyKey: item.idempotencyKey,
-              serverCallId: item.callId,
-              revision: item.revision,
-            );
-            syncedCount++;
-          }
-
-          for (final item in batchResult.failed) {
-            await dao.markFailed(
-              idempotencyKey: item.idempotencyKey,
-              errorCode: item.errorCode,
-              retryable: item.retryable,
-            );
-            failedCount++;
-          }
-
-          // If there were valid calls processed, check if more remain in next loop
-          if (batchResult.successful.isNotEmpty || batchResult.duplicates.isNotEmpty) {
-            continueSyncing = true;
-          }
-        }
-
-        // Step 4: Recording Audio Uploads.
-        final pendingUploads = await dao.getPendingRecordingUploads();
-
-        if (pendingUploads.isNotEmpty) {
-          for (final rec in pendingUploads) {
-            if (rec.serverCallId == null) continue;
-
-            final mediaStoreId = rec.recordingMediaStoreId;
-            if (mediaStoreId == null) {
-              // No MediaStore ID — mark explicitly as no-recording.
-              await syncRepo.updateCallNoRecording(rec.serverCallId!);
-              await dao.setHasRecording(rec.idempotencyKey, false);
-              continue;
-            }
-
-            // Hash the recording natively (reads via ContentResolver).
+          // Step 4: Recording Audio Upload if present.
+          if (call.hasRecording && call.recordingMediaStoreId != null) {
+            final mediaStoreId = call.recordingMediaStoreId!;
             final hash = await bridge.hashRecording(mediaStoreId);
-            if (hash == null) {
-              // File was deleted by the dialer since we found it.
-              await syncRepo.updateCallNoRecording(rec.serverCallId!);
-              await dao.setHasRecording(rec.idempotencyKey, false);
-              continue;
-            }
+            if (hash != null) {
+              final contentUri = call.recordingPath ??
+                  await bridge.getRecordingUri(mediaStoreId);
 
-            // Resolve to a content:// URI for upload.
-            final contentUri = rec.recordingPath ??
-                await bridge.getRecordingUri(mediaStoreId);
-
-            final tempDir = Directory.systemTemp;
-            final ext = _extensionFrom(contentUri);
-            final tempFile = File(
-              '${tempDir.path}/rec_${mediaStoreId}_${DateTime.now().millisecondsSinceEpoch}.$ext',
-            );
-
-            try {
-              await _copyContentUri(bridge, mediaStoreId, tempFile);
-
-              final uploaded = await syncRepo.uploadRecording(
-                serverCallId: rec.serverCallId!,
-                audioFile: tempFile,
-                checksumSha256: hash.checksum,
-                durationSeconds: rec.durationSeconds,
+              final tempDir = Directory.systemTemp;
+              final ext = _extensionFrom(contentUri);
+              final tempFile = File(
+                '${tempDir.path}/rec_${mediaStoreId}_${DateTime.now().millisecondsSinceEpoch}.$ext',
               );
 
-              if (uploaded) {
-                await dao.markRecordingUploaded(rec.idempotencyKey);
-                uploadedRecordingsCount++;
-                continueSyncing = true;
+              try {
+                await _copyContentUri(bridge, mediaStoreId, tempFile);
+
+                final uploaded = await syncRepo.uploadRecording(
+                  serverCallId: serverId,
+                  audioFile: tempFile,
+                  checksumSha256: hash.checksum,
+                  durationSeconds: call.durationSeconds,
+                );
+
+                if (uploaded) {
+                  await dao.markRecordingUploaded(call.idempotencyKey);
+                  uploadedRecordingsCount++;
+                  debugPrint('[SYNC] RECORDING UPLOAD SUCCESS - Local ID: ${call.localId}');
+                }
+              } catch (e) {
+                debugPrint('[SYNC] RECORDING UPLOAD ERROR - Local ID: ${call.localId}, Error: $e');
+              } finally {
+                if (await tempFile.exists()) await tempFile.delete();
               }
-            } catch (e) {
-              // Log or ignore so one bad file doesn't stop the whole queue
-            } finally {
-              if (await tempFile.exists()) await tempFile.delete();
             }
+          }
+        } else {
+          await dao.markFailed(
+            idempotencyKey: call.idempotencyKey,
+            errorCode: result.errorCode ?? 'UNKNOWN_ERROR',
+            retryable: result.isRetryable,
+          );
+          failedCount++;
+          debugPrint('[SYNC] UPLOAD FAILED - Local ID: ${call.localId}, Code: ${result.errorCode}, Retryable: ${result.isRetryable}');
+          if (result.isRetryable) {
+            debugPrint('[SYNC] RETRY SCHEDULED - Local ID: ${call.localId}');
           }
         }
       }
 
+      await notif.cancelSyncProgress();
+
       // Retention policy: automatically purge synced records older than 180 days (6 months)
-      // to keep local SQLite storage lean on low-end devices.
       final purgeCutoff = DateTime.now().toUtc().subtract(const Duration(days: 180));
       await dao.deleteSyncedCallsOlderThan(purgeCutoff);
       await dao.deletePermanentFailuresOlderThan(purgeCutoff);
@@ -558,8 +559,9 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
       );
 
       state = AsyncData(summary);
+      debugPrint('[SYNC] SYNC STOP - Attempted: $totalAttemptedCalls, Synced: $syncedCount, Failed: $failedCount, Recordings: $uploadedRecordingsCount');
 
-      // Notify the user if anything actually moved to the server.
+      // Notify user if calls were synced
       if (summary.isSuccess) {
         await notif.cancelSyncReminder();
         await notif.showSyncSuccess(
@@ -570,6 +572,7 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
 
       return summary;
     } catch (e) {
+      debugPrint('[SYNC] SYNC ERROR: $e');
       final summary = SyncResultSummary(
         attemptedCalls: totalAttemptedCalls,
         syncedCalls: syncedCount,
@@ -579,6 +582,9 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
       );
       state = AsyncData(summary);
       return summary;
+    } finally {
+      _isProcessing = false;
+      ref.invalidate(outboxItemsProvider);
     }
   }
 

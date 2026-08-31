@@ -70,8 +70,9 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
 
   @override
   Widget build(BuildContext context) {
+    final periodEntries = ref.watch(analyticsPeriodEntriesProvider);
     final feed = ref.watch(callFeedProvider);
-    final entries = feed.asData?.value.entries ?? const <CallEntry>[];
+    final entries = periodEntries.asData?.value ?? feed.asData?.value.entries ?? const <CallEntry>[];
 
     final (title, subtitle, icon, color) = _getCategoryMetadata(context);
     final filteredCalls = _filterCalls(entries);

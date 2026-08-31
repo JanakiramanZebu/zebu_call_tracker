@@ -120,6 +120,30 @@ object IngestStore {
 
     // --------------------------------------------------------------- drain
 
+    private const val KEY_SYNCED_CALLS = "synced_calls"
+
+    fun markCallSynced(context: Context, idempotencyKey: String, serverCallId: String) {
+        val p = prefs(context)
+        val arr = JSONArray(p.getString(KEY_SYNCED_CALLS, "[]"))
+        arr.put(
+            JSONObject()
+                .put("idempotencyKey", idempotencyKey)
+                .put("serverCallId", serverCallId)
+                .put("syncedAtMillis", System.currentTimeMillis()),
+        )
+        p.edit().putString(KEY_SYNCED_CALLS, arr.toString()).apply()
+    }
+
+    fun getSyncedCalls(context: Context): List<Map<String, Any?>> {
+        val p = prefs(context)
+        val arr = JSONArray(p.getString(KEY_SYNCED_CALLS, "[]"))
+        return arr.toMapList()
+    }
+
+    fun clearSyncedCalls(context: Context) {
+        prefs(context).edit().remove(KEY_SYNCED_CALLS).apply()
+    }
+
     fun read(context: Context): Map<String, Any?> {
         val p = prefs(context)
         val batches = JSONArray(p.getString(KEY_BATCHES, "[]"))
@@ -136,6 +160,7 @@ object IngestStore {
 
         return mapOf(
             "batches" to out,
+            "syncedCalls" to getSyncedCalls(context),
             "overflowed" to p.getBoolean(KEY_OVERFLOWED, false),
             "lastRunAtMillis" to p.getLong(KEY_LAST_RUN_AT, 0L),
             "lastRunStatus" to p.getString(KEY_LAST_RUN_STATUS, null),
@@ -153,6 +178,7 @@ object IngestStore {
     fun clearBatches(context: Context) {
         prefs(context).edit()
             .putString(KEY_BATCHES, "[]")
+            .remove(KEY_SYNCED_CALLS)
             .putBoolean(KEY_OVERFLOWED, false)
             .apply()
     }

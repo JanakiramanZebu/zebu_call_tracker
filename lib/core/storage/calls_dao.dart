@@ -35,6 +35,49 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
         .get();
   }
 
+  Future<LocalCall?> claimNextPendingCall() async {
+    final now = DateTime.now().toUtc();
+    return transaction(() async {
+      final call = await (select(_table)
+            ..where((t) =>
+                t.syncState.equals('pending') |
+                (t.syncState.equals('failed_retryable') &
+                    (t.nextAttemptAt.isNull() | t.nextAttemptAt.isSmallerOrEqualValue(now))))
+            ..orderBy([(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.asc)])
+            ..limit(1))
+          .getSingleOrNull();
+
+      if (call == null) return null;
+
+      await (update(_table)..where((t) => t.idempotencyKey.equals(call.idempotencyKey)))
+          .write(
+        const LocalCallsCompanion(
+          syncState: Value('uploading'),
+        ),
+      );
+
+      return call.copyWith(syncState: 'uploading');
+    });
+  }
+
+  Future<int> recoverStuckUploadingCalls({Duration timeout = const Duration(minutes: 5)}) async {
+    return (update(_table)..where((t) => t.syncState.equals('uploading')))
+        .write(
+      const LocalCallsCompanion(
+        syncState: Value('pending'),
+      ),
+    );
+  }
+
+  Future<void> markUploading(String idempotencyKey) async {
+    await (update(_table)..where((t) => t.idempotencyKey.equals(idempotencyKey)))
+        .write(
+      const LocalCallsCompanion(
+        syncState: Value('uploading'),
+      ),
+    );
+  }
+
   Future<void> markSynced({
     required String idempotencyKey,
     required String serverCallId,
@@ -122,12 +165,15 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
   Future<Map<String, int>> getSyncCounters() async {
     final all = await select(_table).get();
     int uploaded = 0;
+    int uploading = 0;
     int waiting = 0;
     int failed = 0;
 
     for (final c in all) {
-      if (c.syncState == 'synced') {
+      if (c.syncState == 'synced' || c.syncState == 'skipped') {
         uploaded++;
+      } else if (c.syncState == 'uploading') {
+        uploading++;
       } else if (c.syncState == 'failed_permanent') {
         failed++;
       } else {
@@ -137,10 +183,40 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
 
     return {
       'uploaded': uploaded,
+      'uploading': uploading,
       'waiting': waiting,
       'failed': failed,
       'total': all.length,
     };
+  }
+
+  Stream<Map<String, int>> watchSyncCounters() {
+    return select(_table).watch().map((all) {
+      int uploaded = 0;
+      int uploading = 0;
+      int waiting = 0;
+      int failed = 0;
+
+      for (final c in all) {
+        if (c.syncState == 'synced' || c.syncState == 'skipped') {
+          uploaded++;
+        } else if (c.syncState == 'uploading') {
+          uploading++;
+        } else if (c.syncState == 'failed_permanent') {
+          failed++;
+        } else {
+          waiting++;
+        }
+      }
+
+      return {
+        'uploaded': uploaded,
+        'uploading': uploading,
+        'waiting': waiting,
+        'failed': failed,
+        'total': all.length,
+      };
+    });
   }
 
   Future<List<LocalCall>> getPendingRecordingUploads() {
@@ -215,29 +291,52 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
         .get();
   }
 
-  Stream<Map<String, int>> watchSyncCounters() {
-    return select(_table).watch().map((all) {
-      int uploaded = 0;
-      int waiting = 0;
-      int failed = 0;
+  Future<List<LocalCall>> getCallsForAnalytics({
+    DateTime? startUtc,
+    DateTime? endUtc,
+    bool excludeInternal = false,
+  }) async {
+    var query = select(_table);
+    if (startUtc != null && endUtc != null) {
+      query.where((t) =>
+          t.startedAt.isBiggerOrEqualValue(startUtc) &
+          t.startedAt.isSmallerOrEqualValue(endUtc));
+    } else if (startUtc != null) {
+      query.where((t) => t.startedAt.isBiggerOrEqualValue(startUtc));
+    } else if (endUtc != null) {
+      query.where((t) => t.startedAt.isSmallerOrEqualValue(endUtc));
+    }
 
-      for (final c in all) {
-        if (c.syncState == 'synced') {
-          uploaded++;
-        } else if (c.syncState == 'failed_permanent') {
-          failed++;
-        } else {
-          waiting++;
-        }
-      }
+    if (excludeInternal) {
+      query.where((t) => t.phoneNumber.length.isBiggerThanValue(4));
+    }
 
-      return {
-        'uploaded': uploaded,
-        'waiting': waiting,
-        'failed': failed,
-        'total': all.length,
-      };
-    });
+    query.orderBy([(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)]);
+    return query.get();
+  }
+
+  Stream<List<LocalCall>> watchCallsForAnalytics({
+    DateTime? startUtc,
+    DateTime? endUtc,
+    bool excludeInternal = false,
+  }) {
+    var query = select(_table);
+    if (startUtc != null && endUtc != null) {
+      query.where((t) =>
+          t.startedAt.isBiggerOrEqualValue(startUtc) &
+          t.startedAt.isSmallerOrEqualValue(endUtc));
+    } else if (startUtc != null) {
+      query.where((t) => t.startedAt.isBiggerOrEqualValue(startUtc));
+    } else if (endUtc != null) {
+      query.where((t) => t.startedAt.isSmallerOrEqualValue(endUtc));
+    }
+
+    if (excludeInternal) {
+      query.where((t) => t.phoneNumber.length.isBiggerThanValue(4));
+    }
+
+    query.orderBy([(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)]);
+    return query.watch();
   }
 
   Stream<List<LocalCall>> watchAllCalls() {

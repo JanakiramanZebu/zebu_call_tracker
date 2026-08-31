@@ -2,7 +2,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:workmanager/workmanager.dart';
 
 import '../../../core/platform/native_call_bridge.dart';
+import '../../../core/storage/database_providers.dart';
 import '../../call_tracking/data/call_feed.dart';
+import '../../synchronization/data/sync_service.dart';
 import 'background_sync.dart';
 
 
@@ -67,20 +69,33 @@ class BackgroundController extends AsyncNotifier<void> {
   Future<bool> openVendorSettings() =>
       ref.read(nativeBridgeProvider).openVendorBackgroundSettings();
 
-  /// Folds what the worker captured back into the app, then clears it.
-  ///
-  /// Ordering matters: the batches are only cleared after the feed has been
-  /// rebuilt from the device, so a crash in between costs a repeated fold
-  /// (harmless — the call log is the source of truth) rather than lost
-  /// snapshots.
+  /// Folds what the worker captured back into the app, reconciles SQLite states, then clears native batches.
   Future<IngestSnapshot> drain() async {
     final bridge = ref.read(nativeBridgeProvider);
     final snapshot = await bridge.readIngestBatches();
     if (snapshot.isEmpty) return snapshot;
 
+    final dao = ref.read(callsDaoProvider);
+
+    // 1. Reconcile any calls synced natively while the app was closed
+    for (final s in snapshot.syncedCalls) {
+      if (s.idempotencyKey.isNotEmpty) {
+        await dao.markSynced(
+          idempotencyKey: s.idempotencyKey,
+          serverCallId: s.serverCallId,
+          revision: 1,
+        );
+      }
+    }
+
+    // 2. Ingest native call logs into SQLite so newly captured calls land in DB
+    await ref.read(syncServiceProvider.notifier).ingestNativeCallLogs();
+
+    // 3. Refresh feeds and clear drained native batches
     await ref.read(callFeedProvider.notifier).refresh();
     await bridge.clearIngestBatches();
     ref.invalidate(backgroundStatusProvider);
+    ref.invalidate(syncCountersProvider);
     return snapshot;
   }
 }

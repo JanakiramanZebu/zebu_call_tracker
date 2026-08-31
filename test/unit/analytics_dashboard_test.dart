@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:zebu_call_tracker/core/theme/app_theme.dart';
 import 'package:zebu_call_tracker/features/call_tracking/data/call_feed.dart';
+import 'package:zebu_call_tracker/features/call_tracking/domain/call_entry.dart';
 import 'package:zebu_call_tracker/features/call_tracking/presentation/dashboard_screen.dart';
 
 class FakeCallFeed extends CallFeed {
@@ -17,6 +18,15 @@ void main() {
       ProviderScope(
         overrides: [
           callFeedProvider.overrideWith(FakeCallFeed.new),
+          analyticsPeriodStatsProvider.overrideWith((ref) => Stream.value(CallStats.empty)),
+          analyticsHourlyActivityProvider.overrideWith((ref) => Stream.value(
+                (
+                  incoming: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                  outgoing: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                  missed: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                ),
+              )),
+          analyticsSparklineProvider.overrideWith((ref) => Stream.value(const [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])),
         ],
         child: MaterialApp(
           theme: AppTheme.light(),
@@ -31,7 +41,7 @@ void main() {
 
     expect(find.text('Analytics'), findsOneWidget);
     expect(find.text('Filter'), findsOneWidget);
-    expect(find.text('Yesterday'), findsOneWidget);
+    expect(find.text('Today'), findsOneWidget);
     expect(find.text('Summary'), findsOneWidget);
     expect(find.text('Analysis'), findsOneWidget);
 

@@ -4,6 +4,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../core/platform/native_call_bridge.dart';
+import '../../../core/storage/app_database.dart';
 import '../../../core/storage/database_providers.dart';
 import '../../recording/domain/recording_matcher.dart';
 import '../domain/call_entry.dart';
@@ -291,11 +292,11 @@ final callFeedProvider = AsyncNotifierProvider<CallFeed, CallFeedState>(
   CallFeed.new,
 );
 
-enum DashboardPeriod { today, yesterday, week, month }
+enum DashboardPeriod { today, yesterday, week, month, all }
 
 class DashboardPeriodController extends Notifier<DashboardPeriod> {
   @override
-  DashboardPeriod build() => DashboardPeriod.yesterday;
+  DashboardPeriod build() => DashboardPeriod.today;
 
   void select(DashboardPeriod period) => state = period;
 }
@@ -320,25 +321,27 @@ class PeriodRangeInfo {
 final periodRangeInfoProvider = Provider<PeriodRangeInfo>((ref) {
   final period = ref.watch(dashboardPeriodProvider);
   final now = DateTime.now();
-  final startOfToday = DateTime(now.year, now.month, now.day);
-  final endOfToday = DateTime(now.year, now.month, now.day, 23, 59, 59);
+  final startOfToday = DateTime(now.year, now.month, now.day, 0, 0, 0);
+  final endOfToday = DateTime(now.year, now.month, now.day, 23, 59, 59, 999);
 
   final (start, end) = switch (period) {
     DashboardPeriod.today => (startOfToday, endOfToday),
     DashboardPeriod.yesterday => (
         startOfToday.subtract(const Duration(days: 1)),
-        DateTime(now.year, now.month, now.day - 1, 23, 59, 59),
+        startOfToday.subtract(const Duration(milliseconds: 1)),
       ),
     DashboardPeriod.week => (
         startOfToday.subtract(Duration(days: (now.weekday - 1).clamp(0, 6))),
         endOfToday,
       ),
-    DashboardPeriod.month => (DateTime(now.year, now.month, 1), endOfToday),
+    DashboardPeriod.month => (DateTime(now.year, now.month, 1, 0, 0, 0), endOfToday),
+    DashboardPeriod.all => (DateTime.fromMillisecondsSinceEpoch(0), endOfToday.add(const Duration(days: 365))),
   };
 
   final dateFormat = DateFormat('dd-MMM-yyyy hh:mm a');
-  final formatted =
-      '${dateFormat.format(start)} - ${dateFormat.format(end)}';
+  final formatted = period == DashboardPeriod.all
+      ? 'All Time'
+      : '${dateFormat.format(start)} - ${dateFormat.format(end)}';
 
   return PeriodRangeInfo(
     start: start,
@@ -347,24 +350,160 @@ final periodRangeInfoProvider = Provider<PeriodRangeInfo>((ref) {
   );
 });
 
-/// Today's aggregates for the dashboard.
-final todayStatsProvider = Provider<CallStats>((ref) {
-  final feed = ref.watch(callFeedProvider).value;
-  if (feed == null) return CallStats.empty;
+class AnalyticsExcludeInternalController extends Notifier<bool> {
+  @override
+  bool build() => true;
 
-  final now = DateTime.now();
-  final startOfToday = DateTime(now.year, now.month, now.day);
-  return CallStats.from(
-    feed.entries.where((e) {
-      final local = e.startedAtUtc?.toLocal();
-      return local != null && !local.isBefore(startOfToday);
-    }),
-  );
+  void toggle() => state = !state;
+  void set(bool val) => state = val;
+}
+
+final analyticsExcludeInternalProvider =
+    NotifierProvider<AnalyticsExcludeInternalController, bool>(
+  AnalyticsExcludeInternalController.new,
+);
+
+/// Reactive Stream of CallStats directly computed from SQLite database records
+/// matching the active date period and filter parameters.
+final analyticsPeriodStatsProvider = StreamProvider<CallStats>((ref) {
+  final dao = ref.watch(callsDaoProvider);
+  final rangeInfo = ref.watch(periodRangeInfoProvider);
+  final excludeInternal = ref.watch(analyticsExcludeInternalProvider);
+
+  return dao.watchCallsForAnalytics(
+    startUtc: rangeInfo.start.toUtc(),
+    endUtc: rangeInfo.end.toUtc(),
+    excludeInternal: excludeInternal,
+  ).map(CallStats.fromLocalCalls);
 });
 
-/// Local period aggregates for the dashboard computed directly
-/// from local database call records within the active range.
+/// Reactive hourly call activity point distribution for dashboard charts.
+final analyticsHourlyActivityProvider = StreamProvider<({List<double> incoming, List<double> outgoing, List<double> missed})>((ref) {
+  final dao = ref.watch(callsDaoProvider);
+  final rangeInfo = ref.watch(periodRangeInfoProvider);
+  final excludeInternal = ref.watch(analyticsExcludeInternalProvider);
+
+  return dao.watchCallsForAnalytics(
+    startUtc: rangeInfo.start.toUtc(),
+    endUtc: rangeInfo.end.toUtc(),
+    excludeInternal: excludeInternal,
+  ).map((calls) {
+    final incoming = List.filled(6, 0.0);
+    final outgoing = List.filled(6, 0.0);
+    final missed = List.filled(6, 0.0);
+
+    for (final c in calls) {
+      final localDt = c.startedAt.toLocal();
+      final hour = localDt.hour;
+      final bucket = (hour ~/ 4).clamp(0, 5);
+      final dir = c.direction.toLowerCase();
+      final status = c.status.toLowerCase();
+
+      if (dir == 'incoming') {
+        incoming[bucket]++;
+      } else if (dir == 'outgoing') {
+        outgoing[bucket]++;
+      } else if (dir == 'missed' || dir == 'rejected' || status == 'missed' || status == 'rejected') {
+        missed[bucket]++;
+      }
+    }
+
+    return (incoming: incoming, outgoing: outgoing, missed: missed);
+  });
+});
+
+/// Reactive sparkline data point distribution.
+final analyticsSparklineProvider = StreamProvider<List<double>>((ref) {
+  final dao = ref.watch(callsDaoProvider);
+  final rangeInfo = ref.watch(periodRangeInfoProvider);
+  final excludeInternal = ref.watch(analyticsExcludeInternalProvider);
+
+  return dao.watchCallsForAnalytics(
+    startUtc: rangeInfo.start.toUtc(),
+    endUtc: rangeInfo.end.toUtc(),
+    excludeInternal: excludeInternal,
+  ).map((calls) {
+    if (calls.isEmpty) return const [0, 0, 0, 0, 0, 0, 0, 0];
+    final buckets = List.filled(8, 0.0);
+    for (final c in calls) {
+      final hour = c.startedAt.toLocal().hour;
+      final b = (hour ~/ 3).clamp(0, 7);
+      buckets[b]++;
+    }
+    return buckets;
+  });
+});
+
+CallEntry callEntryFromLocalCall(LocalCall lc) {
+  final dir = switch (lc.direction.toLowerCase()) {
+    'incoming' => CallDirection.incoming,
+    'outgoing' => CallDirection.outgoing,
+    'missed' => CallDirection.missed,
+    'rejected' => CallDirection.rejected,
+    _ => CallDirection.unknown,
+  };
+
+  final match = lc.hasRecording && lc.recordingPath != null
+      ? RecordingMatch(
+          status: RecordingMatchStatus.matched,
+          confidence: 1.0,
+          candidate: RecordingCandidate(
+            mediaStoreId: lc.recordingMediaStoreId ?? 0,
+            displayName: lc.recordingPath?.split('/').last,
+            durationMillis: lc.durationSeconds * 1000,
+            sizeBytes: 0,
+            dateAddedEpochSeconds: lc.startedAt.millisecondsSinceEpoch ~/ 1000,
+            dateModifiedEpochSeconds: lc.startedAt.millisecondsSinceEpoch ~/ 1000,
+          ),
+        )
+      : const RecordingMatch(
+          status: RecordingMatchStatus.notFound,
+          confidence: 0.0,
+        );
+
+  final upState = switch (lc.syncState) {
+    'synced' => UploadState.uploaded,
+    'uploading' => UploadState.uploading,
+    'failed_permanent' || 'failed_retryable' => UploadState.failed,
+    _ => UploadState.pending,
+  };
+
+  return CallEntry(
+    row: CallLogRow(
+      systemId: lc.localId,
+      number: lc.phoneNumber,
+      presentation: NumberPresentation.allowed,
+      cachedName: lc.contactName,
+      direction: dir,
+      dateMillis: lc.startedAt.millisecondsSinceEpoch,
+      durationSeconds: lc.durationSeconds,
+      phoneAccountId: lc.simSlot?.toString(),
+    ),
+    match: match,
+    uploadState: upState,
+    contactName: lc.contactName,
+  );
+}
+
+/// Reactive entries matching active period and filter for drilldown popups.
+final analyticsPeriodEntriesProvider = StreamProvider<List<CallEntry>>((ref) {
+  final dao = ref.watch(callsDaoProvider);
+  final rangeInfo = ref.watch(periodRangeInfoProvider);
+  final excludeInternal = ref.watch(analyticsExcludeInternalProvider);
+
+  return dao.watchCallsForAnalytics(
+    startUtc: rangeInfo.start.toUtc(),
+    endUtc: rangeInfo.end.toUtc(),
+    excludeInternal: excludeInternal,
+  ).map((calls) => calls.map(callEntryFromLocalCall).toList());
+});
+
+/// Aggregates for the dashboard computed from database when available,
+/// with immediate fallback to feed entries during initialization or tests.
 final periodStatsProvider = Provider<CallStats>((ref) {
+  final statsAsync = ref.watch(analyticsPeriodStatsProvider);
+  if (statsAsync.hasValue) return statsAsync.requireValue;
+
   final feed = ref.watch(callFeedProvider).value;
   if (feed == null) return CallStats.empty;
 
@@ -375,6 +514,24 @@ final periodStatsProvider = Provider<CallStats>((ref) {
       final local = e.startedAtUtc?.toLocal();
       if (local == null) return false;
       return !local.isBefore(rangeInfo.start) && !local.isAfter(rangeInfo.end);
+    }),
+  );
+});
+
+/// Today's aggregates for the dashboard.
+final todayStatsProvider = Provider<CallStats>((ref) {
+  final statsAsync = ref.watch(analyticsPeriodStatsProvider);
+  if (statsAsync.hasValue) return statsAsync.requireValue;
+
+  final feed = ref.watch(callFeedProvider).value;
+  if (feed == null) return CallStats.empty;
+
+  final now = DateTime.now();
+  final startOfToday = DateTime(now.year, now.month, now.day);
+  return CallStats.from(
+    feed.entries.where((e) {
+      final local = e.startedAtUtc?.toLocal();
+      return local != null && !local.isBefore(startOfToday);
     }),
   );
 });

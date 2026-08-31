@@ -688,13 +688,36 @@ class IngestBatch {
   );
 }
 
+class SyncedCallRecord {
+  const SyncedCallRecord({
+    required this.idempotencyKey,
+    required this.serverCallId,
+    required this.syncedAtMillis,
+  });
+
+  final String idempotencyKey;
+  final String serverCallId;
+  final int syncedAtMillis;
+
+  factory SyncedCallRecord.fromPlatform(Map<Object?, Object?> m) => SyncedCallRecord(
+    idempotencyKey: m['idempotencyKey'] as String? ?? '',
+    serverCallId: m['serverCallId'] as String? ?? '',
+    syncedAtMillis: (m['syncedAtMillis'] as num?)?.toInt() ?? 0,
+  );
+}
+
 class IngestSnapshot {
-  const IngestSnapshot({required this.batches, required this.overflowed});
+  const IngestSnapshot({
+    required this.batches,
+    this.syncedCalls = const [],
+    required this.overflowed,
+  });
 
   final List<IngestBatch> batches;
+  final List<SyncedCallRecord> syncedCalls;
   final bool overflowed;
 
-  bool get isEmpty => batches.isEmpty;
+  bool get isEmpty => batches.isEmpty && syncedCalls.isEmpty;
 
   /// Every recording seen across all batches, newest capture last. Feeding the
   /// matcher the union rather than per-batch lists means a call captured in one
@@ -707,6 +730,10 @@ class IngestSnapshot {
     batches: (m['batches'] as List<Object?>? ?? const <Object?>[])
         .cast<Map<Object?, Object?>>()
         .map(IngestBatch.fromPlatform)
+        .toList(growable: false),
+    syncedCalls: (m['syncedCalls'] as List<Object?>? ?? const <Object?>[])
+        .cast<Map<Object?, Object?>>()
+        .map(SyncedCallRecord.fromPlatform)
         .toList(growable: false),
     overflowed: m['overflowed'] as bool? ?? false,
   );

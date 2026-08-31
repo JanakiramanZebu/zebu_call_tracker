@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../../core/platform/native_call_bridge.dart';
 import '../../../core/theme/design_tokens.dart';
 import '../../../core/utils/formatters.dart';
 import '../../../shared/widgets/charts.dart';
@@ -29,14 +28,23 @@ class DashboardScreen extends ConsumerStatefulWidget {
 
 class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   int _tabIndex = 0; // 0: Summary, 1: Analysis
-  bool _excludeNumbers = true;
+
+  Future<void> _refreshAnalytics() async {
+    await ref.read(callFeedProvider.notifier).refresh();
+    ref.invalidate(analyticsPeriodStatsProvider);
+    ref.invalidate(analyticsHourlyActivityProvider);
+    ref.invalidate(analyticsSparklineProvider);
+  }
 
   @override
   Widget build(BuildContext context) {
     final feed = ref.watch(callFeedProvider);
     final period = ref.watch(dashboardPeriodProvider);
     final rangeInfo = ref.watch(periodRangeInfoProvider);
-    final stats = ref.watch(periodStatsProvider);
+    final statsAsync = ref.watch(analyticsPeriodStatsProvider);
+    final sparklineAsync = ref.watch(analyticsSparklineProvider);
+    final activityAsync = ref.watch(analyticsHourlyActivityProvider);
+    final excludeNumbers = ref.watch(analyticsExcludeInternalProvider);
 
     return Scaffold(
       backgroundColor: AppTokens.bgPrimary,
@@ -57,7 +65,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh_rounded, color: AppTokens.textSecondary),
-            onPressed: () => ref.read(callFeedProvider.notifier).refresh(),
+            onPressed: _refreshAnalytics,
             tooltip: 'Refresh analytics',
           ),
           IconButton(
@@ -99,7 +107,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       body: RefreshIndicator(
         color: AppTokens.brandElectric,
         backgroundColor: AppTokens.surface2,
-        onRefresh: () => ref.read(callFeedProvider.notifier).refresh(),
+        onRefresh: _refreshAnalytics,
         child: feed.when(
           loading: () => const DashboardSkeleton(),
           error: (e, _) => EmptyState(
@@ -107,7 +115,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             title: 'Could not load analytics',
             message: '$e',
             actionLabel: 'Try again',
-            onAction: () => ref.read(callFeedProvider.notifier).refresh(),
+            onAction: _refreshAnalytics,
           ),
           data: (state) {
             if (state.blocked) {
@@ -124,6 +132,15 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 ),
               );
             }
+
+            final CallStats stats = statsAsync.asData?.value ?? ref.watch(periodStatsProvider);
+            final sparklineData = sparklineAsync.asData?.value ?? const [0, 0, 0, 0, 0, 0, 0, 0];
+            final activityData = activityAsync.asData?.value ??
+                (
+                  incoming: List.filled(6, 0.0),
+                  outgoing: List.filled(6, 0.0),
+                  missed: List.filled(6, 0.0),
+                );
 
             return ListView(
               padding: const EdgeInsets.fromLTRB(16, 4, 16, 32),
@@ -151,12 +168,14 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
 
                       // 3. Exclude Number pill
                       _DropdownPill(
-                        label: 'Ex. No.: ${_excludeNumbers ? "Yes" : "No"}',
-                        icon: _excludeNumbers
+                        label: 'Ex. No.: ${excludeNumbers ? "Yes" : "No"}',
+                        icon: excludeNumbers
                             ? Icons.check_circle_rounded
                             : Icons.cancel_rounded,
-                        activeColor: _excludeNumbers ? AppTokens.brandElectric : null,
-                        onTap: () => setState(() => _excludeNumbers = !_excludeNumbers),
+                        activeColor: excludeNumbers ? AppTokens.brandElectric : null,
+                        onTap: () => ref
+                            .read(analyticsExcludeInternalProvider.notifier)
+                            .toggle(),
                       ),
                     ],
                   ),
@@ -207,11 +226,35 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 ),
                 const SizedBox(height: 16),
 
+                // ── Empty State Banner when 0 records match filter ──────────
+                if (stats.total == 0) ...[
+                  AppCard(
+                    padding: const EdgeInsets.all(16),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.info_outline_rounded, color: AppTokens.textMuted, size: 20),
+                        const SizedBox(width: 12),
+                        const Expanded(
+                          child: Text(
+                            'No calls match the selected date and filters.',
+                            style: TextStyle(color: AppTokens.textMuted, fontSize: 13),
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () => _showPeriodSelector(context),
+                          child: const Text('Change Filter', style: TextStyle(color: AppTokens.brandElectric)),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                ],
+
                 // ── Active Tab View ──────────────────────────────────────────
                 if (_tabIndex == 0)
-                  _buildSummaryTab(context, stats, state.entries)
+                  _buildSummaryTab(context, stats, sparklineData, activityData)
                 else
-                  _buildAnalysisTab(context, stats, state.entries),
+                  _buildAnalysisTab(context, stats),
               ],
             );
           },
@@ -223,11 +266,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   Widget _buildSummaryTab(
     BuildContext context,
     CallStats stats,
-    List<CallEntry> entries,
+    List<double> sparklineData,
+    ({List<double> incoming, List<double> outgoing, List<double> missed}) activityData,
   ) {
-    // Generate sparkline values based on hourly distribution
-    final sparklineData = _computeSparklineData(entries);
-
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -418,7 +459,13 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 ],
               ),
               const SizedBox(height: 14),
-              _buildActivityChart(entries),
+              CallActivityChart(
+                incomingPoints: activityData.incoming,
+                outgoingPoints: activityData.outgoing,
+                missedPoints: activityData.missed,
+                labels: const ['12A', '4A', '8A', '12P', '4P', '8P'],
+                height: 160,
+              ),
             ],
           ),
         ),
@@ -435,7 +482,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   Widget _buildAnalysisTab(
     BuildContext context,
     CallStats stats,
-    List<CallEntry> entries,
   ) {
     final answeredRate = stats.total == 0
         ? 0.0
@@ -630,44 +676,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     );
   }
 
-  Widget _buildActivityChart(List<CallEntry> entries) {
-    // Bucket entries into 6 time intervals (00:00, 04:00, 08:00, 12:00, 16:00, 20:00)
-    final incoming = List.filled(6, 0.0);
-    final outgoing = List.filled(6, 0.0);
-    final missed = List.filled(6, 0.0);
-
-    for (final e in entries) {
-      final utc = e.startedAtUtc;
-      if (utc == null) continue;
-      final hour = utc.toLocal().hour;
-      final bucket = (hour ~/ 4).clamp(0, 5);
-
-      switch (e.row.direction) {
-        case CallDirection.incoming:
-          incoming[bucket]++;
-          break;
-        case CallDirection.outgoing:
-          outgoing[bucket]++;
-          break;
-        case CallDirection.missed:
-        case CallDirection.rejected:
-        case CallDirection.blocked:
-          missed[bucket]++;
-          break;
-        default:
-          break;
-      }
-    }
-
-    return CallActivityChart(
-      incomingPoints: incoming,
-      outgoingPoints: outgoing,
-      missedPoints: missed,
-      labels: const ['12A', '4A', '8A', '12P', '4P', '8P'],
-      height: 160,
-    );
-  }
-
   Widget _buildInsightsGrid(CallStats stats) {
     final missedRate = stats.total == 0
         ? '0.0%'
@@ -696,24 +704,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     );
   }
 
-  List<double> _computeSparklineData(List<CallEntry> entries) {
-    if (entries.isEmpty) return const [2, 5, 8, 4, 9, 12, 16, 14, 18];
-    // 8 sample points across day
-    final buckets = List.filled(8, 0.0);
-    for (final e in entries) {
-      final dt = e.startedAtUtc?.toLocal();
-      if (dt == null) continue;
-      final b = (dt.hour ~/ 3).clamp(0, 7);
-      buckets[b]++;
-    }
-    return buckets;
-  }
-
   String _periodLabel(DashboardPeriod p) => switch (p) {
         DashboardPeriod.today => 'Today',
         DashboardPeriod.yesterday => 'Yesterday',
         DashboardPeriod.week => 'This Week',
         DashboardPeriod.month => 'This Month',
+        DashboardPeriod.all => 'All Time',
       };
 
   void _showPeriodSelector(BuildContext context) {
@@ -785,51 +781,56 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
         side: BorderSide(color: AppTokens.borderDefault),
       ),
-      builder: (context) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Analytics Filters',
-                style: TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.white,
-                ),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setModalState) {
+          final isExcluded = ref.watch(analyticsExcludeInternalProvider);
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Analytics Filters',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    activeThumbColor: AppTokens.brandElectric,
+                    title: const Text(
+                      'Exclude Internal Employee Calls',
+                      style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                    ),
+                    subtitle: const Text(
+                      'Hides intra-company team calls from analytics',
+                      style: TextStyle(color: AppTokens.textMuted),
+                    ),
+                    value: isExcluded,
+                    onChanged: (val) {
+                      ref.read(analyticsExcludeInternalProvider.notifier).set(val);
+                      setModalState(() {});
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 48,
+                    child: FilledButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      child: const Text('Apply Filters'),
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(height: 16),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                activeThumbColor: AppTokens.brandElectric,
-                title: const Text(
-                  'Exclude Internal Employee Calls',
-                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
-                ),
-                subtitle: const Text(
-                  'Hides intra-company team calls from analytics',
-                  style: TextStyle(color: AppTokens.textMuted),
-                ),
-                value: _excludeNumbers,
-                onChanged: (val) {
-                  setState(() => _excludeNumbers = val);
-                  Navigator.of(context).pop();
-                },
-              ),
-              const SizedBox(height: 16),
-              SizedBox(
-                width: double.infinity,
-                height: 48,
-                child: FilledButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  child: const Text('Apply Filters'),
-                ),
-              ),
-            ],
-          ),
-        ),
+            ),
+          );
+        },
       ),
     );
   }
