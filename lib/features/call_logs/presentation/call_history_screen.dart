@@ -3,12 +3,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/platform/native_call_bridge.dart';
 import '../../../core/theme/design_tokens.dart';
+import '../../../core/utils/formatters.dart';
 import '../../../shared/widgets/loaders.dart';
 import '../../../shared/widgets/ui_kit.dart';
 import '../../call_tracking/data/call_feed.dart';
 import '../../call_tracking/domain/call_entry.dart';
 import '../../call_tracking/presentation/call_detail_screen.dart';
+import '../../recording/presentation/recording_player_widget.dart';
 import '../../settings/presentation/settings_screen.dart';
+import 'dial_pad_sheet.dart';
 
 enum CallFilter { all, incoming, outgoing, missed }
 
@@ -36,6 +39,9 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
   final _searchController = TextEditingController();
   bool _isSearching = false;
   String _searchQuery = '';
+
+  /// Currently expanded call unique key (e.g. dateMillis-number-direction)
+  String? _expandedCallKey;
 
   @override
   void initState() {
@@ -69,7 +75,6 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
   }
 
   bool _matches(CallEntry e, CallFilter filter, String query) {
-    // Check direction filter
     final filterMatch = switch (filter) {
       CallFilter.all => true,
       CallFilter.incoming => e.row.direction == CallDirection.incoming,
@@ -82,12 +87,17 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
     };
     if (!filterMatch) return false;
 
-    // Check search query
     if (query.trim().isEmpty) return true;
     final q = query.toLowerCase().trim();
     final name = (e.contactName ?? e.row.cachedName ?? '').toLowerCase();
     final phone = (e.row.number ?? '').toLowerCase();
     return name.contains(q) || phone.contains(q);
+  }
+
+  void _toggleExpand(String key) {
+    setState(() {
+      _expandedCallKey = (_expandedCallKey == key) ? null : key;
+    });
   }
 
   @override
@@ -97,6 +107,15 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
 
     return Scaffold(
       backgroundColor: AppTokens.bgPrimary,
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => DialPadSheet.show(context),
+        backgroundColor: AppTokens.brandElectric,
+        foregroundColor: Colors.white,
+        elevation: 6,
+        shape: const CircleBorder(),
+        tooltip: 'Open dialer',
+        child: const Icon(Icons.dialpad_rounded, size: 24),
+      ),
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
@@ -213,7 +232,7 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
             children: [
               // Modern Segmented Filter Control
               Padding(
-                padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
                 child: ModernSegmentedControl<CallFilter>(
                   segments: const {
                     CallFilter.all: 'All',
@@ -227,7 +246,7 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
                 ),
               ),
 
-              // Timeline List
+              // Compact Timeline List with Samsung-style Expandable Rows
               Expanded(
                 child: groups.isEmpty
                     ? EmptyState(
@@ -254,7 +273,7 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
                             ref.read(callFeedProvider.notifier).refresh(),
                         child: ListView.builder(
                           controller: _scroll,
-                          padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                          padding: const EdgeInsets.fromLTRB(16, 4, 16, 80),
                           itemCount: groups.length + 1,
                           itemBuilder: (context, index) {
                             if (index == groups.length) {
@@ -265,41 +284,53 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
                               );
                             }
                             final (heading, calls) = groups[index];
-                            return Padding(
-                              padding: const EdgeInsets.only(bottom: 16),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  SectionLabel(heading),
-                                  const SizedBox(height: 8),
-                                  AppCard(
-                                    padding: EdgeInsets.zero,
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Padding(
+                                  padding: const EdgeInsets.only(
+                                    top: 14,
+                                    bottom: 6,
+                                    left: 4,
+                                  ),
+                                  child: SectionLabel(heading),
+                                ),
+                                Container(
+                                  decoration: BoxDecoration(
+                                    color: AppTokens.surface1,
+                                    borderRadius:
+                                        BorderRadius.circular(AppTokens.r12),
+                                    border: Border.all(
+                                      color: AppTokens.borderSubtle,
+                                      width: 1,
+                                    ),
+                                  ),
+                                  child: ClipRRect(
+                                    borderRadius:
+                                        BorderRadius.circular(AppTokens.r12),
                                     child: Column(
                                       children: [
-                                        for (
-                                          var i = 0;
-                                          i < calls.length;
-                                          i++
-                                        ) ...[
+                                        for (var i = 0; i < calls.length; i++) ...[
                                           if (i > 0)
-                                            const Padding(
-                                              padding: EdgeInsets.only(
-                                                left: 64,
-                                              ),
-                                              child: Divider(
-                                                height: 1,
-                                                color: AppTokens.borderSubtle,
-                                              ),
+                                            const Divider(
+                                              height: 1,
+                                              indent: 56,
+                                              color: AppTokens.borderSubtle,
                                             ),
-                                          _TimelineItemDismissible(
+                                          _ExpandableCallRow(
                                             entry: calls[i],
+                                            isExpanded: _expandedCallKey ==
+                                                calls[i].idempotencySeed('local'),
+                                            onToggle: () => _toggleExpand(
+                                              calls[i].idempotencySeed('local'),
+                                            ),
                                           ),
                                         ],
                                       ],
                                     ),
                                   ),
-                                ],
-                              ),
+                                ),
+                              ],
                             );
                           },
                         ),
@@ -313,55 +344,253 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
   }
 }
 
-class _TimelineItemDismissible extends StatelessWidget {
-  const _TimelineItemDismissible({required this.entry});
+/// Samsung-style Expandable Call Row item.
+class _ExpandableCallRow extends ConsumerWidget {
+  const _ExpandableCallRow({
+    required this.entry,
+    required this.isExpanded,
+    required this.onToggle,
+  });
 
   final CallEntry entry;
+  final bool isExpanded;
+  final VoidCallback onToggle;
 
   @override
-  Widget build(BuildContext context) {
-    return Dismissible(
-      key: ValueKey(
-        'call-${entry.row.dateMillis}-${entry.row.number}-${entry.row.direction.name}',
-      ),
-      direction: DismissDirection.startToEnd,
-      background: Container(
-        alignment: Alignment.centerLeft,
-        padding: const EdgeInsets.symmetric(horizontal: 20),
-        color: AppTokens.success.withValues(alpha: 0.2),
-        child: const Row(
-          children: [
-            Icon(Icons.phone_rounded, color: AppTokens.success, size: 20),
-            SizedBox(width: 8),
-            Text(
-              'Call',
-              style: TextStyle(
-                color: AppTokens.success,
-                fontWeight: FontWeight.w700,
-                fontSize: 13.5,
+  Widget build(BuildContext context, WidgetRef ref) {
+    final dir = directionStyle(context, entry.row.direction);
+    final up = uploadStyle(context, entry.uploadState);
+    final number = entry.row.number ?? '';
+
+    final subtitle = entry.isConnected
+        ? '${Fmt.maskNumber(number)} · ${Fmt.duration(entry.durationSeconds)}'
+        : '${Fmt.maskNumber(number)} · ${dir.label}';
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeInOut,
+      color: isExpanded
+          ? AppTokens.surface2
+          : Colors.transparent,
+      child: Column(
+        children: [
+          // ── Main Collapsed Row ──
+          InkWell(
+            onTap: onToggle,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              child: Row(
+                children: [
+                  // Direction Icon Chip
+                  IconChip(
+                    icon: dir.icon,
+                    color: dir.color,
+                    size: 34,
+                    iconSize: 17,
+                  ),
+                  const SizedBox(width: 12),
+
+                  // Contact & Subtitle
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          entry.displayTitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 14.5,
+                            letterSpacing: -0.2,
+                            color: entry.hasName
+                                ? Colors.white
+                                : AppTokens.textSecondary,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          subtitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: AppTokens.textMuted,
+                            fontFeatures: [FontFeature.tabularFigures()],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+
+                  // Inline Recording Play Button (always accessible)
+                  if (entry.recording case final rec?) ...[
+                    RecordingPlayButton(candidate: rec, size: 32),
+                    const SizedBox(width: 8),
+                  ],
+
+                  // Time & Sync Status
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Text(
+                        entry.startedAtUtc != null
+                            ? Fmt.clock(entry.startedAtUtc!)
+                            : '--:--',
+                        style: const TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w500,
+                          color: AppTokens.textMuted,
+                          fontFeatures: [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (entry.needsReview) ...[
+                            const Icon(
+                              Icons.help_outline_rounded,
+                              size: 13,
+                              color: AppTokens.warning,
+                            ),
+                            const SizedBox(width: 3),
+                          ],
+                          Icon(up.icon, size: 12.5, color: up.color),
+                        ],
+                      ),
+                    ],
+                  ),
+                ],
               ),
             ),
-          ],
-        ),
-      ),
-      confirmDismiss: (direction) async {
-        if (direction == DismissDirection.startToEnd && entry.row.number != null) {
-          // Open system dialer or copy number
-          Navigator.of(context).push(
-            MaterialPageRoute<void>(
-              builder: (_) => CallDetailScreen(entry: entry),
-            ),
-          );
-        }
-        return false; // Do not dismiss row from list
-      },
-      child: CallRowTile(
-        entry: entry,
-        onTap: () => Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            builder: (_) => CallDetailScreen(entry: entry),
           ),
-        ),
+
+          // ── Expanded Action Drawer (Samsung Phone style) ──
+          AnimatedSize(
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.fastOutSlowIn,
+            alignment: Alignment.topCenter,
+            child: isExpanded
+                ? Container(
+                    padding: const EdgeInsets.fromLTRB(14, 4, 14, 12),
+                    decoration: const BoxDecoration(
+                      color: AppTokens.surface2,
+                      border: Border(
+                        top: BorderSide(
+                          color: AppTokens.borderSubtle,
+                          width: 0.8,
+                        ),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Metadata detail strip
+                        Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 4,
+                            vertical: 6,
+                          ),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  number.isNotEmpty
+                                      ? Fmt.prettyNumber(number)
+                                      : 'Private number',
+                                  style: const TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: Colors.white,
+                                    letterSpacing: 0.2,
+                                    fontFeatures: [FontFeature.tabularFigures()],
+                                  ),
+                                ),
+                              ),
+                              StatusPill(
+                                label: dir.label,
+                                color: dir.color,
+                              ),
+                              const SizedBox(width: 6),
+                              StatusPill(
+                                label: up.label,
+                                color: up.color,
+                                icon: up.icon,
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+
+                        // Action Buttons Bar
+                        Row(
+                          children: [
+                            // Call Action Button
+                            Expanded(
+                              child: FilledButton.icon(
+                                onPressed: number.isNotEmpty
+                                    ? () async {
+                                        final bridge =
+                                            ref.read(nativeBridgeProvider);
+                                        await bridge.dialNumber(number);
+                                      }
+                                    : null,
+                                icon: const Icon(Icons.phone_rounded, size: 17),
+                                label: const Text('Call'),
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: AppTokens.callIncoming,
+                                  foregroundColor: Colors.white,
+                                  minimumSize: const Size(0, 38),
+                                  padding:
+                                      const EdgeInsets.symmetric(horizontal: 12),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius:
+                                        BorderRadius.circular(AppTokens.r8),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+
+                            // Details Action Button
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: () {
+                                  Navigator.of(context).push(
+                                    MaterialPageRoute<void>(
+                                      builder: (_) =>
+                                          CallDetailScreen(entry: entry),
+                                    ),
+                                  );
+                                },
+                                icon: const Icon(Icons.info_outline_rounded,
+                                    size: 17),
+                                label: const Text('Details'),
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: Colors.white,
+                                  side: const BorderSide(
+                                    color: AppTokens.borderDefault,
+                                  ),
+                                  minimumSize: const Size(0, 38),
+                                  padding:
+                                      const EdgeInsets.symmetric(horizontal: 12),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius:
+                                        BorderRadius.circular(AppTokens.r8),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  )
+                : const SizedBox.shrink(),
+          ),
+        ],
       ),
     );
   }
