@@ -29,6 +29,7 @@ class BootReceiver : BroadcastReceiver() {
             "android.intent.action.QUICKBOOT_POWERON",
             -> {
                 Log.i(TAG, "re-arming ingest after ${intent.action}")
+                CallTrackingService.start(context)
                 BackgroundScheduler.ensurePeriodic(context)
                 BackgroundScheduler.enqueueNow(context, BackgroundScheduler.REASON_BOOT)
             }

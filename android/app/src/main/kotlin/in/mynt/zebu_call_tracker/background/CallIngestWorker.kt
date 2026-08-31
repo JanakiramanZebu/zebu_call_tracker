@@ -74,119 +74,13 @@ class CallIngestWorker(
         val context = applicationContext
         val reason = inputData.getString(KEY_REASON) ?: REASON_UNKNOWN
 
-        if (!PermissionInspector.isGranted(context, PermissionInspector.CALL_LOG)) {
-            IngestStore.recordRun(context, STATUS_BLOCKED, reason)
-            return@withContext Result.success()
-        }
-
         try {
-            val calls = CallLogReader.read(
-                context,
-                sinceMillis = IngestStore.callCursorMillis(context),
-                limit = CALL_LIMIT,
-            )
-
-            val recordings = if (RecordingScanner.hasPermission(context)) {
-                RecordingScanner.scan(
-                    context,
-                    sinceEpochSeconds = max(0L, IngestStore.recordingCursorSeconds(context) - 300L),
-                    limit = RECORDING_LIMIT,
-                )
-            } else {
-                emptyList()
+            val success = NativeCallIngestor.ingest(context, reason)
+            if (success) {
+                SyncCoordinator.runSync(context, "ingest_$reason")
             }
-
-            val candidates = recordings.mapNotNull { NativeRecordingMatcher.mapToCandidate(it) }
-
-            // 1. Heuristic Recording Matching for new calls
-            val matchesMap = mutableMapOf<Long, Map<String, Any?>>()
-            for (call in calls) {
-                val dateMillis = (call["dateMillis"] as? Number)?.toLong() ?: continue
-                val duration = (call["durationSeconds"] as? Number)?.toInt() ?: 0
-                if (duration <= 0) continue
-
-                val matchObj = NativeCallForMatching(
-                    startedAtEpochMillis = dateMillis,
-                    durationSeconds = duration,
-                    phoneNumber = call["number"] as? String,
-                    contactName = call["cachedName"] as? String,
-                )
-
-                val result = NativeRecordingMatcher.match(matchObj, candidates)
-                if (result.isMatched && result.candidate != null) {
-                    val c = result.candidate
-                    val checksumInfo = RecordingScanner.sha256(context, c.mediaStoreId)
-                    val checksum = checksumInfo?.get("checksum") as? String
-                    val uri = RecordingScanner.contentUri(c.mediaStoreId)
-
-                    matchesMap[dateMillis] = mapOf(
-                        "mediaStoreId" to c.mediaStoreId,
-                        "recordingPath" to uri,
-                        "checksum" to checksum,
-                    )
-                    Log.i(TAG, "[RECORDING_DISCOVERY] Matched recording ${c.mediaStoreId} for call at $dateMillis (confidence: ${result.confidence})")
-                }
-            }
-
-            // 2. Insert newly captured calls directly into persistent SQLite outbox
-            NativeCallOutboxDao.insertCapturedCalls(context, calls, matchesMap)
-
-            // 3. Retroactive matching for existing unlinked calls in SQLite
-            if (candidates.isNotEmpty()) {
-                val unlinkedCalls = NativeCallOutboxDao.getCallsNeedingRecordingMatch(context, maxAgeSeconds = 600L)
-                for (unlinked in unlinkedCalls) {
-                    val dateMillis = (unlinked["startedAtMillis"] as? Number)?.toLong() ?: continue
-                    val duration = (unlinked["durationSeconds"] as? Number)?.toInt() ?: 0
-                    val key = unlinked["idempotencyKey"] as? String ?: continue
-
-                    val matchObj = NativeCallForMatching(
-                        startedAtEpochMillis = dateMillis,
-                        durationSeconds = duration,
-                        phoneNumber = unlinked["phoneNumber"] as? String,
-                        contactName = unlinked["contactName"] as? String,
-                    )
-
-                    val result = NativeRecordingMatcher.match(matchObj, candidates)
-                    if (result.isMatched && result.candidate != null) {
-                        val c = result.candidate
-                        val checksumInfo = RecordingScanner.sha256(context, c.mediaStoreId)
-                        val checksum = checksumInfo?.get("checksum") as? String
-                        val uri = RecordingScanner.contentUri(c.mediaStoreId)
-
-                        NativeCallOutboxDao.updateRecordingMatch(
-                            context = context,
-                            idempotencyKey = key,
-                            recordingPath = uri,
-                            mediaStoreId = c.mediaStoreId,
-                            checksum = checksum,
-                        )
-                        Log.i(TAG, "[RECORDING_DISCOVERY] Retroactively matched recording ${c.mediaStoreId} to existing call $key")
-                    }
-                }
-            }
-
-            // 4. Expire unlinked calls that passed the 5-minute discovery window
-            NativeCallOutboxDao.expireUnmatchedCalls(context, maxAgeSeconds = 300L)
-
-            // 5. Retain snapshot in IngestStore for Dart recording matcher compatibility
-            IngestStore.append(
-                context = context,
-                calls = calls,
-                recordings = recordings,
-                capturedAtMillis = System.currentTimeMillis(),
-            )
-            IngestStore.recordRun(context, STATUS_OK, reason)
-
-            // 6. Trigger native SyncCoordinator directly
-            SyncCoordinator.runSync(context, "ingest_$reason")
-
-            Log.i(TAG, "[CALL_INGEST] ingest[$reason]: ${calls.size} calls captured to SQLite outbox, ${recordings.size} recordings scanned, ${matchesMap.size} matched")
-            Result.success()
-        } catch (e: SecurityException) {
-            IngestStore.recordRun(context, STATUS_BLOCKED, reason)
             Result.success()
         } catch (e: Exception) {
-            IngestStore.recordRun(context, STATUS_FAILED, reason)
             Log.w(TAG, "ingest[$reason] failed: ${e::class.java.simpleName}: ${e.message}")
             if (runAttemptCount < MAX_ATTEMPTS) Result.retry() else Result.failure()
         }

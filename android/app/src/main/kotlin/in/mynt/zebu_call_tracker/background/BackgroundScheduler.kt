@@ -85,43 +85,10 @@ object BackgroundScheduler {
     }
 
     fun ensurePeriodic(context: Context) {
-        val request = PeriodicWorkRequestBuilder<CallIngestWorker>(15, TimeUnit.MINUTES)
-            .setInputData(
-                Data.Builder()
-                    .putString(CallIngestWorker.KEY_REASON, REASON_PERIODIC)
-                    .build(),
-            )
-            .setConstraints(
-                Constraints.Builder()
-                    .setRequiresBatteryNotLow(true)
-                    .build(),
-            )
-            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
-            .addTag(TAG_INGEST)
-            .build()
-
-        WorkManager.getInstance(context).enqueueUniquePeriodicWork(
-            WORK_PERIODIC,
-            ExistingPeriodicWorkPolicy.KEEP,
-            request,
-        )
-
-        // Periodic background sync when network is available (every 15 minutes)
-        val syncConstraints = Constraints.Builder()
-            .setRequiredNetworkType(androidx.work.NetworkType.CONNECTED)
-            .build()
-
-        val syncRequest = PeriodicWorkRequestBuilder<CallSyncWorker>(15, TimeUnit.MINUTES)
-            .setConstraints(syncConstraints)
-            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
-            .addTag(TAG_SYNC)
-            .build()
-
-        WorkManager.getInstance(context).enqueueUniquePeriodicWork(
-            WORK_SYNC_PERIODIC,
-            ExistingPeriodicWorkPolicy.KEEP,
-            syncRequest,
-        )
+        // Periodic sync is now handled by the persistent CallTrackingService.
+        // We actively cancel any lingering periodic WorkManager jobs from older versions.
+        WorkManager.getInstance(context).cancelUniqueWork(WORK_PERIODIC)
+        WorkManager.getInstance(context).cancelUniqueWork(WORK_SYNC_PERIODIC)
     }
 
     /** Called on sign-out: nothing should be captured for a signed-out handset. */

@@ -3,6 +3,7 @@ package `in`.mynt.zebu_call_tracker
 import android.content.Intent
 import android.os.Bundle
 import `in`.mynt.zebu_call_tracker.background.BackgroundScheduler
+import `in`.mynt.zebu_call_tracker.background.CallTrackingService
 import `in`.mynt.zebu_call_tracker.background.NetworkRecoveryReceiver
 import `in`.mynt.zebu_call_tracker.background.SyncCoordinator
 import `in`.mynt.zebu_call_tracker.overlay.PostCallOverlayService
@@ -19,6 +20,10 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // Start persistent foreground tracking service to keep app alive
+        CallTrackingService.start(applicationContext)
+
         // Re-arm on every launch.
         BackgroundScheduler.ensurePeriodic(this)
         

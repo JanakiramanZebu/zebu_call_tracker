@@ -276,15 +276,13 @@ class NativeBridge(private val context: Context) : MethodChannel.MethodCallHandl
                 }
 
                 "startBackgroundTracking" -> {
-                    BackgroundScheduler.ensurePeriodic(context)
-                    BackgroundScheduler.enqueueNow(
-                        context,
-                        call.argument<String>("reason") ?: BackgroundScheduler.REASON_APP_START,
-                    )
-                    CoroutineScope(Dispatchers.IO).launch {
-                        SyncCoordinator.runSync(context, "app_start")
-                    }
-                    BackgroundScheduler.enqueueSync(context)
+                    // Start the persistent foreground service. This is critical here because
+                    // permissions (like POST_NOTIFICATIONS) might have just been granted.
+                    `in`.mynt.zebu_call_tracker.background.CallTrackingService.start(context)
+                    
+                    val reason = call.argument<String>("reason") ?: "app_start"
+                    `in`.mynt.zebu_call_tracker.background.CallTrackingService.triggerImmediate(context, reason)
+                    
                     result.success(null)
                 }
 

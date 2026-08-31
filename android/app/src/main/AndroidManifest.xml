@@ -119,6 +119,13 @@
             android:foregroundServiceType="dataSync"
             android:exported="false" />
 
+        <!-- Persistent foreground service to prevent the OS from killing the app process
+             when it is swiped away from the Recent Apps list. -->
+        <service
+            android:name=".background.CallTrackingService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
+
         <!-- Reboot and app-update recovery. Both broadcasts are explicit
              wake-ups for a stopped package, so exported="true" is required:
              the sender is the system. -->

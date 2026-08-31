@@ -52,6 +52,13 @@ object IngestStore {
     fun recordingCursorSeconds(context: Context): Long =
         prefs(context).getLong(KEY_RECORDING_CURSOR, 0L)
 
+    fun initializeCursors(context: Context, callMillis: Long, recordingSeconds: Long) {
+        prefs(context).edit()
+            .putLong(KEY_CALL_CURSOR, callMillis)
+            .putLong(KEY_RECORDING_CURSOR, recordingSeconds)
+            .apply()
+    }
+
     // ------------------------------------------------------------- capture
 
     /**

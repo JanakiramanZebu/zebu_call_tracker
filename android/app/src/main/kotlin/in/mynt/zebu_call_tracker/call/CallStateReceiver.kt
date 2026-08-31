@@ -46,15 +46,12 @@ class CallStateReceiver : BroadcastReceiver() {
         // log row and — critically — the dialer's recording file now exist.
         // Capturing on RINGING/OFFHOOK would run before either is written.
         if (normalised == "idle") {
-            // Queue immediate native ingest worker
-            BackgroundScheduler.enqueueNow(context, BackgroundScheduler.REASON_CALL_ENDED)
+            // Trigger immediate unthrottled background processing in our active service
+            `in`.mynt.zebu_call_tracker.background.CallTrackingService.triggerImmediate(context, "call_ended")
             
             // Queue delayed ingest passes to capture late MediaStore indexing by OEM dialers
-            BackgroundScheduler.enqueueDelayedIngest(context, 10L, "${BackgroundScheduler.REASON_CALL_ENDED}_delay_10s")
-            BackgroundScheduler.enqueueDelayedIngest(context, 30L, "${BackgroundScheduler.REASON_CALL_ENDED}_delay_30s")
-            
-            // Queue the native outbox sync worker
-            BackgroundScheduler.enqueueSync(context)
+            BackgroundScheduler.enqueueDelayedIngest(context, 10L, "call_ended_delay_10s")
+            BackgroundScheduler.enqueueDelayedIngest(context, 30L, "call_ended_delay_30s")
             
             showPostCallOverlay(context)
         }
