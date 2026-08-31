@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/platform/native_call_bridge.dart';
+import '../../../core/theme/design_tokens.dart';
 import '../../../core/utils/formatters.dart';
 import '../../../shared/widgets/ui_kit.dart';
 import '../../recording/presentation/recording_player_widget.dart';
@@ -76,9 +77,10 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
     final filteredCalls = _filterCalls(entries);
 
     return Container(
-      decoration: BoxDecoration(
-        color: Theme.of(context).scaffoldBackgroundColor,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+      decoration: const BoxDecoration(
+        color: AppTokens.bgPrimary,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        border: Border(top: BorderSide(color: AppTokens.borderDefault)),
       ),
       child: FractionallySizedBox(
         heightFactor: 0.9,
@@ -88,10 +90,10 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
             Center(
               child: Container(
                 margin: const EdgeInsets.only(top: 10, bottom: 6),
-                width: 40,
+                width: 38,
                 height: 4,
                 decoration: BoxDecoration(
-                  color: context.colors.outlineVariant,
+                  color: AppTokens.borderDefault,
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
@@ -102,7 +104,7 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
               padding: const EdgeInsets.fromLTRB(20, 8, 16, 12),
               child: Row(
                 children: [
-                  IconChip(icon: icon, color: color, size: 44, iconSize: 24),
+                  IconChip(icon: icon, color: color, size: 42, iconSize: 22),
                   const SizedBox(width: 14),
                   Expanded(
                     child: Column(
@@ -110,16 +112,19 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
                       children: [
                         Text(
                           title,
-                          style: context.text.titleLarge?.copyWith(
+                          style: const TextStyle(
+                            fontSize: 18,
                             fontWeight: FontWeight.w700,
-                            letterSpacing: -0.4,
+                            letterSpacing: -0.3,
+                            color: Colors.white,
                           ),
                         ),
                         const SizedBox(height: 2),
                         Text(
                           subtitle,
-                          style: context.text.bodySmall?.copyWith(
-                            color: context.palette.muted,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: AppTokens.textMuted,
                           ),
                         ),
                       ],
@@ -127,13 +132,13 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
                   ),
                   IconButton(
                     onPressed: () => Navigator.of(context).pop(),
-                    icon: const Icon(Icons.close_rounded),
+                    icon: const Icon(Icons.close_rounded, color: AppTokens.textSecondary),
                     tooltip: 'Close',
                   ),
                 ],
               ),
             ),
-            const Divider(height: 1),
+            const Divider(height: 1, color: AppTokens.borderSubtle),
 
             // Main Body Content
             Expanded(
@@ -148,13 +153,15 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
                     // Search Field
                     TextField(
                       controller: _searchController,
+                      style: const TextStyle(color: Colors.white, fontSize: 14),
                       onChanged: (val) => setState(() => _searchQuery = val),
                       decoration: InputDecoration(
                         hintText: 'Search number or contact...',
-                        prefixIcon: const Icon(Icons.search_rounded, size: 20),
+                        hintStyle: const TextStyle(color: AppTokens.textMuted, fontSize: 13.5),
+                        prefixIcon: const Icon(Icons.search_rounded, size: 18, color: AppTokens.textMuted),
                         suffixIcon: _searchQuery.isNotEmpty
                             ? IconButton(
-                                icon: const Icon(Icons.clear_rounded, size: 18),
+                                icon: const Icon(Icons.clear_rounded, size: 16, color: AppTokens.textMuted),
                                 onPressed: () {
                                   _searchController.clear();
                                   setState(() => _searchQuery = '');
@@ -162,16 +169,16 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
                               )
                             : null,
                         contentPadding:
-                            const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                            const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                         filled: true,
-                        fillColor: context.colors.surfaceContainerLowest,
+                        fillColor: AppTokens.surface1,
                         border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: BorderSide(color: context.colors.outlineVariant),
+                          borderRadius: BorderRadius.circular(AppTokens.r12),
+                          borderSide: const BorderSide(color: AppTokens.borderDefault),
                         ),
                         enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: BorderSide(color: context.colors.outlineVariant),
+                          borderRadius: BorderRadius.circular(AppTokens.r12),
+                          borderSide: const BorderSide(color: AppTokens.borderDefault),
                         ),
                       ),
                     ),
@@ -183,8 +190,8 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
                     const SizedBox(height: 8),
 
                     if (filteredCalls.isEmpty)
-                      AppCard(
-                        padding: const EdgeInsets.all(24),
+                      const AppCard(
+                        padding: EdgeInsets.all(24),
                         child: Center(
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
@@ -192,13 +199,13 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
                               Icon(
                                 Icons.find_in_page_outlined,
                                 size: 36,
-                                color: context.palette.muted,
+                                color: AppTokens.textMuted,
                               ),
-                              const SizedBox(height: 8),
+                              SizedBox(height: 8),
                               Text(
                                 'No calls found matching filter',
-                                style: context.text.bodyMedium?.copyWith(
-                                  color: context.palette.muted,
+                                style: TextStyle(
+                                  color: AppTokens.textMuted,
                                   fontWeight: FontWeight.w500,
                                 ),
                               ),
@@ -213,11 +220,11 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
                           children: [
                             for (var i = 0; i < filteredCalls.length; i++) ...[
                               if (i > 0)
-                                Padding(
-                                  padding: const EdgeInsets.only(left: 64),
+                                const Padding(
+                                  padding: EdgeInsets.only(left: 64),
                                   child: Divider(
                                     height: 1,
-                                    color: context.colors.outlineVariant,
+                                    color: AppTokens.borderSubtle,
                                   ),
                                 ),
                               Column(
@@ -261,79 +268,78 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
   }
 
   (String, String, IconData, Color) _getCategoryMetadata(BuildContext context) {
-    final p = context.palette;
     return switch (widget.category) {
       PopupFilterCategory.talkTime => (
           'Talk Time Analytics',
           'Total calling duration & volume insights',
           Icons.access_time_filled_rounded,
-          context.colors.primary,
+          AppTokens.brandElectric,
         ),
       PopupFilterCategory.totalCalls => (
           'Total Phone Calls',
           'All tracked incoming, outgoing and missed calls',
           Icons.phone_in_talk_rounded,
-          context.colors.primary,
+          AppTokens.brandElectric,
         ),
       PopupFilterCategory.incoming => (
           'Incoming Calls',
           'Detailed breakdown of incoming communications',
           Icons.call_received_rounded,
-          p.answered,
+          AppTokens.callIncoming,
         ),
       PopupFilterCategory.outgoing => (
           'Outgoing Calls',
           'Overview of initiated call activity',
           Icons.call_made_rounded,
-          context.colors.primary,
+          AppTokens.callOutgoing,
         ),
       PopupFilterCategory.missed => (
           'Missed Calls',
           'Unanswered incoming calls requiring attention',
           Icons.call_missed_rounded,
-          p.missed,
+          AppTokens.callMissed,
         ),
       PopupFilterCategory.rejected => (
           'Rejected Calls',
           'Calls declined or rejected by recipient/user',
           Icons.phone_disabled_rounded,
-          p.missed,
+          AppTokens.callRejected,
         ),
       PopupFilterCategory.neverAttended => (
           'Never Attended',
           'Calls that disconnected before connection',
           Icons.phone_paused_rounded,
-          context.colors.primary,
+          AppTokens.callNeverAttended,
         ),
       PopupFilterCategory.notPickup => (
           'Not Pickup by Client',
           'Outgoing calls where the client did not answer',
           Icons.call_end_rounded,
-          p.muted,
+          AppTokens.textMuted,
         ),
       PopupFilterCategory.uniqueCalls => (
           'Unique Calls',
           'Distinct phone numbers contacted in this period',
           Icons.contact_phone_rounded,
-          context.colors.primary,
+          AppTokens.brandPurple,
         ),
       PopupFilterCategory.avgDuration => (
           'Call Duration Analysis',
           'Average length and duration trends',
           Icons.schedule_rounded,
-          p.muted,
+          AppTokens.brandIndigo,
         ),
       PopupFilterCategory.recordings => (
           'Recording Management',
           'Matched audio recordings and server uploads',
           Icons.graphic_eq_rounded,
-          p.answered,
+          AppTokens.success,
         ),
       PopupFilterCategory.syncStatus => (
           'Cloud Sync Status',
           'Realtime outbox sync and server status',
           Icons.cloud_sync_rounded,
-          p.waiting,
+          AppTokens.warning,
         ),
     };
   }
@@ -394,30 +400,26 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
       case PopupFilterCategory.totalCalls:
         final (h, m) = Fmt.talkTime(stats.talkTimeSeconds);
         return AppCard(
-          borderColor: context.colors.primary.withValues(alpha: 0.3),
-          child: Column(
+          borderColor: AppTokens.brandElectric.withValues(alpha: 0.3),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceAround,
             children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
-                children: [
-                  _MetricStat(
-                    label: 'Total Duration',
-                    value: '${h}h ${m}m',
-                    color: context.colors.primary,
-                  ),
-                  _MetricStat(
-                    label: 'Total Calls',
-                    value: '${stats.total}',
-                    color: context.palette.answered,
-                  ),
-                  _MetricStat(
-                    label: 'Answered Ratio',
-                    value: stats.total > 0
-                        ? '${((stats.answered / stats.total) * 100).round()}%'
-                        : '0%',
-                    color: context.palette.waiting,
-                  ),
-                ],
+              _MetricStat(
+                label: 'Total Duration',
+                value: '${h}h ${m}m',
+                color: AppTokens.brandElectric,
+              ),
+              _MetricStat(
+                label: 'Total Calls',
+                value: '${stats.total}',
+                color: AppTokens.success,
+              ),
+              _MetricStat(
+                label: 'Answered Ratio',
+                value: stats.total > 0
+                    ? '${((stats.answered / stats.total) * 100).round()}%'
+                    : '0%',
+                color: AppTokens.warning,
               ),
             ],
           ),
@@ -425,21 +427,21 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
 
       case PopupFilterCategory.rejected:
         return AppCard(
-          borderColor: context.palette.missed.withValues(alpha: 0.3),
+          borderColor: AppTokens.callRejected.withValues(alpha: 0.3),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceAround,
             children: [
               _MetricStat(
                 label: 'Rejected Calls',
                 value: '${stats.rejected}',
-                color: context.palette.missed,
+                color: AppTokens.callRejected,
               ),
               _MetricStat(
                 label: 'Share of Total',
                 value: stats.total > 0
                     ? '${((stats.rejected / stats.total) * 100).round()}%'
                     : '0%',
-                color: context.palette.muted,
+                color: AppTokens.textMuted,
               ),
             ],
           ),
@@ -447,19 +449,19 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
 
       case PopupFilterCategory.neverAttended:
         return AppCard(
-          borderColor: context.colors.primary.withValues(alpha: 0.3),
+          borderColor: AppTokens.callNeverAttended.withValues(alpha: 0.3),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceAround,
             children: [
               _MetricStat(
                 label: 'Never Attended',
                 value: '${stats.neverAttended}',
-                color: context.colors.primary,
+                color: AppTokens.callNeverAttended,
               ),
               _MetricStat(
                 label: 'Attention Needed',
                 value: stats.neverAttended > 0 ? 'High' : 'None',
-                color: stats.neverAttended > 0 ? context.palette.waiting : context.palette.answered,
+                color: stats.neverAttended > 0 ? AppTokens.warning : AppTokens.success,
               ),
             ],
           ),
@@ -467,21 +469,21 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
 
       case PopupFilterCategory.notPickup:
         return AppCard(
-          borderColor: context.palette.muted.withValues(alpha: 0.3),
+          borderColor: AppTokens.borderDefault,
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceAround,
             children: [
               _MetricStat(
                 label: 'Not Picked Up',
                 value: '${stats.notPickupByClient}',
-                color: context.palette.muted,
+                color: AppTokens.textMuted,
               ),
               _MetricStat(
                 label: 'Outgoing Ratio',
                 value: stats.outgoing > 0
                     ? '${((stats.notPickupByClient / stats.outgoing) * 100).round()}%'
                     : '0%',
-                color: context.palette.waiting,
+                color: AppTokens.warning,
               ),
             ],
           ),
@@ -489,21 +491,21 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
 
       case PopupFilterCategory.uniqueCalls:
         return AppCard(
-          borderColor: context.colors.primary.withValues(alpha: 0.3),
+          borderColor: AppTokens.brandPurple.withValues(alpha: 0.3),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceAround,
             children: [
               _MetricStat(
                 label: 'Unique Contacts',
                 value: '${stats.uniqueCalls}',
-                color: context.colors.primary,
+                color: AppTokens.brandPurple,
               ),
               _MetricStat(
                 label: 'Avg Calls/Contact',
                 value: stats.uniqueCalls > 0
                     ? (stats.total / stats.uniqueCalls).toStringAsFixed(1)
                     : '0',
-                color: context.palette.answered,
+                color: AppTokens.success,
               ),
             ],
           ),
@@ -515,26 +517,26 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
             incomingCalls.fold<int>(0, (sum, e) => sum + e.durationSeconds);
         final (h, m) = Fmt.talkTime(totalSecs);
         return AppCard(
-          borderColor: context.palette.answered.withValues(alpha: 0.3),
+          borderColor: AppTokens.callIncoming.withValues(alpha: 0.3),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceAround,
             children: [
               _MetricStat(
                 label: 'Incoming Volume',
                 value: '${stats.incoming}',
-                color: context.palette.answered,
+                color: AppTokens.callIncoming,
               ),
               _MetricStat(
                 label: 'Incoming Time',
                 value: '${h}h ${m}m',
-                color: context.palette.answered,
+                color: AppTokens.callIncoming,
               ),
               _MetricStat(
                 label: 'Share of Total',
                 value: stats.total > 0
                     ? '${((stats.incoming / stats.total) * 100).round()}%'
                     : '0%',
-                color: context.palette.muted,
+                color: AppTokens.textMuted,
               ),
             ],
           ),
@@ -546,26 +548,26 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
             outgoingCalls.fold<int>(0, (sum, e) => sum + e.durationSeconds);
         final (h, m) = Fmt.talkTime(totalSecs);
         return AppCard(
-          borderColor: context.colors.primary.withValues(alpha: 0.3),
+          borderColor: AppTokens.callOutgoing.withValues(alpha: 0.3),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceAround,
             children: [
               _MetricStat(
                 label: 'Outgoing Volume',
                 value: '${stats.outgoing}',
-                color: context.colors.primary,
+                color: AppTokens.callOutgoing,
               ),
               _MetricStat(
                 label: 'Outgoing Time',
                 value: '${h}h ${m}m',
-                color: context.colors.primary,
+                color: AppTokens.callOutgoing,
               ),
               _MetricStat(
                 label: 'Share of Total',
                 value: stats.total > 0
                     ? '${((stats.outgoing / stats.total) * 100).round()}%'
                     : '0%',
-                color: context.palette.muted,
+                color: AppTokens.textMuted,
               ),
             ],
           ),
@@ -573,21 +575,21 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
 
       case PopupFilterCategory.missed:
         return AppCard(
-          borderColor: context.palette.missed.withValues(alpha: 0.3),
+          borderColor: AppTokens.callMissed.withValues(alpha: 0.3),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceAround,
             children: [
               _MetricStat(
                 label: 'Missed Calls',
                 value: '${stats.missed}',
-                color: context.palette.missed,
+                color: AppTokens.callMissed,
               ),
               _MetricStat(
                 label: 'Missed Ratio',
                 value: stats.total > 0
                     ? '${((stats.missed / stats.total) * 100).round()}%'
                     : '0%',
-                color: context.palette.missed,
+                color: AppTokens.callMissed,
               ),
             ],
           ),
@@ -601,12 +603,12 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
               _MetricStat(
                 label: 'Avg Call Length',
                 value: Fmt.duration(stats.averageDurationSeconds),
-                color: context.palette.answered,
+                color: AppTokens.brandIndigo,
               ),
               _MetricStat(
                 label: 'Connected Calls',
                 value: '${stats.answered}',
-                color: context.colors.primary,
+                color: AppTokens.success,
               ),
             ],
           ),
@@ -614,26 +616,26 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
 
       case PopupFilterCategory.recordings:
         return AppCard(
-          borderColor: context.palette.answered.withValues(alpha: 0.3),
+          borderColor: AppTokens.success.withValues(alpha: 0.3),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceAround,
             children: [
               _MetricStat(
                 label: 'Matched Audio',
                 value: '${stats.recordingsMatched}',
-                color: context.palette.answered,
+                color: AppTokens.success,
               ),
               _MetricStat(
                 label: 'Needs Review',
                 value: '${stats.recordingsNeedReview}',
                 color: stats.recordingsNeedReview > 0
-                    ? context.palette.waiting
-                    : context.palette.muted,
+                    ? AppTokens.warning
+                    : AppTokens.textMuted,
               ),
               _MetricStat(
                 label: 'No Audio',
                 value: '${stats.recordingsAbsent}',
-                color: context.palette.muted,
+                color: AppTokens.textMuted,
               ),
             ],
           ),
@@ -671,22 +673,22 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
                           _MetricStat(
                             label: 'Synced',
                             value: '$uploaded',
-                            color: context.palette.answered,
+                            color: AppTokens.success,
                           ),
                           _MetricStat(
                             label: 'Pending',
                             value: '$waiting',
-                            color: context.palette.waiting,
+                            color: AppTokens.warning,
                           ),
                           _MetricStat(
                             label: 'Failed',
                             value: '$failed',
-                            color: context.palette.missed,
+                            color: AppTokens.danger,
                           ),
                           _MetricStat(
                             label: 'Total Local',
                             value: '$total',
-                            color: context.colors.primary,
+                            color: AppTokens.brandElectric,
                           ),
                         ],
                       ),
@@ -720,7 +722,7 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
                             style: const TextStyle(fontWeight: FontWeight.bold),
                           ),
                           style: ElevatedButton.styleFrom(
-                            backgroundColor: context.colors.primary,
+                            backgroundColor: AppTokens.brandElectric,
                             foregroundColor: Colors.white,
                             shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(12),
@@ -733,7 +735,7 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
                 ),
                 const SizedBox(height: 16),
                 if (syncState.asData?.value != null) ...[
-                  SectionLabel('Last Sync Result'),
+                  const SectionLabel('Last Sync Result'),
                   const SizedBox(height: 8),
                   AppCard(
                     child: Column(
@@ -746,8 +748,8 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
                                   ? Icons.check_circle_rounded
                                   : Icons.error_rounded,
                               color: syncState.asData!.value!.isSuccess
-                                  ? context.palette.answered
-                                  : context.palette.missed,
+                                  ? AppTokens.success
+                                  : AppTokens.danger,
                               size: 20,
                             ),
                             const SizedBox(width: 8),
@@ -755,7 +757,10 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
                               syncState.asData!.value!.isSuccess
                                   ? 'Sync completed successfully'
                                   : 'Sync failed',
-                              style: const TextStyle(fontWeight: FontWeight.bold),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
                             ),
                           ],
                         ),
@@ -764,14 +769,18 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
                           'Synced calls: ${syncState.asData!.value!.syncedCalls}\n'
                           'Uploaded recordings: ${syncState.asData!.value!.uploadedRecordings}\n'
                           'Failed calls: ${syncState.asData!.value!.failedCalls}',
-                          style: context.text.bodySmall,
+                          style: const TextStyle(
+                            color: AppTokens.textSecondary,
+                            fontSize: 12.5,
+                          ),
                         ),
                         if (syncState.asData!.value!.errorMessage != null) ...[
                           const SizedBox(height: 8),
                           Text(
                             'Error: ${syncState.asData!.value!.errorMessage}',
-                            style: context.text.bodySmall?.copyWith(
-                              color: context.palette.missed,
+                            style: const TextStyle(
+                              color: AppTokens.danger,
+                              fontSize: 12,
                             ),
                           ),
                         ],
@@ -804,18 +813,21 @@ class _MetricStat extends StatelessWidget {
         children: [
           Text(
             value,
-            style: context.text.headlineSmall?.copyWith(
+            style: TextStyle(
+              fontSize: 22,
               fontWeight: FontWeight.w800,
               color: color,
-              letterSpacing: -0.5,
+              letterSpacing: -0.4,
+              fontFeatures: const [FontFeature.tabularFigures()],
             ),
           ),
           const SizedBox(height: 2),
           Text(
             label,
-            style: context.text.labelSmall?.copyWith(
-              color: context.palette.muted,
+            style: const TextStyle(
+              color: AppTokens.textMuted,
               fontWeight: FontWeight.w500,
+              fontSize: 11.5,
             ),
           ),
         ],

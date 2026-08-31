@@ -92,7 +92,12 @@ object RecordingScanner {
      *        units mismatch here silently returns everything or nothing, so the
      *        Dart side converts once, explicitly.
      */
-    fun scan(context: Context, sinceEpochSeconds: Long, limit: Int): List<Map<String, Any?>> {
+    fun scan(
+        context: Context,
+        sinceEpochSeconds: Long,
+        limit: Int,
+        beforeEpochSeconds: Long = 0L,
+    ): List<Map<String, Any?>> {
         if (!hasPermission(context)) throw MissingPermission()
 
         val where = StringBuilder("(")
@@ -109,6 +114,11 @@ object RecordingScanner {
         }
         where.append(") AND ${MediaStore.Audio.Media.DATE_ADDED} > ?")
         args += sinceEpochSeconds.toString()
+
+        if (beforeEpochSeconds > 0L) {
+            where.append(" AND ${MediaStore.Audio.Media.DATE_ADDED} <= ?")
+            args += beforeEpochSeconds.toString()
+        }
 
         val rows = mutableListOf<Map<String, Any?>>()
         val sort = "${MediaStore.Audio.Media.DATE_ADDED} DESC"

@@ -1,13 +1,11 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/theme/design_tokens.dart';
 import '../../../shared/widgets/loaders.dart';
 import '../../../shared/widgets/ui_kit.dart';
 import '../domain/permission_ask.dart';
 
-/// One permission, its rationale, and the control that grants it.
-///
-/// Shared by the first-run walkthrough and the Settings screen so the wording
-/// and the affordance are identical wherever the user meets a permission.
+/// One permission card with rationale and granting control.
 class AskCard extends StatelessWidget {
   const AskCard({
     super.key,
@@ -19,32 +17,30 @@ class AskCard extends StatelessWidget {
 
   final PermissionAsk ask;
   final VoidCallback onRequest;
-
-  /// Permanently denied: Android will not show the dialog again, so the button
-  /// has to send the user to app settings instead of pretending to ask.
   final bool blocked;
-
   final bool busy;
 
   @override
   Widget build(BuildContext context) {
     final color = ask.granted
-        ? context.palette.answered
+        ? AppTokens.success
         : blocked
-        ? context.palette.missed
-        : context.colors.primary;
+            ? AppTokens.danger
+            : AppTokens.brandElectric;
 
     return AppCard(
       padding: const EdgeInsets.all(14),
       borderColor: ask.granted
-          ? context.palette.answered.withValues(alpha: 0.35)
-          : null,
+          ? AppTokens.success.withValues(alpha: 0.3)
+          : (blocked ? AppTokens.danger.withValues(alpha: 0.3) : AppTokens.borderDefault),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           IconChip(
             icon: ask.granted ? Icons.check_rounded : ask.icon,
             color: color,
+            size: 38,
+            iconSize: 20,
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -56,67 +52,64 @@ class AskCard extends StatelessWidget {
                     Expanded(
                       child: Text(
                         ask.title,
-                        style: context.text.bodyLarge?.copyWith(
-                          fontWeight: FontWeight.w600,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w700,
                           fontSize: 15,
+                          color: Colors.white,
                         ),
                       ),
                     ),
-                    if (ask.essential && !ask.granted)
-                      StatusPill(
-                        label: 'Required',
-                        color: context.palette.missed,
+                    if (ask.granted)
+                      const StatusPill(
+                        label: 'Granted',
+                        color: AppTokens.success,
+                        icon: Icons.check_rounded,
                       )
-                    else if (!ask.essential && !ask.granted)
-                      StatusPill(
+                    else if (ask.essential)
+                      const StatusPill(
+                        label: 'Required',
+                        color: AppTokens.danger,
+                      )
+                    else
+                      const StatusPill(
                         label: 'Optional',
-                        color: context.palette.muted,
+                        color: AppTokens.textMuted,
                       ),
                   ],
                 ),
                 const SizedBox(height: 4),
                 Text(
                   ask.why,
-                  style: context.text.bodySmall?.copyWith(
-                    color: context.palette.muted,
-                    height: 1.5,
+                  style: const TextStyle(
+                    color: AppTokens.textMuted,
+                    fontSize: 12.5,
+                    height: 1.45,
                   ),
                 ),
                 if (blocked && !ask.granted) ...[
                   const SizedBox(height: 8),
-                  Text(
-                    'You declined this twice, so Android will no longer show '
-                    'the prompt. Turn it on in app settings.',
-                    style: context.text.bodySmall?.copyWith(
-                      color: context.palette.missed,
-                      height: 1.5,
+                  const Text(
+                    'Permission declined twice. Please enable it in Android system settings.',
+                    style: TextStyle(
+                      color: AppTokens.danger,
+                      fontSize: 11.5,
+                      height: 1.4,
                     ),
                   ),
                 ],
-                const SizedBox(height: 10),
-                if (ask.granted)
-                  StatusPill(
-                    label: 'Enabled',
-                    color: context.palette.answered,
-                    icon: Icons.check_rounded,
-                  )
-                else
+                if (!ask.granted) ...[
+                  const SizedBox(height: 10),
                   SizedBox(
                     height: 36,
                     child: FilledButton(
                       onPressed: busy ? null : onRequest,
                       style: FilledButton.styleFrom(
-                        minimumSize: const Size(0, 36),
                         padding: const EdgeInsets.symmetric(horizontal: 16),
                         backgroundColor: blocked
-                            ? context.palette.missed
-                            : context.colors.primary,
-                        disabledBackgroundColor: busy
-                            ? context.colors.primary
-                            : context.colors.primary.withValues(alpha: 0.38),
-                        disabledForegroundColor: Colors.white,
-                        textStyle: context.text.labelLarge?.copyWith(
-                          fontWeight: FontWeight.w600,
+                            ? AppTokens.danger
+                            : AppTokens.brandElectric,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(AppTokens.r8),
                         ),
                       ),
                       child: busy
@@ -130,11 +123,16 @@ class AskCard extends StatelessWidget {
                             )
                           : Text(
                               blocked || ask.kind == AskKind.backgroundActivity
-                                  ? 'Open settings'
-                                  : 'Enable',
+                                  ? 'Open Settings'
+                                  : 'Grant Access',
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w700,
+                              ),
                             ),
                     ),
                   ),
+                ],
               ],
             ),
           ),
@@ -144,7 +142,7 @@ class AskCard extends StatelessWidget {
   }
 }
 
-/// The `n of 4` bar shown above both permission screens.
+/// Progress bar shown above permissions lists.
 class AskProgress extends StatelessWidget {
   const AskProgress({super.key, required this.granted, required this.total});
 
@@ -153,40 +151,40 @@ class AskProgress extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Row(
-    children: [
-      Expanded(
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(3),
-          child: TweenAnimationBuilder<double>(
-            tween: Tween(begin: 0, end: total == 0 ? 0 : granted / total),
-            duration: const Duration(milliseconds: 320),
-            curve: Curves.easeOut,
-            builder: (context, value, _) => LinearProgressIndicator(
-              value: value,
-              minHeight: 6,
-              backgroundColor: context.palette.tint,
-              color: granted == total
-                  ? context.palette.answered
-                  : context.colors.primary,
+        children: [
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(3),
+              child: TweenAnimationBuilder<double>(
+                tween: Tween(begin: 0, end: total == 0 ? 0 : granted / total),
+                duration: const Duration(milliseconds: 320),
+                curve: Curves.easeOut,
+                builder: (context, value, _) => LinearProgressIndicator(
+                  value: value,
+                  minHeight: 6,
+                  backgroundColor: AppTokens.surface2,
+                  color: granted == total
+                      ? AppTokens.success
+                      : AppTokens.brandElectric,
+                ),
+              ),
             ),
           ),
-        ),
-      ),
-      const SizedBox(width: 10),
-      Text(
-        '$granted of $total',
-        style: context.text.bodySmall?.copyWith(
-          color: context.palette.muted,
-          fontWeight: FontWeight.w600,
-          fontFeatures: const [FontFeature.tabularFigures()],
-        ),
-      ),
-    ],
-  );
+          const SizedBox(width: 12),
+          Text(
+            '$granted of $total granted',
+            style: const TextStyle(
+              color: AppTokens.textSecondary,
+              fontWeight: FontWeight.w600,
+              fontSize: 12,
+              fontFeatures: [FontFeature.tabularFigures()],
+            ),
+          ),
+        ],
+      );
 }
 
-/// Placeholder shown while the first permission read is in flight. Matches the
-/// card layout so the screen does not jump when the real state lands.
+/// Placeholder shown while the first permission read is in flight.
 class AskSkeletonList extends StatelessWidget {
   const AskSkeletonList({super.key, this.count = 5});
 
@@ -194,38 +192,38 @@ class AskSkeletonList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => ListView(
-    padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
-    physics: const NeverScrollableScrollPhysics(),
-    children: [
-      const Skeleton(width: double.infinity, height: 6, radius: 3),
-      const SizedBox(height: 22),
-      for (var i = 0; i < count; i++) ...[
-        if (i > 0) const SizedBox(height: 12),
-        const AppCard(
-          padding: EdgeInsets.all(14),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Skeleton.circle(),
-              SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Skeleton(width: 132, height: 13),
-                    SizedBox(height: 10),
-                    Skeleton(width: double.infinity, height: 10),
-                    SizedBox(height: 6),
-                    Skeleton(width: 190, height: 10),
-                    SizedBox(height: 14),
-                    Skeleton(width: 86, height: 30, radius: 8),
-                  ],
-                ),
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
+        physics: const NeverScrollableScrollPhysics(),
+        children: [
+          const Skeleton(width: double.infinity, height: 6, radius: 3),
+          const SizedBox(height: 22),
+          for (var i = 0; i < count; i++) ...[
+            if (i > 0) const SizedBox(height: 12),
+            const AppCard(
+              padding: EdgeInsets.all(14),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Skeleton.circle(size: 38),
+                  SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Skeleton(width: 132, height: 13),
+                        SizedBox(height: 10),
+                        Skeleton(width: double.infinity, height: 10),
+                        SizedBox(height: 6),
+                        Skeleton(width: 190, height: 10),
+                        SizedBox(height: 14),
+                        Skeleton(width: 86, height: 30, radius: 8),
+                      ],
+                    ),
+                  ),
+                ],
               ),
-            ],
-          ),
-        ),
-      ],
-    ],
-  );
+            ),
+          ],
+        ],
+      );
 }

@@ -182,9 +182,10 @@ class NativeBridge(private val context: Context) : MethodChannel.MethodCallHandl
 
                 "scanRecordings" -> {
                     val since = (call.argument<Any>("sinceEpochSeconds") as? Number)?.toLong() ?: 0L
+                    val before = (call.argument<Any>("beforeEpochSeconds") as? Number)?.toLong() ?: 0L
                     val limit = call.argument<Int>("limit") ?: 200
                     result.success(
-                        RecordingScanner.scan(context, since, limit.coerceIn(1, 2000)),
+                        RecordingScanner.scan(context, since, limit.coerceIn(1, 2000), before),
                     )
                 }
 

@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/config/app_config.dart';
 import '../../../core/network/connectivity_service.dart';
+import '../../../core/theme/design_tokens.dart';
+import '../../../shared/widgets/charts.dart';
 import '../../../shared/widgets/ui_kit.dart';
 import '../../auth/data/auth_controller.dart';
 import '../../background/data/background_service.dart';
@@ -67,20 +69,51 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
 
     final isSyncing = syncState.isLoading;
 
-    // Calculate avatar initials
     final displayName = session?.displayName ?? 'Agent';
-    final initials = displayName.trim().split(' ').map((s) => s.isNotEmpty ? s[0] : '').take(2).join().toUpperCase();
+    final initials = displayName
+        .trim()
+        .split(' ')
+        .map((s) => s.isNotEmpty ? s[0] : '')
+        .take(2)
+        .join()
+        .toUpperCase();
+
+    final syncProgress = totalLocal > 0
+        ? (uploaded / totalLocal).clamp(0.0, 1.0)
+        : (waiting == 0 ? 1.0 : 0.0);
 
     return Scaffold(
+      backgroundColor: AppTokens.bgPrimary,
       appBar: AppBar(
-        title: const Text('Sync'),
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        titleSpacing: 20,
+        title: const Text(
+          'Sync Dashboard',
+          style: TextStyle(
+            fontWeight: FontWeight.w800,
+            fontSize: 24,
+            letterSpacing: -0.5,
+            color: Colors.white,
+          ),
+        ),
         actions: [
           PopupMenuButton<String>(
-            icon: const Icon(Icons.more_vert_rounded),
+            icon: const Icon(Icons.more_vert_rounded, color: AppTokens.textSecondary),
+            color: AppTokens.surface2,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(AppTokens.r12),
+              side: const BorderSide(color: AppTokens.borderDefault),
+            ),
             onSelected: (value) {
               if (value == 'settings') {
                 Navigator.of(context).push(
                   MaterialPageRoute<void>(builder: (_) => const SettingsScreen()),
+                );
+              } else if (value == 'outbox') {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(builder: (_) => const OutboxQueueScreen()),
                 );
               } else if (value == 'help') {
                 _showSyncHelp(context);
@@ -88,12 +121,22 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
             },
             itemBuilder: (context) => [
               const PopupMenuItem(
+                value: 'outbox',
+                child: Row(
+                  children: [
+                    Icon(Icons.inventory_2_outlined, size: 18, color: Colors.white),
+                    SizedBox(width: 10),
+                    Text('Outbox Queue', style: TextStyle(color: Colors.white)),
+                  ],
+                ),
+              ),
+              const PopupMenuItem(
                 value: 'settings',
                 child: Row(
                   children: [
-                    Icon(Icons.settings_outlined, size: 20),
+                    Icon(Icons.settings_outlined, size: 18, color: Colors.white),
                     SizedBox(width: 10),
-                    Text('Settings'),
+                    Text('Settings', style: TextStyle(color: Colors.white)),
                   ],
                 ),
               ),
@@ -101,9 +144,9 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
                 value: 'help',
                 child: Row(
                   children: [
-                    Icon(Icons.help_outline_rounded, size: 20),
+                    Icon(Icons.help_outline_rounded, size: 18, color: Colors.white),
                     SizedBox(width: 10),
-                    Text('Help & Info'),
+                    Text('Help & Information', style: TextStyle(color: Colors.white)),
                   ],
                 ),
               ),
@@ -112,6 +155,8 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
         ],
       ),
       body: RefreshIndicator(
+        color: AppTokens.brandElectric,
+        backgroundColor: AppTokens.surface2,
         onRefresh: () async {
           ref.invalidate(syncCountersProvider);
           await ref.read(callFeedProvider.notifier).refresh();
@@ -119,70 +164,63 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
         },
         child: ListView(
           physics: const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 32),
           children: [
             // ── Top User Profile Element ─────────────────────────────────────
             if (session != null) ...[
               AppCard(
-                padding: const EdgeInsets.all(16),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                 child: Row(
                   children: [
                     Container(
-                      width: 48,
-                      height: 48,
+                      width: 44,
+                      height: 44,
                       decoration: BoxDecoration(
-                        color: context.colors.primary,
+                        color: AppTokens.surface2,
                         shape: BoxShape.circle,
+                        border: Border.all(
+                          color: AppTokens.brandElectric.withValues(alpha: 0.5),
+                          width: 1.5,
+                        ),
                       ),
                       alignment: Alignment.center,
                       child: Text(
-                        initials.isNotEmpty ? initials : 'SV',
+                        initials.isNotEmpty ? initials : 'ZB',
                         style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 17,
-                          fontWeight: FontWeight.w600,
+                          color: AppTokens.brandElectric,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
                     ),
-                    const SizedBox(width: 14),
+                    const SizedBox(width: 12),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
                             session.displayName,
-                            style: context.text.bodyLarge?.copyWith(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w600,
+                            style: const TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.white,
                             ),
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            '${session.employeeId}${session.department != null ? ' · ${session.department}' : ''}',
-                            style: context.text.bodySmall?.copyWith(
-                              color: context.palette.muted,
-                              fontFeatures: const [FontFeature.tabularFigures()],
+                            'Employee ${session.employeeId}${session.department != null ? ' · ${session.department}' : ''}',
+                            style: const TextStyle(
+                              color: AppTokens.textMuted,
+                              fontSize: 12,
                             ),
                           ),
                         ],
                       ),
                     ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: isConnected
-                            ? context.palette.answered.withValues(alpha: 0.12)
-                            : context.palette.missed.withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Text(
-                        isConnected ? 'Online' : 'Offline',
-                        style: TextStyle(
-                          color: isConnected ? context.palette.answered : context.palette.missed,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
+                    StatusPill(
+                      label: isConnected ? 'Online' : 'Offline',
+                      color: isConnected ? AppTokens.success : AppTokens.danger,
+                      icon: isConnected ? Icons.wifi_rounded : Icons.wifi_off_rounded,
                     ),
                   ],
                 ),
@@ -190,78 +228,41 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
               const SizedBox(height: 14),
             ],
 
-            // ── Pending Sync Hero Card ───────────────────────────────────────
-            _PendingSyncHeroCard(
-              isSyncing: isSyncing,
-              waiting: waiting,
-              failed: failed,
-              uploaded: uploaded,
-              total: totalLocal,
-              isConnected: isConnected,
-            ),
-            const SizedBox(height: 14),
-
-            // ── Call Metadata Outbox Card ───────────────────────────────────
+            // ── SYNC HERO: Circular Progress Radial Dashboard ────────────────
             AppCard(
-              padding: const EdgeInsets.all(18),
+              padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
-                    children: [
-                      IconChip(
-                        icon: Icons.inventory_2_outlined,
-                        color: context.colors.primary,
-                      ),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Call Metadata Outbox',
-                              style: context.text.bodyLarge?.copyWith(
-                                fontWeight: FontWeight.w600,
-                                fontSize: 16,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              waiting > 0
-                                  ? '$waiting calls waiting to upload'
-                                  : 'All calls synced with backend',
-                              style: context.text.bodySmall?.copyWith(
-                                color: context.palette.muted,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
+                  SyncProgressRing(
+                    progress: syncProgress,
+                    centerText: waiting > 0 ? '$waiting' : (uploaded > 0 ? '$uploaded' : '0'),
+                    subtitle: waiting > 0 ? 'Calls in queue' : 'All synced',
+                    ringColor: failed > 0
+                        ? AppTokens.danger
+                        : (waiting > 0 ? AppTokens.brandElectric : AppTokens.success),
                   ),
-                  const SizedBox(height: 16),
-                  SizedBox(
-                    width: double.infinity,
-                    height: 44,
-                    child: OutlinedButton.icon(
-                      onPressed: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (_) => const OutboxQueueScreen(),
-                          ),
-                        );
-                      },
-                      style: OutlinedButton.styleFrom(
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        side: BorderSide(color: context.colors.outlineVariant),
-                      ),
-                      icon: const Icon(Icons.list_alt_rounded, size: 18),
-                      label: const Text(
-                        'View Queue',
-                        style: TextStyle(fontWeight: FontWeight.w600),
-                      ),
+                  const SizedBox(height: 18),
+                  Text(
+                    isSyncing
+                        ? 'Uploading metadata & audio recordings…'
+                        : (failed > 0
+                            ? '$failed calls encountered errors'
+                            : (waiting > 0
+                                ? '$waiting records ready for cloud sync'
+                                : 'All call records are synchronized with backend')),
+                    style: TextStyle(
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w600,
+                      color: failed > 0 ? AppTokens.danger : Colors.white,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Last successful sync: ${isSyncing ? "In progress" : (uploaded > 0 ? "Just now" : "Pending")}',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AppTokens.textMuted,
                     ),
                   ),
                 ],
@@ -269,75 +270,86 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
             ),
             const SizedBox(height: 14),
 
-            // ── Upload Status Breakdown Card ────────────────────────────────
-            AppCard(
-              padding: EdgeInsets.zero,
-              child: Column(
-                children: [
-                  _BreakdownRow(
-                    icon: Icons.check_rounded,
-                    iconBg: context.palette.answered.withValues(alpha: 0.12),
-                    iconColor: context.palette.answered,
-                    title: 'Uploaded',
-                    subtitle: 'Confirmed by the server',
-                    count: '$uploaded',
-                    countColor: context.palette.answered,
-                  ),
-                  const _RowDivider(),
-                  _BreakdownRow(
-                    icon: Icons.upload_rounded,
-                    iconBg: context.colors.primary.withValues(alpha: 0.12),
-                    iconColor: context.colors.primary,
-                    title: 'Uploading',
-                    subtitle: isSyncing ? 'In flight now' : 'Idle',
-                    count: isSyncing ? '1' : '0',
-                    countColor: context.colors.primary,
-                  ),
-                  const _RowDivider(),
-                  _BreakdownRow(
-                    icon: Icons.schedule_rounded,
-                    iconBg: context.palette.waiting.withValues(alpha: 0.14),
-                    iconColor: context.palette.waiting,
-                    title: 'Waiting',
-                    subtitle: 'Queued for the next window',
-                    count: '$waiting',
-                    countColor: context.palette.waiting,
-                  ),
-                  const _RowDivider(),
-                  _BreakdownRow(
-                    icon: Icons.warning_amber_rounded,
-                    iconBg: context.palette.missed.withValues(alpha: 0.12),
-                    iconColor: context.palette.missed,
-                    title: 'Failed',
-                    subtitle: failed > 0 ? '$failed calls need attention' : 'No failed items',
-                    count: '$failed',
-                    countColor: context.palette.missed,
-                  ),
-                ],
-              ),
+            // ── SYNC PIPELINE VISUALIZER ─────────────────────────────────────
+            _SyncPipelineCard(
+              isSyncing: isSyncing,
+              waiting: waiting,
+              uploaded: uploaded,
+              failed: failed,
             ),
             const SizedBox(height: 14),
 
-            // ── Sync Actions ────────────────────────────────────────────────
+            // ── 4 COMPACT DASHBOARD STATUS METRICS ───────────────────────────
             Row(
               children: [
                 Expanded(
+                  child: _SyncStatTile(
+                    title: 'Uploaded',
+                    count: '$uploaded',
+                    subtitle: 'Confirmed by server',
+                    icon: Icons.check_circle_rounded,
+                    color: AppTokens.success,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _SyncStatTile(
+                    title: 'Uploading',
+                    count: isSyncing ? '1' : '0',
+                    subtitle: isSyncing ? 'In flight' : 'Idle',
+                    icon: Icons.cloud_upload_rounded,
+                    color: AppTokens.brandElectric,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: _SyncStatTile(
+                    title: 'Waiting',
+                    count: '$waiting',
+                    subtitle: 'Queued in outbox',
+                    icon: Icons.schedule_rounded,
+                    color: AppTokens.warning,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _SyncStatTile(
+                    title: 'Failed',
+                    count: '$failed',
+                    subtitle: failed > 0 ? 'Need attention' : 'Zero failures',
+                    icon: Icons.error_rounded,
+                    color: AppTokens.danger,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+
+            // ── SYNC CTA ACTION BUTTONS ──────────────────────────────────────
+            Row(
+              children: [
+                Expanded(
+                  flex: 3,
                   child: SizedBox(
                     height: 48,
-                    child: ElevatedButton.icon(
+                    child: FilledButton.icon(
                       onPressed: isSyncing
                           ? null
                           : () async {
                               await ref.read(syncServiceProvider.notifier).triggerSync();
                               ref.invalidate(syncCountersProvider);
                             },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: context.colors.primary,
-                        foregroundColor: Colors.white,
+                      style: FilledButton.styleFrom(
+                        backgroundColor: failed > 0
+                            ? AppTokens.danger
+                            : AppTokens.brandElectric,
                         shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(8),
+                          borderRadius: BorderRadius.circular(AppTokens.r12),
                         ),
-                        elevation: 0,
                       ),
                       icon: isSyncing
                           ? const SizedBox(
@@ -348,10 +360,47 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
                                 color: Colors.white,
                               ),
                             )
-                          : const Icon(Icons.sync_rounded, size: 20),
+                          : Icon(
+                              failed > 0
+                                  ? Icons.restart_alt_rounded
+                                  : Icons.sync_rounded,
+                              size: 20,
+                            ),
                       label: Text(
-                        isSyncing ? 'Syncing…' : (failed > 0 ? 'Retry failed uploads' : 'Sync now'),
-                        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14.5),
+                        isSyncing
+                            ? 'Syncing…'
+                            : (failed > 0 ? 'Retry Failed Calls' : 'Sync Now'),
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 14.5,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  flex: 2,
+                  child: SizedBox(
+                    height: 48,
+                    child: OutlinedButton.icon(
+                      onPressed: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => const OutboxQueueScreen(),
+                          ),
+                        );
+                      },
+                      style: OutlinedButton.styleFrom(
+                        side: const BorderSide(color: AppTokens.borderDefault),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(AppTokens.r12),
+                        ),
+                      ),
+                      icon: const Icon(Icons.list_alt_rounded, size: 18, color: Colors.white),
+                      label: const Text(
+                        'Outbox',
+                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
                       ),
                     ),
                   ),
@@ -360,92 +409,87 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
             ),
             const SizedBox(height: 20),
 
-            // ── Recordings Section ──────────────────────────────────────────
-            const SectionLabel('Recordings'),
+            // ── RECORDING INGESTION STATUS ───────────────────────────────────
+            const SectionLabel('Recording Ingestion Status'),
             const SizedBox(height: 8),
             AppCard(
               padding: EdgeInsets.zero,
               child: Column(
                 children: [
-                  _BreakdownRow(
+                  _BreakdownItem(
                     icon: Icons.graphic_eq_rounded,
-                    iconBg: context.palette.answered.withValues(alpha: 0.12),
-                    iconColor: context.palette.answered,
-                    title: 'Matched',
-                    subtitle: 'Associated with a call',
+                    iconColor: AppTokens.success,
+                    title: 'Matched Recordings',
+                    subtitle: 'Associated with call duration & timing',
                     count: '${stats.recordingsMatched}',
-                    countColor: context.palette.answered,
+                    countColor: AppTokens.success,
                   ),
                   const _RowDivider(),
-                  _BreakdownRow(
-                    icon: Icons.warning_amber_rounded,
-                    iconBg: context.palette.waiting.withValues(alpha: 0.14),
-                    iconColor: context.palette.waiting,
-                    title: 'Needs review',
-                    subtitle: 'Match was ambiguous',
+                  _BreakdownItem(
+                    icon: Icons.help_outline_rounded,
+                    iconColor: AppTokens.warning,
+                    title: 'Needs Review',
+                    subtitle: 'Multiple candidates detected',
                     count: '${stats.recordingsNeedReview}',
-                    countColor: context.palette.waiting,
+                    countColor: stats.recordingsNeedReview > 0
+                        ? AppTokens.warning
+                        : AppTokens.textMuted,
                   ),
                   const _RowDivider(),
-                  _BreakdownRow(
+                  _BreakdownItem(
                     icon: Icons.mic_off_outlined,
-                    iconBg: context.palette.tint,
-                    iconColor: context.palette.muted,
-                    title: 'No recording',
-                    subtitle: 'Missed & unrecorded calls',
+                    iconColor: AppTokens.textMuted,
+                    title: 'No Audio Recording',
+                    subtitle: 'Missed, rejected or unrecorded calls',
                     count: '${stats.recordingsAbsent}',
-                    countColor: context.palette.muted,
+                    countColor: AppTokens.textMuted,
                   ),
                 ],
               ),
             ),
             const SizedBox(height: 20),
 
-            // ── Connection & Status Section ─────────────────────────────────
-            const SectionLabel('Status'),
+            // ── SYSTEM & NETWORK HEALTH ──────────────────────────────────────
+            const SectionLabel('Connectivity & Health'),
             const SizedBox(height: 8),
             AppCard(
               padding: EdgeInsets.zero,
               child: Column(
                 children: [
-                  _StatusItem(
-                    icon: Icons.schedule_rounded,
-                    label: 'Last successful sync',
-                    value: isSyncing ? 'In progress' : (uploaded > 0 ? 'Just now' : 'Pending'),
-                  ),
-                  const _RowDivider(leftPadding: 44),
-                  _StatusItem(
+                  _HealthRow(
                     icon: Icons.wifi_rounded,
-                    label: 'Network',
+                    label: 'Network Connectivity',
                     value: isConnected ? 'Connected' : 'Offline',
-                    valueColor: isConnected ? context.palette.answered : context.palette.missed,
+                    valueColor: isConnected ? AppTokens.success : AppTokens.danger,
                   ),
                   const _RowDivider(leftPadding: 44),
-                  _StatusItem(
+                  _HealthRow(
                     icon: Icons.dns_rounded,
-                    label: 'Server',
-                    value: AppConfig.hasServer ? 'Reachable' : 'Local demo',
-                    valueColor: AppConfig.hasServer ? context.palette.answered : context.palette.waiting,
+                    label: 'Backend Server',
+                    value: AppConfig.hasServer ? 'Reachable' : 'Local Sandbox',
+                    valueColor: AppConfig.hasServer ? AppTokens.success : AppTokens.warning,
                   ),
                   const _RowDivider(leftPadding: 44),
-                  _StatusItem(
+                  _HealthRow(
                     icon: Icons.inventory_2_outlined,
-                    label: 'Queue size',
-                    value: '$waiting records',
+                    label: 'Local Outbox Queue',
+                    value: '$waiting calls waiting',
+                    valueColor: waiting > 0 ? AppTokens.warning : AppTokens.success,
                   ),
                 ],
               ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 14),
 
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
+            // Informational footer
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 4),
               child: Text(
-                'Calls are saved on the device the moment they end. Nothing is lost while offline — the queue drains automatically when a connection returns.',
-                style: context.text.bodySmall?.copyWith(
-                  color: context.palette.muted,
-                  height: 1.5,
-                  fontSize: 12.5,
+                'Calls and recordings are saved natively to device storage the moment they complete. The background sync worker drains the outbox automatically as soon as internet connectivity is available.',
+                style: TextStyle(
+                  color: AppTokens.textMuted,
+                  height: 1.45,
+                  fontSize: 12,
                 ),
               ),
             ),
@@ -459,17 +503,23 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
     showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Synchronization & Outbox'),
+        backgroundColor: AppTokens.surface1,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(AppTokens.r16),
+          side: const BorderSide(color: AppTokens.borderDefault),
+        ),
+        title: const Text('Synchronization Engine', style: TextStyle(color: Colors.white)),
         content: const Text(
-          'Calls are captured natively the moment they end on your phone.\n\n'
-          '• Offline-First: All calls are safely stored in local database before upload.\n'
-          '• Background Sync: Native Android WorkManager uploads call metadata and audio files automatically in the background.\n'
-          '• View Queue: Tap View Queue to inspect individual pending calls, error details, or trigger individual retries.',
+          '• Offline-First: All calls and audio matches are stored locally first.\n'
+          '• Background Sync: WorkManager uploads call metadata and audio files automatically in the background.\n'
+          '• Deduplication: Every call has a deterministic idempotency key to prevent duplicates.\n'
+          '• Outbox Queue: Inspect individual pending items, error details, and perform manual retries from the Outbox.',
+          style: TextStyle(color: AppTokens.textSecondary, height: 1.5),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Got it'),
+            child: const Text('Got it', style: TextStyle(color: AppTokens.brandElectric)),
           ),
         ],
       ),
@@ -477,123 +527,98 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
   }
 }
 
-class _PendingSyncHeroCard extends StatelessWidget {
-  const _PendingSyncHeroCard({
+// ── Visual Pipeline Card: Local ➔ Queued ➔ Uploading ➔ Server ➔ Confirmed ───
+class _SyncPipelineCard extends StatelessWidget {
+  const _SyncPipelineCard({
     required this.isSyncing,
     required this.waiting,
-    required this.failed,
     required this.uploaded,
-    required this.total,
-    required this.isConnected,
+    required this.failed,
   });
 
   final bool isSyncing;
   final int waiting;
-  final int failed;
   final int uploaded;
-  final int total;
-  final bool isConnected;
+  final int failed;
 
   @override
   Widget build(BuildContext context) {
-    final hasPending = waiting > 0;
-    final hasFailed = failed > 0;
+    return AppCard(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Sync Pipeline',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: AppTokens.textMuted,
+              letterSpacing: 0.6,
+            ),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              _PipelineStep(label: 'Local', active: true, done: true),
+              _PipelineArrow(active: true),
+              _PipelineStep(label: 'Queued', active: waiting > 0, done: waiting == 0 && uploaded > 0),
+              _PipelineArrow(active: isSyncing),
+              _PipelineStep(label: 'Uploading', active: isSyncing, done: uploaded > 0),
+              _PipelineArrow(active: uploaded > 0),
+              _PipelineStep(label: 'Server', active: uploaded > 0, done: uploaded > 0),
+              _PipelineArrow(active: uploaded > 0 && failed == 0),
+              _PipelineStep(label: 'Confirmed', active: uploaded > 0 && waiting == 0, done: uploaded > 0 && waiting == 0),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
 
-    final Color accentColor = hasFailed
-        ? context.palette.missed
-        : (hasPending || isSyncing
-            ? context.palette.waiting
-            : context.palette.answered);
+class _PipelineStep extends StatelessWidget {
+  const _PipelineStep({
+    required this.label,
+    required this.active,
+    required this.done,
+  });
 
-    final String title = isSyncing
-        ? 'Syncing Outbox…'
-        : (hasFailed
-            ? '$failed calls failed to sync'
-            : (hasPending
-                ? '$waiting calls waiting to sync'
-                : 'All caught up'));
+  final String label;
+  final bool active;
+  final bool done;
 
-    final String subtitle = isSyncing
-        ? 'Uploading call metadata to server'
-        : (!isConnected
-            ? "You're offline · Will sync when connected"
-            : (hasPending
-                ? 'Stored locally · Ready for sync'
-                : 'Your call data is synchronized'));
-
-    final IconData icon = isSyncing
-        ? Icons.sync_rounded
-        : (hasFailed
-            ? Icons.warning_amber_rounded
-            : (hasPending
-                ? Icons.cloud_upload_outlined
-                : Icons.cloud_done_rounded));
+  @override
+  Widget build(BuildContext context) {
+    final color = done
+        ? AppTokens.success
+        : (active ? AppTokens.brandElectric : AppTokens.textDisabled);
 
     return Column(
       children: [
-        AppCard(
-          padding: const EdgeInsets.all(18),
-          child: Row(
-            children: [
-              Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  color: accentColor.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Icon(icon, color: accentColor, size: 22),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: context.text.bodyLarge?.copyWith(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      subtitle,
-                      style: context.text.bodySmall?.copyWith(
-                        color: context.palette.muted,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
+        Container(
+          width: 24,
+          height: 24,
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.15),
+            shape: BoxShape.circle,
+            border: Border.all(color: color, width: 1.5),
+          ),
+          alignment: Alignment.center,
+          child: Icon(
+            done ? Icons.check_rounded : (active ? Icons.sync_rounded : Icons.circle),
+            size: done ? 13 : 10,
+            color: color,
           ),
         ),
-        const SizedBox(height: 6),
-        // Progress Track
-        ClipRRect(
-          borderRadius: BorderRadius.circular(3),
-          child: SizedBox(
-            height: 6,
-            child: Row(
-              children: [
-                if (uploaded > 0 || total == 0)
-                  Expanded(
-                    flex: uploaded > 0 ? uploaded : 1,
-                    child: ColoredBox(color: context.palette.answered),
-                  ),
-                if (waiting > 0)
-                  Expanded(
-                    flex: waiting,
-                    child: ColoredBox(color: context.palette.waiting),
-                  ),
-                if (failed > 0)
-                  Expanded(
-                    flex: failed,
-                    child: ColoredBox(color: context.palette.missed),
-                  ),
-              ],
-            ),
+        const SizedBox(height: 4),
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 9.5,
+            fontWeight: active || done ? FontWeight.w700 : FontWeight.w500,
+            color: active || done ? Colors.white : AppTokens.textMuted,
           ),
         ),
       ],
@@ -601,10 +626,93 @@ class _PendingSyncHeroCard extends StatelessWidget {
   }
 }
 
-class _BreakdownRow extends StatelessWidget {
-  const _BreakdownRow({
+class _PipelineArrow extends StatelessWidget {
+  const _PipelineArrow({required this.active});
+
+  final bool active;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Icon(
+        Icons.chevron_right_rounded,
+        size: 14,
+        color: active ? AppTokens.brandElectric : AppTokens.borderDefault,
+      ),
+    );
+  }
+}
+
+// ── 4 Sync Stat Tile ─────────────────────────────────────────────────────────
+class _SyncStatTile extends StatelessWidget {
+  const _SyncStatTile({
+    required this.title,
+    required this.count,
+    required this.subtitle,
     required this.icon,
-    required this.iconBg,
+    required this.color,
+  });
+
+  final String title;
+  final String count;
+  final String subtitle;
+  final IconData icon;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return AppCard(
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              IconChip(icon: icon, color: color, size: 28, iconSize: 15),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: AppTokens.textSecondary,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            count,
+            style: TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.w800,
+              color: color,
+              letterSpacing: -0.4,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            subtitle,
+            style: const TextStyle(
+              fontSize: 11,
+              color: AppTokens.textMuted,
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BreakdownItem extends StatelessWidget {
+  const _BreakdownItem({
+    required this.icon,
     required this.iconColor,
     required this.title,
     required this.subtitle,
@@ -613,7 +721,6 @@ class _BreakdownRow extends StatelessWidget {
   });
 
   final IconData icon;
-  final Color iconBg;
   final Color iconColor;
   final String title;
   final String subtitle;
@@ -623,18 +730,10 @@ class _BreakdownRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       child: Row(
         children: [
-          Container(
-            width: 32,
-            height: 32,
-            decoration: BoxDecoration(
-              color: iconBg,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Icon(icon, color: iconColor, size: 17),
-          ),
+          IconChip(icon: icon, color: iconColor, size: 34, iconSize: 18),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
@@ -642,16 +741,18 @@ class _BreakdownRow extends StatelessWidget {
               children: [
                 Text(
                   title,
-                  style: context.text.bodyMedium?.copyWith(
+                  style: const TextStyle(
                     fontWeight: FontWeight.w600,
-                    fontSize: 14.5,
+                    fontSize: 14,
+                    color: Colors.white,
                   ),
                 ),
+                const SizedBox(height: 2),
                 Text(
                   subtitle,
-                  style: context.text.bodySmall?.copyWith(
-                    color: context.palette.muted,
-                    fontSize: 12.5,
+                  style: const TextStyle(
+                    color: AppTokens.textMuted,
+                    fontSize: 12,
                   ),
                 ),
               ],
@@ -659,11 +760,10 @@ class _BreakdownRow extends StatelessWidget {
           ),
           Text(
             count,
-            style: context.text.titleLarge?.copyWith(
-              fontWeight: FontWeight.w700,
-              fontSize: 19,
+            style: TextStyle(
+              fontWeight: FontWeight.w800,
+              fontSize: 17,
               color: countColor,
-              letterSpacing: -0.4,
               fontFeatures: const [FontFeature.tabularFigures()],
             ),
           ),
@@ -673,41 +773,39 @@ class _BreakdownRow extends StatelessWidget {
   }
 }
 
-class _StatusItem extends StatelessWidget {
-  const _StatusItem({
+class _HealthRow extends StatelessWidget {
+  const _HealthRow({
     required this.icon,
     required this.label,
     required this.value,
-    this.valueColor,
+    required this.valueColor,
   });
 
   final IconData icon;
   final String label;
   final String value;
-  final Color? valueColor;
+  final Color valueColor;
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       child: Row(
         children: [
-          Icon(icon, size: 18, color: context.palette.muted),
+          Icon(icon, size: 18, color: AppTokens.textMuted),
           const SizedBox(width: 12),
           Expanded(
             child: Text(
               label,
-              style: context.text.bodyMedium?.copyWith(
-                fontSize: 14,
-              ),
+              style: const TextStyle(fontSize: 13.5, color: Colors.white),
             ),
           ),
           Text(
             value,
-            style: context.text.bodyMedium?.copyWith(
+            style: TextStyle(
               fontWeight: FontWeight.w600,
-              fontSize: 13.5,
-              color: valueColor ?? context.palette.muted,
+              fontSize: 13,
+              color: valueColor,
             ),
           ),
         ],
@@ -725,10 +823,7 @@ class _RowDivider extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: EdgeInsets.only(left: leftPadding),
-      child: Divider(
-        height: 1,
-        color: Theme.of(context).colorScheme.outlineVariant,
-      ),
+      child: const Divider(height: 1, color: AppTokens.borderSubtle),
     );
   }
 }

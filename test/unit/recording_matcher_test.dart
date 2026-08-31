@@ -241,4 +241,46 @@ void main() {
       expect(result.signals!.identityMatched, isTrue);
     });
   });
+
+  group('optimized batch and isolate execution', () {
+    test('matchBatchInIsolate successfully matches multiple calls concurrently', () async {
+      final calls = [
+        call(startSeconds: 1787890986, durationSeconds: 114),
+        call(startSeconds: 1787890024, durationSeconds: 45),
+        call(startSeconds: 1787891129, durationSeconds: 10),
+      ];
+
+      final candidates = [
+        rec(id: 1, durationMillis: 8363, addedSeconds: 1787903339),
+        rec(id: 2, durationMillis: 10133, addedSeconds: 1787891133),
+        rec(id: 3, durationMillis: 114046, addedSeconds: 1787890995),
+        rec(id: 4, durationMillis: 44757, addedSeconds: 1787890038),
+      ];
+
+      final results = await RecordingMatcher.matchBatchInIsolate(
+        calls: calls,
+        candidates: candidates,
+      );
+
+      expect(results.length, 3);
+      expect(results[1787890986 * 1000]!.status, RecordingMatchStatus.matched);
+      expect(results[1787890986 * 1000]!.candidate!.mediaStoreId, 3);
+
+      expect(results[1787890024 * 1000]!.status, RecordingMatchStatus.matched);
+      expect(results[1787890024 * 1000]!.candidate!.mediaStoreId, 4);
+
+      expect(results[1787891129 * 1000]!.status, RecordingMatchStatus.matched);
+      expect(results[1787891129 * 1000]!.candidate!.mediaStoreId, 2);
+    });
+
+    test('temporal pre-gating discards candidates outside ring gap window', () {
+      final testCall = call(startSeconds: 1000000, durationSeconds: 30);
+      // Candidates outside [-15s, +180s]
+      final candidateWayBefore = rec(id: 1, durationMillis: 30000, addedSeconds: 999900);
+      final candidateWayAfter = rec(id: 2, durationMillis: 30000, addedSeconds: 1000300);
+
+      final result = matcher.match(testCall, [candidateWayBefore, candidateWayAfter]);
+      expect(result.status, RecordingMatchStatus.unmatched);
+    });
+  });
 }

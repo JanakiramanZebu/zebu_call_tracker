@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:drift/drift.dart' hide Column;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -108,23 +109,18 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
 
   /// Ingests new native call logs into local database outbox.
   ///
-  /// Also performs recording association: for each newly inserted call that
-  /// connected, the recording pool is scanned and — when a confident match is
-  /// found — the MediaStore ID and content URI are persisted so the upload step
-  /// can find the file without a second scan.
+  /// Employs sliding-window candidate scanning and offloads CPU-intensive
+  /// heuristic matching to a background isolate using [RecordingMatcher.matchBatchInIsolate].
   Future<int> ingestNativeCallLogs() async {
     final bridge = ref.read(nativeBridgeProvider);
     final dao = ref.read(callsDaoProvider);
     final matcher = ref.read(recordingMatcherProvider);
 
     try {
-      // Scan the recording pool once for the whole ingest operation.
-      List<RecordingCandidate> pool = const [];
+      bool hasRecordingAccess = false;
       try {
         final access = await bridge.getRecordingAccess();
-        if (access.granted) {
-          pool = await bridge.scanRecordings(sinceEpochSeconds: 0, limit: 2000);
-        }
+        hasRecordingAccess = access.granted;
       } catch (_) {
         // Recording access is optional; call metadata can still be ingested.
       }
@@ -144,6 +140,55 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
 
         if (rows.isEmpty) break;
 
+        // Determine timestamp window for the current call batch
+        int minMillis = rows.first.dateMillis ?? 0;
+        int maxMillis = rows.first.dateMillis ?? 0;
+        for (final r in rows) {
+          final m = r.dateMillis;
+          if (m != null) {
+            if (m < minMillis) minMillis = m;
+            if (m > maxMillis) maxMillis = m;
+          }
+        }
+
+        // Bounded candidate pool for this sliding window (with ±5 minute margin)
+        List<RecordingCandidate> pool = const [];
+        if (hasRecordingAccess && maxMillis > 0) {
+          final sinceSec = math.max(0, (minMillis ~/ 1000) - 300);
+          final beforeSec = (maxMillis ~/ 1000) + 300;
+          try {
+            pool = await bridge.scanRecordings(
+              sinceEpochSeconds: sinceSec,
+              beforeEpochSeconds: beforeSec,
+              limit: 500,
+            );
+          } catch (_) {}
+        }
+
+        // Collect calls that connected for batch matching
+        final callsToMatch = <CallForMatching>[];
+        if (pool.isNotEmpty) {
+          for (final r in rows) {
+            if (r.dateMillis != null && (r.durationSeconds ?? 0) > 0) {
+              callsToMatch.add(CallForMatching(
+                startedAtEpochMillis: r.dateMillis!,
+                durationSeconds: r.durationSeconds ?? 0,
+                normalizedNumber: r.number,
+                contactName: r.cachedName,
+              ));
+            }
+          }
+        }
+
+        // Offload matching compute to a background isolate
+        final matchResults = callsToMatch.isNotEmpty
+            ? await RecordingMatcher.matchBatchInIsolate(
+                calls: callsToMatch,
+                candidates: pool,
+                matcher: matcher,
+              )
+            : const <int, RecordingMatch>{};
+
         int pageIngested = 0;
         for (final r in rows) {
           if (r.dateMillis == null) continue;
@@ -159,22 +204,18 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
           if (existing != null) {
             // Check if unlinked call can now be linked to a recording candidate
             if ((!existing.hasRecording || existing.recordingMediaStoreId == null) &&
-                pool.isNotEmpty &&
                 (r.durationSeconds ?? 0) > 0) {
-              final callForMatch = CallForMatching(
-                startedAtEpochMillis: r.dateMillis!,
-                durationSeconds: r.durationSeconds ?? 0,
-                normalizedNumber: r.number,
-                contactName: r.cachedName,
-              );
-              final result = matcher.match(callForMatch, pool);
-              if (result.status == RecordingMatchStatus.matched && result.candidate != null) {
+              final match = matchResults[r.dateMillis!];
+              if (match != null &&
+                  match.status == RecordingMatchStatus.matched &&
+                  match.candidate != null) {
                 try {
-                  final recPath = await bridge.getRecordingUri(result.candidate!.mediaStoreId);
+                  final recPath =
+                      await bridge.getRecordingUri(match.candidate!.mediaStoreId);
                   await dao.updateRecordingInfo(
                     idempotencyKey: idempotencyKey,
                     recordingPath: recPath,
-                    mediaStoreId: result.candidate!.mediaStoreId,
+                    mediaStoreId: match.candidate!.mediaStoreId,
                   );
                 } catch (_) {}
               }
@@ -199,16 +240,10 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
 
           // --- Recording association ---
           RecordingCandidate? matched;
-          if (hasConnected && pool.isNotEmpty) {
-            final callForMatch = CallForMatching(
-              startedAtEpochMillis: r.dateMillis!,
-              durationSeconds: durationSecs,
-              normalizedNumber: r.number,
-              contactName: r.cachedName,
-            );
-            final result = matcher.match(callForMatch, pool);
-            if (result.status == RecordingMatchStatus.matched) {
-              matched = result.candidate;
+          if (hasConnected) {
+            final match = matchResults[r.dateMillis!];
+            if (match != null && match.status == RecordingMatchStatus.matched) {
+              matched = match.candidate;
             }
           }
 
@@ -250,25 +285,57 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
       }
 
       // Secondary retroactive pass: re-scan database calls that connected but lack recording link
-      if (pool.isNotEmpty) {
+      if (hasRecordingAccess) {
         final unlinked = await dao.getCallsNeedingRecordingMatch();
-        for (final call in unlinked) {
-          final callForMatch = CallForMatching(
-            startedAtEpochMillis: call.startedAt.millisecondsSinceEpoch,
-            durationSeconds: call.durationSeconds,
-            normalizedNumber: call.normalizedPhoneNumber,
-            contactName: call.contactName,
+        if (unlinked.isNotEmpty) {
+          int minEpochSec = unlinked.first.startedAt.millisecondsSinceEpoch ~/ 1000;
+          int maxEpochSec = unlinked.first.startedAt.millisecondsSinceEpoch ~/ 1000;
+          for (final c in unlinked) {
+            final sec = c.startedAt.millisecondsSinceEpoch ~/ 1000;
+            if (sec < minEpochSec) minEpochSec = sec;
+            if (sec > maxEpochSec) maxEpochSec = sec;
+          }
+
+          final retroactivePool = await bridge.scanRecordings(
+            sinceEpochSeconds: math.max(0, minEpochSec - 300),
+            beforeEpochSeconds: maxEpochSec + 300,
+            limit: 500,
           );
-          final result = matcher.match(callForMatch, pool);
-          if (result.status == RecordingMatchStatus.matched && result.candidate != null) {
-            try {
-              final recPath = await bridge.getRecordingUri(result.candidate!.mediaStoreId);
-              await dao.updateRecordingInfo(
-                idempotencyKey: call.idempotencyKey,
-                recordingPath: recPath,
-                mediaStoreId: result.candidate!.mediaStoreId,
-              );
-            } catch (_) {}
+
+          if (retroactivePool.isNotEmpty) {
+            final unlinkedCallsForMatch = [
+              for (final call in unlinked)
+                CallForMatching(
+                  startedAtEpochMillis: call.startedAt.millisecondsSinceEpoch,
+                  durationSeconds: call.durationSeconds,
+                  normalizedNumber: call.normalizedPhoneNumber,
+                  contactName: call.contactName,
+                )
+            ];
+
+            final unlinkedMatches = await RecordingMatcher.matchBatchInIsolate(
+              calls: unlinkedCallsForMatch,
+              candidates: retroactivePool,
+              matcher: matcher,
+            );
+
+            for (final call in unlinked) {
+              final result =
+                  unlinkedMatches[call.startedAt.millisecondsSinceEpoch];
+              if (result != null &&
+                  result.status == RecordingMatchStatus.matched &&
+                  result.candidate != null) {
+                try {
+                  final recPath =
+                      await bridge.getRecordingUri(result.candidate!.mediaStoreId);
+                  await dao.updateRecordingInfo(
+                    idempotencyKey: call.idempotencyKey,
+                    recordingPath: recPath,
+                    mediaStoreId: result.candidate!.mediaStoreId,
+                  );
+                } catch (_) {}
+              }
+            }
           }
         }
       }
@@ -472,6 +539,12 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
           }
         }
       }
+
+      // Retention policy: automatically purge synced records older than 180 days (6 months)
+      // to keep local SQLite storage lean on low-end devices.
+      final purgeCutoff = DateTime.now().toUtc().subtract(const Duration(days: 180));
+      await dao.deleteSyncedCallsOlderThan(purgeCutoff);
+      await dao.deletePermanentFailuresOlderThan(purgeCutoff);
 
       final summary = SyncResultSummary(
         attemptedCalls: totalAttemptedCalls,

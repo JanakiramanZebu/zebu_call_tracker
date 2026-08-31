@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/theme/design_tokens.dart';
 import '../../../core/utils/formatters.dart';
 import '../../../shared/widgets/loaders.dart';
 import '../../../shared/widgets/ui_kit.dart';
@@ -14,9 +15,6 @@ import '../domain/call_entry.dart';
 
 /// One call, in full: who it was, what happened, the recording if there is one,
 /// and every other call with the same number.
-///
-/// Stateful only so that leaving the screen can stop playback — audio must not
-/// keep running behind a screen the user has navigated away from.
 class CallDetailScreen extends ConsumerStatefulWidget {
   const CallDetailScreen({super.key, required this.entry});
 
@@ -29,8 +27,6 @@ class CallDetailScreen extends ConsumerStatefulWidget {
 class _CallDetailScreenState extends ConsumerState<CallDetailScreen> {
   @override
   void dispose() {
-    // The provider outlives this screen, so the player has to be told. Riverpod
-    // forbids touching a ref during dispose, hence the post-frame hop.
     final container = ProviderScope.containerOf(context, listen: false);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       container.read(recordingPlayerProvider.notifier).stop();
@@ -46,38 +42,59 @@ class _CallDetailScreenState extends ConsumerState<CallDetailScreen> {
     final number = entry.row.number ?? '';
 
     return Scaffold(
+      backgroundColor: AppTokens.bgPrimary,
       appBar: AppBar(
-        title: const Text('Call detail'),
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        title: const Text(
+          'Call Detail',
+          style: TextStyle(
+            fontWeight: FontWeight.w700,
+            fontSize: 20,
+            color: Colors.white,
+          ),
+        ),
         actions: [
           if (number.isNotEmpty)
             IconButton(
               onPressed: () => _copyNumber(context, number),
-              icon: const Icon(Icons.copy_rounded, size: 20),
+              icon: const Icon(Icons.copy_rounded, size: 19, color: AppTokens.textSecondary),
               tooltip: 'Copy number',
             ),
         ],
       ),
-      // This screen is pushed over the shell, so there is no NavigationBar
-      // reserving the gesture inset — without SafeArea the last card runs
-      // under the system bar.
       body: SafeArea(
         top: false,
         child: ListView(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
           children: [
+            // 1. Contact Hero Header
             _Header(entry: entry, dir: dir),
             const SizedBox(height: 12),
+
+            // 2. Action Buttons (Call Back, Copy)
             _ActionRow(entry: entry),
             const SizedBox(height: 14),
+
+            // 3. Audio Recording Section
             _RecordingCard(entry: entry),
             const SizedBox(height: 14),
+
+            // 4. Visual Lifecycle Timeline
             if (started != null) ...[
               _Timeline(entry: entry, started: started),
               const SizedBox(height: 14),
             ],
+
+            // 5. SIM & Device Info
             _SimRow(entry: entry),
             const SizedBox(height: 14),
+
+            // 6. Server Sync & Outbox Status
             _UploadCard(entry: entry),
+
+            // 7. Contact Interaction History
             if (number.isNotEmpty) ...[
               const SizedBox(height: 22),
               _HistorySection(number: number, currentEntry: entry),
@@ -92,7 +109,7 @@ class _CallDetailScreenState extends ConsumerState<CallDetailScreen> {
     Clipboard.setData(ClipboardData(text: number));
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('Number copied'),
+        content: Text('Phone number copied to clipboard'),
         behavior: SnackBarBehavior.floating,
         duration: Duration(seconds: 2),
       ),
@@ -108,77 +125,84 @@ class _Header extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => AppCard(
-    padding: const EdgeInsets.all(18),
-    child: Row(
-      children: [
-        Container(
-          width: 52,
-          height: 52,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: context.colors.primaryContainer,
-            shape: BoxShape.circle,
-          ),
-          child: Text(
-            Fmt.initials(entry.hasName ? entry.displayTitle : null),
-            style: context.text.titleLarge?.copyWith(
-              color: context.colors.onPrimaryContainer,
-              fontWeight: FontWeight.w600,
+        padding: const EdgeInsets.all(18),
+        child: Row(
+          children: [
+            Container(
+              width: 54,
+              height: 54,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: AppTokens.surface2,
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: dir.color.withValues(alpha: 0.4),
+                  width: 1.5,
+                ),
+              ),
+              child: Text(
+                Fmt.initials(entry.hasName ? entry.displayTitle : null),
+                style: TextStyle(
+                  color: dir.color,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 20,
+                ),
+              ),
             ),
-          ),
-        ),
-        const SizedBox(width: 14),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                entry.displayTitle,
-                style: context.text.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w600,
-                  fontSize: 19,
-                ),
-              ),
-              const SizedBox(height: 2),
-              // Full number here, masked in lists: reading it is a
-              // deliberate act rather than something on show in a corridor.
-              Text(
-                Fmt.prettyNumber(entry.row.number),
-                style: context.text.bodyMedium?.copyWith(
-                  color: context.palette.muted,
-                  fontFeatures: const [FontFeature.tabularFigures()],
-                ),
-              ),
-              const SizedBox(height: 10),
-              Wrap(
-                spacing: 6,
-                runSpacing: 6,
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  StatusPill(label: dir.label, color: dir.color, icon: dir.icon),
-                  StatusPill(
-                    label: entry.isConnected
-                        ? Fmt.duration(entry.durationSeconds)
-                        : 'Not connected',
-                    color: entry.isConnected
-                        ? context.palette.answered
-                        : context.palette.muted,
+                  Text(
+                    entry.displayTitle,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 18,
+                      color: Colors.white,
+                      letterSpacing: -0.3,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    Fmt.prettyNumber(entry.row.number),
+                    style: const TextStyle(
+                      color: AppTokens.textSecondary,
+                      fontSize: 13.5,
+                      fontFeatures: [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      StatusPill(
+                        label: dir.label,
+                        color: dir.color,
+                        icon: dir.icon,
+                      ),
+                      StatusPill(
+                        label: entry.isConnected
+                            ? Fmt.duration(entry.durationSeconds)
+                            : 'Not connected',
+                        color: entry.isConnected
+                            ? AppTokens.success
+                            : AppTokens.textMuted,
+                        icon: entry.isConnected
+                            ? Icons.timer_outlined
+                            : Icons.phone_disabled_rounded,
+                      ),
+                    ],
                   ),
                 ],
               ),
-            ],
-          ),
+            ),
+          ],
         ),
-      ],
-    ),
-  );
+      );
 }
 
-/// Call back and message, side by side under the header.
-///
-/// Dialling opens the system dialer with the number filled in rather than
-/// placing the call directly: that needs no CALL_PHONE permission, and the
-/// resulting call lands in the system log exactly like a manually dialled one,
-/// which is what this app reconciles against.
 class _ActionRow extends ConsumerWidget {
   const _ActionRow({required this.entry});
 
@@ -203,7 +227,7 @@ class _ActionRow extends ConsumerWidget {
                       if (!ok && context.mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(
-                            content: Text('No dialer available on this device'),
+                            content: Text('No phone dialer app available'),
                             behavior: SnackBarBehavior.floating,
                           ),
                         );
@@ -211,8 +235,13 @@ class _ActionRow extends ConsumerWidget {
                     }
                   : null,
               icon: const Icon(Icons.call_rounded, size: 18),
-              label: const Text('Call back'),
-              style: FilledButton.styleFrom(minimumSize: const Size(0, 46)),
+              label: const Text('Call Back'),
+              style: FilledButton.styleFrom(
+                backgroundColor: AppTokens.brandElectric,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(AppTokens.r12),
+                ),
+              ),
             ),
           ),
         ),
@@ -226,16 +255,24 @@ class _ActionRow extends ConsumerWidget {
                       Clipboard.setData(ClipboardData(text: number));
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
-                          content: Text('Number copied'),
+                          content: Text('Number copied to clipboard'),
                           behavior: SnackBarBehavior.floating,
                           duration: Duration(seconds: 2),
                         ),
                       );
                     }
                   : null,
-              icon: const Icon(Icons.copy_rounded, size: 18),
-              label: const Text('Copy'),
-              style: OutlinedButton.styleFrom(minimumSize: const Size(0, 46)),
+              icon: const Icon(Icons.copy_rounded, size: 18, color: Colors.white),
+              label: const Text(
+                'Copy Number',
+                style: TextStyle(color: Colors.white),
+              ),
+              style: OutlinedButton.styleFrom(
+                side: const BorderSide(color: AppTokens.borderDefault),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(AppTokens.r12),
+                ),
+              ),
             ),
           ),
         ),
@@ -244,8 +281,6 @@ class _ActionRow extends ConsumerWidget {
   }
 }
 
-/// The recording block. This app records nothing — anything shown here was
-/// written by the phone's own dialer and matched to this call on evidence.
 class _RecordingCard extends StatelessWidget {
   const _RecordingCard({required this.entry});
 
@@ -260,7 +295,7 @@ class _RecordingCard extends StatelessWidget {
       return AppCard(
         child: Row(
           children: [
-            IconChip(icon: style.icon, color: style.color),
+            IconChip(icon: style.icon, color: style.color, size: 36),
             const SizedBox(width: 12),
             Expanded(
               child: Column(
@@ -268,18 +303,21 @@ class _RecordingCard extends StatelessWidget {
                 children: [
                   Text(
                     style.label,
-                    style: context.text.bodyMedium?.copyWith(
+                    style: const TextStyle(
                       fontWeight: FontWeight.w600,
+                      fontSize: 14.5,
+                      color: Colors.white,
                     ),
                   ),
-                  const SizedBox(height: 4),
+                  const SizedBox(height: 3),
                   Text(
                     entry.isConnected
                         ? entry.match.reason
-                        : 'This call never connected, so there is nothing to record.',
-                    style: context.text.bodySmall?.copyWith(
-                      color: context.palette.muted,
-                      height: 1.5,
+                        : 'Call did not connect, no audio recorded.',
+                    style: const TextStyle(
+                      color: AppTokens.textMuted,
+                      fontSize: 12.5,
+                      height: 1.4,
                     ),
                   ),
                 ],
@@ -294,7 +332,7 @@ class _RecordingCard extends StatelessWidget {
 
     return AppCard(
       padding: EdgeInsets.zero,
-      borderColor: ambiguous ? context.palette.waiting : null,
+      borderColor: ambiguous ? AppTokens.warning : null,
       child: Column(
         children: [
           Padding(
@@ -305,19 +343,21 @@ class _RecordingCard extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        'Recording',
-                        style: context.text.bodyMedium?.copyWith(
-                          fontWeight: FontWeight.w600,
+                      const Text(
+                        'Call Recording',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 15,
+                          color: Colors.white,
                         ),
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        '${Fmt.fileSize(rec.sizeBytes)} · '
-                        '${rec.mimeType?.split("/").last ?? "audio"}',
-                        style: context.text.bodySmall?.copyWith(
-                          color: context.palette.muted,
-                          fontFeatures: const [FontFeature.tabularFigures()],
+                        '${Fmt.fileSize(rec.sizeBytes)} · ${rec.mimeType?.split("/").last ?? "audio"}',
+                        style: const TextStyle(
+                          color: AppTokens.textMuted,
+                          fontSize: 12,
+                          fontFeatures: [FontFeature.tabularFigures()],
                         ),
                       ),
                     ],
@@ -327,307 +367,37 @@ class _RecordingCard extends StatelessWidget {
               ],
             ),
           ),
-          // The transport is the point of the card, so it gets the width rather
-          // than sharing a row with the metadata.
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 4, 16, 10),
             child: RecordingPlayerBar(candidate: rec),
           ),
-          Divider(height: 1, color: context.colors.outlineVariant),
+          const Divider(height: 1, color: AppTokens.borderSubtle),
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(
+                const Icon(
                   Icons.info_outline_rounded,
-                  size: 16,
-                  color: context.palette.muted,
+                  size: 15,
+                  color: AppTokens.textMuted,
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     ambiguous
-                        ? 'More than one recording fits this call, so it has not '
-                              'been associated automatically. A reviewer decides.'
-                        : "Captured by the phone's own call recorder, then matched "
-                              'on duration and timing · '
-                              '${(entry.match.confidence * 100).toStringAsFixed(1)}% confidence.',
-                    style: context.text.bodySmall?.copyWith(
-                      color: context.palette.muted,
-                      height: 1.5,
+                        ? 'Multiple audio files match this call timing. Review required.'
+                        : 'Matched by native audio ingestion engine (${(entry.match.confidence * 100).toStringAsFixed(1)}% match confidence).',
+                    style: const TextStyle(
+                      color: AppTokens.textMuted,
+                      fontSize: 12,
+                      height: 1.4,
                     ),
                   ),
                 ),
               ],
             ),
           ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Every other call with this number, newest first, each with its recording.
-///
-/// The whole log is searched, not just the loaded page of the feed — a contact
-/// history that stopped at "the last sixty calls overall" would be misleading.
-class _HistorySection extends ConsumerWidget {
-  const _HistorySection({required this.number, required this.currentEntry});
-
-  final String number;
-  final CallEntry currentEntry;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final history = ref.watch(contactHistoryProvider(number));
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const SectionLabel('History with this number'),
-        const SizedBox(height: 8),
-        history.when(
-          loading: () => const AppCard(
-            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 18),
-            child: Column(
-              children: [
-                Row(
-                  children: [
-                    Skeleton.circle(size: 34),
-                    SizedBox(width: 12),
-                    Expanded(child: Skeleton(width: 140, height: 12)),
-                    SizedBox(width: 12),
-                    Skeleton(width: 44, height: 11),
-                  ],
-                ),
-                SizedBox(height: 18),
-                Row(
-                  children: [
-                    Skeleton.circle(size: 34),
-                    SizedBox(width: 12),
-                    Expanded(child: Skeleton(width: 110, height: 12)),
-                    SizedBox(width: 12),
-                    Skeleton(width: 44, height: 11),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          error: (e, _) => AppCard(
-            child: Text(
-              'Could not read the history for this number.',
-              style: context.text.bodySmall?.copyWith(
-                color: context.palette.muted,
-              ),
-            ),
-          ),
-          data: (entries) {
-            if (entries.isEmpty) {
-              return AppCard(
-                child: Text(
-                  'No other calls with this number.',
-                  style: context.text.bodySmall?.copyWith(
-                    color: context.palette.muted,
-                  ),
-                ),
-              );
-            }
-
-            final stats = contactHistoryStats(entries);
-            return Column(
-              children: [
-                _HistorySummary(stats: stats),
-                const SizedBox(height: 10),
-                AppCard(
-                  padding: EdgeInsets.zero,
-                  child: Column(
-                    children: [
-                      for (var i = 0; i < entries.length; i++) ...[
-                        if (i > 0)
-                          Padding(
-                            padding: const EdgeInsets.only(left: 58),
-                            child: Divider(
-                              height: 1,
-                              color: context.colors.outlineVariant,
-                            ),
-                          ),
-                        _HistoryRow(
-                          entry: entries[i],
-                          // The call being viewed is marked rather than hidden,
-                          // so its position in the relationship is visible.
-                          isCurrent:
-                              entries[i].row.dateMillis ==
-                              currentEntry.row.dateMillis,
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              ],
-            );
-          },
-        ),
-      ],
-    );
-  }
-}
-
-class _HistorySummary extends StatelessWidget {
-  const _HistorySummary({required this.stats});
-
-  final CallStats stats;
-
-  @override
-  Widget build(BuildContext context) => AppCard(
-    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-    child: Row(
-      children: [
-        _Metric(value: '${stats.total}', label: 'Calls'),
-        _Divider(),
-        _Metric(
-          value: Fmt.duration(stats.talkTimeSeconds),
-          label: 'Talk time',
-        ),
-        _Divider(),
-        _Metric(
-          value: '${stats.missed}',
-          label: 'Missed',
-          color: stats.missed > 0 ? context.palette.missed : null,
-        ),
-        _Divider(),
-        _Metric(
-          value: '${stats.recordingsMatched}',
-          label: 'Recorded',
-          color: stats.recordingsMatched > 0
-              ? context.palette.answered
-              : null,
-        ),
-      ],
-    ),
-  );
-}
-
-class _Metric extends StatelessWidget {
-  const _Metric({required this.value, required this.label, this.color});
-
-  final String value;
-  final String label;
-  final Color? color;
-
-  @override
-  Widget build(BuildContext context) => Expanded(
-    child: Column(
-      children: [
-        Text(
-          value,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: context.text.titleMedium?.copyWith(
-            fontWeight: FontWeight.w700,
-            color: color,
-            fontFeatures: const [FontFeature.tabularFigures()],
-          ),
-        ),
-        const SizedBox(height: 2),
-        Text(
-          label,
-          style: context.text.bodySmall?.copyWith(
-            color: context.palette.muted,
-            fontSize: 11,
-          ),
-        ),
-      ],
-    ),
-  );
-}
-
-class _Divider extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) => Container(
-    width: 1,
-    height: 28,
-    margin: const EdgeInsets.symmetric(horizontal: 8),
-    color: context.colors.outlineVariant,
-  );
-}
-
-/// One past call. Plays inline: reviewing a relationship means skipping between
-/// recordings, and bouncing out to a separate screen for each one makes that
-/// tedious enough that people stop doing it.
-class _HistoryRow extends StatelessWidget {
-  const _HistoryRow({required this.entry, required this.isCurrent});
-
-  final CallEntry entry;
-  final bool isCurrent;
-
-  @override
-  Widget build(BuildContext context) {
-    final dir = directionStyle(context, entry.row.direction);
-    final rec = entry.recording;
-    final started = entry.startedAtUtc;
-
-    return Container(
-      color: isCurrent ? context.palette.tint : null,
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-      child: Row(
-        children: [
-          IconChip(icon: dir.icon, color: dir.color, size: 32, iconSize: 16),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        started == null
-                            ? 'Unknown date'
-                            : '${Fmt.dayHeading(started)}, ${Fmt.clock(started)}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: context.text.bodyMedium?.copyWith(
-                          fontWeight: FontWeight.w600,
-                          fontSize: 14,
-                        ),
-                      ),
-                    ),
-                    if (isCurrent) ...[
-                      const SizedBox(width: 8),
-                      StatusPill(
-                        label: 'This call',
-                        color: context.colors.primary,
-                      ),
-                    ],
-                  ],
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  entry.isConnected
-                      ? '${dir.label} · ${Fmt.duration(entry.durationSeconds)}'
-                      : dir.label,
-                  style: context.text.bodySmall?.copyWith(
-                    color: context.palette.muted,
-                    fontFeatures: const [FontFeature.tabularFigures()],
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 10),
-          if (rec != null)
-            RecordingPlayButton(candidate: rec)
-          else
-            Icon(
-              entry.needsReview
-                  ? Icons.help_outline_rounded
-                  : Icons.mic_off_outlined,
-              size: 18,
-              color: entry.needsReview
-                  ? context.palette.waiting
-                  : context.palette.muted,
-            ),
         ],
       ),
     );
@@ -642,9 +412,6 @@ class _Timeline extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // The call log gives start and duration only. Answer time is derived from
-    // the matched recording where one exists, and otherwise left out rather
-    // than invented — a fabricated timestamp would look identical to a real one.
     final rec = entry.recording;
     final answeredAt = rec == null
         ? null
@@ -652,9 +419,6 @@ class _Timeline extends StatelessWidget {
             rec.dateAddedEpochSeconds * 1000,
           ).toUtc();
 
-    // Ended is start + ring time + talk time. The previous version added the
-    // ring offset to a duration that already ran from `started`, pushing the
-    // end past where the call actually finished.
     final ringSeconds = answeredAt == null
         ? 0
         : answeredAt.difference(started).inSeconds.clamp(0, 600);
@@ -667,46 +431,46 @@ class _Timeline extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const SectionLabel('Timeline'),
+          const SectionLabel('Lifecycle Timeline'),
           const SizedBox(height: 16),
           _Step(
-            label: 'Started',
+            label: 'Call Initiated',
             time: Fmt.fullTimestamp(started),
-            note: entry.isConnected ? 'Ringing' : 'No answer',
-            color: context.palette.muted,
+            note: entry.isConnected ? 'Ringing / alerting' : 'No connection established',
+            color: AppTokens.brandElectric,
           ),
           if (answeredAt != null)
             _Step(
-              label: 'Answered',
+              label: 'Call Connected',
               time: Fmt.fullTimestamp(answeredAt),
-              note: 'After $ringSeconds seconds',
-              color: context.palette.answered,
+              note: 'Answered after $ringSeconds seconds',
+              color: AppTokens.success,
             ),
           _Step(
-            label: 'Ended',
+            label: 'Call Terminated',
             time: Fmt.fullTimestamp(endedAt),
-            note: entry.isConnected ? 'Call complete' : 'Never connected',
-            color: context.palette.muted,
+            note: entry.isConnected ? 'Call completed' : 'Disconnected',
+            color: AppTokens.textMuted,
             last: true,
           ),
-          const SizedBox(height: 16),
-          Divider(height: 1, color: context.colors.outlineVariant),
-          const SizedBox(height: 16),
+          const SizedBox(height: 14),
+          const Divider(height: 1, color: AppTokens.borderSubtle),
+          const SizedBox(height: 14),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(
-                'Duration',
-                style: context.text.bodyMedium?.copyWith(
-                  color: context.palette.muted,
-                ),
+              const Text(
+                'Total Duration',
+                style: TextStyle(color: AppTokens.textMuted, fontSize: 13),
               ),
               Text(
                 Fmt.duration(entry.durationSeconds),
-                style: context.text.titleLarge?.copyWith(
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: -0.5,
-                  fontFeatures: const [FontFeature.tabularFigures()],
+                style: const TextStyle(
+                  fontWeight: FontWeight.w800,
+                  fontSize: 16,
+                  color: Colors.white,
+                  letterSpacing: -0.3,
+                  fontFeatures: [FontFeature.tabularFigures()],
                 ),
               ),
             ],
@@ -734,69 +498,73 @@ class _Step extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => IntrinsicHeight(
-    child: Row(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        SizedBox(
-          width: 12,
-          child: Column(
-            children: [
-              Container(
-                width: 10,
-                height: 10,
-                margin: const EdgeInsets.only(top: 5),
-                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-              ),
-              if (!last)
-                Expanded(
-                  child: Container(
-                    width: 2,
-                    margin: const EdgeInsets.symmetric(vertical: 4),
-                    color: context.colors.outlineVariant,
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SizedBox(
+              width: 14,
+              child: Column(
+                children: [
+                  Container(
+                    width: 10,
+                    height: 10,
+                    margin: const EdgeInsets.only(top: 5),
+                    decoration: BoxDecoration(color: color, shape: BoxShape.circle),
                   ),
-                ),
-            ],
-          ),
-        ),
-        const SizedBox(width: 14),
-        Expanded(
-          child: Padding(
-            padding: EdgeInsets.only(bottom: last ? 0 : 18),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      label,
-                      style: context.text.bodyMedium?.copyWith(
-                        fontWeight: FontWeight.w600,
+                  if (!last)
+                    Expanded(
+                      child: Container(
+                        width: 2,
+                        margin: const EdgeInsets.symmetric(vertical: 4),
+                        color: AppTokens.borderSubtle,
                       ),
                     ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Padding(
+                padding: EdgeInsets.only(bottom: last ? 0 : 18),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          label,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 14,
+                            color: Colors.white,
+                          ),
+                        ),
+                        Text(
+                          time,
+                          style: const TextStyle(
+                            color: AppTokens.textMuted,
+                            fontSize: 12,
+                            fontFeatures: [FontFeature.tabularFigures()],
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 2),
                     Text(
-                      time,
-                      style: context.text.bodySmall?.copyWith(
-                        color: context.palette.muted,
-                        fontFeatures: const [FontFeature.tabularFigures()],
+                      note,
+                      style: const TextStyle(
+                        color: AppTokens.textSecondary,
+                        fontSize: 12,
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  note,
-                  style: context.text.bodySmall?.copyWith(
-                    color: context.palette.muted,
-                  ),
-                ),
-              ],
+              ),
             ),
-          ),
+          ],
         ),
-      ],
-    ),
-  );
+      );
 }
 
 class _SimRow extends ConsumerWidget {
@@ -809,8 +577,6 @@ class _SimRow extends ConsumerWidget {
     final sim = ref.watch(simInfoProvider).value;
     final accountId = entry.row.phoneAccountId;
 
-    // Dual-SIM data is device dependent by design; when it is absent the row
-    // says so instead of guessing a slot.
     final match = sim?.subscriptions.where(
       (s) => s.subscriptionId?.toString() == accountId,
     );
@@ -820,7 +586,7 @@ class _SimRow extends ConsumerWidget {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       child: Row(
         children: [
-          IconChip(icon: Icons.sim_card_outlined, color: context.palette.muted),
+          const IconChip(icon: Icons.sim_card_outlined, color: AppTokens.brandIndigo, size: 36),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
@@ -828,18 +594,21 @@ class _SimRow extends ConsumerWidget {
               children: [
                 Text(
                   sub == null
-                      ? 'SIM not identified'
-                      : 'SIM ${(sub.simSlotIndex ?? 0) + 1} · ${sub.carrierName ?? "Unknown carrier"}',
-                  style: context.text.bodyMedium?.copyWith(
+                      ? 'Default SIM Slot'
+                      : 'SIM ${(sub.simSlotIndex ?? 0) + 1} · ${sub.carrierName ?? "Active Carrier"}',
+                  style: const TextStyle(
                     fontWeight: FontWeight.w600,
+                    fontSize: 14,
+                    color: Colors.white,
                   ),
                 ),
                 Text(
                   accountId == null
-                      ? 'The call log carried no SIM reference'
-                      : 'Subscription $accountId',
-                  style: context.text.bodySmall?.copyWith(
-                    color: context.palette.muted,
+                      ? 'Captured via native telephony bridge'
+                      : 'Subscription Identifier: $accountId',
+                  style: const TextStyle(
+                    color: AppTokens.textMuted,
+                    fontSize: 12,
                   ),
                 ),
               ],
@@ -863,29 +632,263 @@ class _UploadCard extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       child: Row(
         children: [
-          IconChip(icon: up.icon, color: up.color),
+          IconChip(icon: up.icon, color: up.color, size: 36),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  up.label,
-                  style: context.text.bodyMedium?.copyWith(
+                  'Cloud Sync: ${up.label}',
+                  style: const TextStyle(
                     fontWeight: FontWeight.w600,
+                    fontSize: 14,
+                    color: Colors.white,
                   ),
                 ),
                 Text(
-                  // Honest about the current state of the system: there is no
-                  // server yet, so nothing has actually been uploaded.
-                  'Held on this device · no backend configured',
-                  style: context.text.bodySmall?.copyWith(
-                    color: context.palette.muted,
+                  entry.uploadState == UploadState.uploaded
+                      ? 'Confirmed by backend intelligence server'
+                      : 'Stored securely in local outbox queue',
+                  style: const TextStyle(
+                    color: AppTokens.textMuted,
+                    fontSize: 12,
                   ),
                 ),
               ],
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HistorySection extends ConsumerWidget {
+  const _HistorySection({required this.number, required this.currentEntry});
+
+  final String number;
+  final CallEntry currentEntry;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final history = ref.watch(contactHistoryProvider(number));
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SectionLabel('Contact History'),
+        const SizedBox(height: 8),
+        history.when(
+          loading: () => const AppCard(
+            padding: EdgeInsets.all(16),
+            child: InlineLoader(label: 'Loading interaction history...'),
+          ),
+          error: (e, _) => AppCard(
+            child: Text(
+              'Could not read history for this number.',
+              style: const TextStyle(color: AppTokens.textMuted),
+            ),
+          ),
+          data: (entries) {
+            if (entries.isEmpty) {
+              return const AppCard(
+                child: Text(
+                  'No previous interactions recorded with this number.',
+                  style: TextStyle(color: AppTokens.textMuted, fontSize: 13),
+                ),
+              );
+            }
+
+            final stats = contactHistoryStats(entries);
+            return Column(
+              children: [
+                _HistorySummary(stats: stats),
+                const SizedBox(height: 10),
+                AppCard(
+                  padding: EdgeInsets.zero,
+                  child: Column(
+                    children: [
+                      for (var i = 0; i < entries.length; i++) ...[
+                        if (i > 0)
+                          const Padding(
+                            padding: EdgeInsets.only(left: 58),
+                            child: Divider(
+                              height: 1,
+                              color: AppTokens.borderSubtle,
+                            ),
+                          ),
+                        _HistoryRow(
+                          entry: entries[i],
+                          isCurrent: entries[i].row.dateMillis ==
+                              currentEntry.row.dateMillis,
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ],
+    );
+  }
+}
+
+class _HistorySummary extends StatelessWidget {
+  const _HistorySummary({required this.stats});
+
+  final CallStats stats;
+
+  @override
+  Widget build(BuildContext context) => AppCard(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        child: Row(
+          children: [
+            _Metric(value: '${stats.total}', label: 'Total Calls'),
+            _Divider(),
+            _Metric(
+              value: Fmt.duration(stats.talkTimeSeconds),
+              label: 'Talk Time',
+            ),
+            _Divider(),
+            _Metric(
+              value: '${stats.missed}',
+              label: 'Missed',
+              color: stats.missed > 0 ? AppTokens.danger : null,
+            ),
+            _Divider(),
+            _Metric(
+              value: '${stats.recordingsMatched}',
+              label: 'Recordings',
+              color: stats.recordingsMatched > 0 ? AppTokens.success : null,
+            ),
+          ],
+        ),
+      );
+}
+
+class _Metric extends StatelessWidget {
+  const _Metric({required this.value, required this.label, this.color});
+
+  final String value;
+  final String label;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) => Expanded(
+        child: Column(
+          children: [
+            Text(
+              value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontWeight: FontWeight.w700,
+                fontSize: 15,
+                color: color ?? Colors.white,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              label,
+              style: const TextStyle(
+                color: AppTokens.textMuted,
+                fontSize: 11,
+              ),
+            ),
+          ],
+        ),
+      );
+}
+
+class _Divider extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) => Container(
+        width: 1,
+        height: 24,
+        margin: const EdgeInsets.symmetric(horizontal: 6),
+        color: AppTokens.borderSubtle,
+      );
+}
+
+class _HistoryRow extends StatelessWidget {
+  const _HistoryRow({required this.entry, required this.isCurrent});
+
+  final CallEntry entry;
+  final bool isCurrent;
+
+  @override
+  Widget build(BuildContext context) {
+    final dir = directionStyle(context, entry.row.direction);
+    final rec = entry.recording;
+    final started = entry.startedAtUtc;
+
+    return Container(
+      color: isCurrent ? AppTokens.brandElectric.withValues(alpha: 0.08) : null,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      child: Row(
+        children: [
+          IconChip(icon: dir.icon, color: dir.color, size: 30, iconSize: 15),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        started == null
+                            ? 'Unknown date'
+                            : '${Fmt.dayHeading(started)}, ${Fmt.clock(started)}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 13.5,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                    if (isCurrent) ...[
+                      const SizedBox(width: 6),
+                      const StatusPill(
+                        label: 'Active',
+                        color: AppTokens.brandElectric,
+                      ),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  entry.isConnected
+                      ? '${dir.label} · ${Fmt.duration(entry.durationSeconds)}'
+                      : dir.label,
+                  style: const TextStyle(
+                    color: AppTokens.textMuted,
+                    fontSize: 12,
+                    fontFeatures: [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          if (rec != null)
+            RecordingPlayButton(candidate: rec, size: 30)
+          else
+            Icon(
+              entry.needsReview
+                  ? Icons.help_outline_rounded
+                  : Icons.mic_off_outlined,
+              size: 16,
+              color: entry.needsReview
+                  ? AppTokens.warning
+                  : AppTokens.textMuted,
+            ),
         ],
       ),
     );

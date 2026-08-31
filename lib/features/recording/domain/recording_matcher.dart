@@ -1,3 +1,4 @@
+import 'dart:isolate';
 import 'dart:math' as math;
 
 /// Lifecycle of a recording artifact, from discovery through upload.
@@ -24,7 +25,7 @@ enum RecordingMatchStatus {
 
 /// A recording file discovered on the device by [RecordingScanner].
 class RecordingCandidate {
-  const RecordingCandidate({
+  RecordingCandidate({
     required this.mediaStoreId,
     required this.displayName,
     required this.durationMillis,
@@ -34,7 +35,14 @@ class RecordingCandidate {
     this.mimeType,
     this.relativePath,
     this.source = 'UNKNOWN',
-  });
+    String? normalizedDigits,
+    String? lowerDisplayName,
+  })  : _cachedNormalizedDigits = normalizedDigits ??
+            (displayName != null
+                ? _staticNormalize(displayName)
+                : ''),
+        _cachedLowerDisplayName =
+            lowerDisplayName ?? (displayName?.toLowerCase() ?? '');
 
   final int mediaStoreId;
   final String? displayName;
@@ -52,17 +60,31 @@ class RecordingCandidate {
   final String? relativePath;
   final String source;
 
+  final String _cachedNormalizedDigits;
+  final String _cachedLowerDisplayName;
+
+  String get normalizedDigits => _cachedNormalizedDigits;
+  String get lowerDisplayName => _cachedLowerDisplayName;
+
   double get durationSeconds => durationMillis / 1000.0;
+
+  static String _staticNormalize(String name) {
+    return name.replaceAll(RegExp(r'[^0-9]'), '');
+  }
 }
 
 /// The subset of a call record the matcher reasons over.
 class CallForMatching {
-  const CallForMatching({
+  CallForMatching({
     required this.startedAtEpochMillis,
     required this.durationSeconds,
     this.normalizedNumber,
     this.contactName,
-  });
+    String? cachedNumberTail,
+    String? cachedLowerContactName,
+  })  : _cachedNumberTail = cachedNumberTail ?? _extractTail(normalizedNumber),
+        _cachedLowerContactName =
+            cachedLowerContactName ?? (contactName?.trim().toLowerCase() ?? '');
 
   /// `CallLog.Calls.DATE` — when the call STARTED (began ringing/dialling),
   /// not when it was answered.
@@ -76,7 +98,18 @@ class CallForMatching {
   final String? normalizedNumber;
   final String? contactName;
 
+  final String _cachedNumberTail;
+  final String _cachedLowerContactName;
+
   int get startedAtEpochSeconds => startedAtEpochMillis ~/ 1000;
+  String get cachedNumberTail => _cachedNumberTail;
+  String get cachedLowerContactName => _cachedLowerContactName;
+
+  static String _extractTail(String? number) {
+    if (number == null || number.length < 7) return '';
+    final digits = number.replaceAll(RegExp(r'[^0-9]'), '');
+    return digits.substring(math.max(0, digits.length - 10));
+  }
 }
 
 /// How a single candidate scored, kept so the UI and the audit trail can
@@ -219,8 +252,16 @@ class RecordingMatcher {
     }
 
     final scored = <({RecordingCandidate c, double score, MatchSignals s})>[];
+    final minTime = call.startedAtEpochSeconds + minRingGapSeconds;
+    final maxTime = call.startedAtEpochSeconds + maxRingGapSeconds;
 
     for (final candidate in candidates) {
+      // Fast temporal pre-gate: discard candidate without computing full signals
+      if (candidate.dateAddedEpochSeconds < minTime ||
+          candidate.dateAddedEpochSeconds > maxTime) {
+        continue;
+      }
+
       final signals = _score(call, candidate);
       if (signals == null) continue; // hard-gated out
       final score =
@@ -294,8 +335,8 @@ class RecordingMatcher {
 
     // Linear decay to zero at the tolerance edge.
     final durationScore = math.max(
-      0.0,
-      1.0 - (durationDelta / durationToleranceSeconds),
+        0.0,
+        1.0 - (durationDelta / durationToleranceSeconds),
     );
 
     // A gap of 0-20s is an ordinary ring and scores full marks; longer gaps are
@@ -313,7 +354,7 @@ class RecordingMatcher {
       );
     }
 
-    final identityMatched = _identityMatches(call, candidate.displayName);
+    final identityMatched = _identityMatches(call, candidate);
 
     return MatchSignals(
       durationScore: durationScore,
@@ -328,24 +369,46 @@ class RecordingMatcher {
     );
   }
 
-  bool _identityMatches(CallForMatching call, String? displayName) {
-    if (displayName == null || displayName.isEmpty) return false;
-    final haystack = displayName.toLowerCase();
+  bool _identityMatches(CallForMatching call, RecordingCandidate candidate) {
+    final lowerDisplayName = candidate._cachedLowerDisplayName;
+    if (lowerDisplayName.isEmpty) return false;
 
-    final number = call.normalizedNumber;
-    if (number != null && number.length >= 7) {
-      // Compare on the national significant part: the filename may carry
-      // +919876543210, 919876543210 or 9876543210 for the same call.
-      final digits = number.replaceAll(RegExp(r'[^0-9]'), '');
-      final tail = digits.substring(math.max(0, digits.length - 10));
-      final haystackDigits = haystack.replaceAll(RegExp(r'[^0-9]'), '');
-      if (haystackDigits.contains(tail)) return true;
+    final tail = call._cachedNumberTail;
+    if (tail.isNotEmpty) {
+      if (candidate._cachedNormalizedDigits.contains(tail)) return true;
     }
 
-    final name = call.contactName;
-    if (name != null && name.trim().length >= 3) {
-      if (haystack.contains(name.trim().toLowerCase())) return true;
+    final name = call._cachedLowerContactName;
+    if (name.length >= 3) {
+      if (lowerDisplayName.contains(name)) return true;
     }
     return false;
+  }
+
+  /// Matches a batch of calls against candidates.
+  /// Pure Dart function, safe to run inside a background isolate.
+  static Map<int, RecordingMatch> matchBatch(
+    List<CallForMatching> calls,
+    List<RecordingCandidate> candidates, {
+    RecordingMatcher matcher = const RecordingMatcher(),
+  }) {
+    final results = <int, RecordingMatch>{};
+    for (final call in calls) {
+      results[call.startedAtEpochMillis] = matcher.match(call, candidates);
+    }
+    return results;
+  }
+
+  /// Executes [matchBatch] in a background isolate using [Isolate.run]
+  /// to keep CPU-intensive matching off the Flutter UI thread.
+  static Future<Map<int, RecordingMatch>> matchBatchInIsolate({
+    required List<CallForMatching> calls,
+    required List<RecordingCandidate> candidates,
+    RecordingMatcher matcher = const RecordingMatcher(),
+  }) {
+    if (calls.isEmpty || candidates.isEmpty) {
+      return Future.value(const {});
+    }
+    return Isolate.run(() => matchBatch(calls, candidates, matcher: matcher));
   }
 }

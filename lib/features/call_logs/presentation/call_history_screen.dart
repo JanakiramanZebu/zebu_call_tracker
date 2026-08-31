@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/platform/native_call_bridge.dart';
+import '../../../core/theme/design_tokens.dart';
 import '../../../shared/widgets/loaders.dart';
 import '../../../shared/widgets/ui_kit.dart';
 import '../../call_tracking/data/call_feed.dart';
@@ -74,10 +75,10 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
       CallFilter.incoming => e.row.direction == CallDirection.incoming,
       CallFilter.outgoing => e.row.direction == CallDirection.outgoing,
       CallFilter.missed => const {
-        CallDirection.missed,
-        CallDirection.rejected,
-        CallDirection.blocked,
-      }.contains(e.row.direction),
+          CallDirection.missed,
+          CallDirection.rejected,
+          CallDirection.blocked,
+        }.contains(e.row.direction),
     };
     if (!filterMatch) return false;
 
@@ -95,23 +96,41 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
     final filter = ref.watch(callFilterProvider);
 
     return Scaffold(
+      backgroundColor: AppTokens.bgPrimary,
       appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        titleSpacing: 20,
         title: _isSearching
             ? TextField(
                 controller: _searchController,
                 autofocus: true,
-                style: const TextStyle(fontSize: 16),
-                decoration: InputDecoration(
+                style: const TextStyle(fontSize: 16, color: Colors.white),
+                decoration: const InputDecoration(
                   hintText: 'Search by name or number…',
                   border: InputBorder.none,
-                  hintStyle: TextStyle(color: context.palette.muted),
+                  enabledBorder: InputBorder.none,
+                  focusedBorder: InputBorder.none,
+                  hintStyle: TextStyle(color: AppTokens.textMuted),
                 ),
                 onChanged: (val) => setState(() => _searchQuery = val),
               )
-            : const Text('Calls'),
+            : const Text(
+                'Calls',
+                style: TextStyle(
+                  fontWeight: FontWeight.w800,
+                  fontSize: 24,
+                  letterSpacing: -0.5,
+                  color: Colors.white,
+                ),
+              ),
         actions: [
           IconButton(
-            icon: Icon(_isSearching ? Icons.close_rounded : Icons.search_rounded),
+            icon: Icon(
+              _isSearching ? Icons.close_rounded : Icons.search_rounded,
+              color: AppTokens.textSecondary,
+            ),
             onPressed: () {
               setState(() {
                 if (_isSearching) {
@@ -125,8 +144,18 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
             },
             tooltip: _isSearching ? 'Close search' : 'Search calls',
           ),
+          IconButton(
+            icon: const Icon(Icons.refresh_rounded, color: AppTokens.textSecondary),
+            onPressed: () => ref.read(callFeedProvider.notifier).refresh(),
+            tooltip: 'Refresh calls',
+          ),
           PopupMenuButton<String>(
-            icon: const Icon(Icons.more_vert_rounded),
+            icon: const Icon(Icons.more_vert_rounded, color: AppTokens.textSecondary),
+            color: AppTokens.surface2,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(AppTokens.r12),
+              side: const BorderSide(color: AppTokens.borderDefault),
+            ),
             onSelected: (value) {
               if (value == 'settings') {
                 Navigator.of(context).push(
@@ -134,8 +163,6 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
                     builder: (_) => const SettingsScreen(),
                   ),
                 );
-              } else if (value == 'refresh') {
-                ref.read(callFeedProvider.notifier).refresh();
               }
             },
             itemBuilder: (context) => [
@@ -143,19 +170,9 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
                 value: 'settings',
                 child: Row(
                   children: [
-                    Icon(Icons.settings_outlined, size: 20),
+                    Icon(Icons.settings_outlined, size: 18, color: Colors.white),
                     SizedBox(width: 10),
-                    Text('Settings'),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'refresh',
-                child: Row(
-                  children: [
-                    Icon(Icons.refresh_rounded, size: 20),
-                    SizedBox(width: 10),
-                    Text('Refresh calls'),
+                    Text('Settings', style: TextStyle(color: Colors.white)),
                   ],
                 ),
               ),
@@ -167,7 +184,7 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
         loading: () => const SkeletonList(),
         error: (e, _) => EmptyState(
           icon: Icons.error_outline_rounded,
-          title: 'Could not read calls',
+          title: 'Could not load call history',
           message: '$e',
           actionLabel: 'Try again',
           onAction: () => ref.read(callFeedProvider.notifier).refresh(),
@@ -178,8 +195,7 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
               icon: Icons.lock_outline_rounded,
               title: 'Call log access needed',
               message:
-                  'Without call log access there is nothing to show here. '
-                  'Grant it from Settings › Permissions.',
+                  'Grant call log permission in Settings to view your call history.',
             );
           }
 
@@ -195,28 +211,50 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
 
           return Column(
             children: [
-              _FilterBar(
-                selected: filter,
-                onSelect: (f) =>
-                    ref.read(callFilterProvider.notifier).select(f),
+              // Modern Segmented Filter Control
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+                child: ModernSegmentedControl<CallFilter>(
+                  segments: const {
+                    CallFilter.all: 'All',
+                    CallFilter.incoming: 'Incoming',
+                    CallFilter.outgoing: 'Outgoing',
+                    CallFilter.missed: 'Missed',
+                  },
+                  selected: filter,
+                  onSelected: (f) =>
+                      ref.read(callFilterProvider.notifier).select(f),
+                ),
               ),
+
+              // Timeline List
               Expanded(
                 child: groups.isEmpty
                     ? EmptyState(
                         icon: Icons.filter_list_off_rounded,
                         title: _searchQuery.isNotEmpty
-                            ? 'No calls found'
-                            : 'No calls match',
+                            ? 'No calls match your search'
+                            : 'No calls found for this filter',
                         message: _searchQuery.isNotEmpty
-                            ? 'Try searching with a different keyword.'
-                            : 'Try a different filter.',
+                            ? 'Try searching with a different contact name or phone number.'
+                            : 'Try switching to "All" to see your full call history.',
+                        actionLabel: filter != CallFilter.all
+                            ? 'Show All Calls'
+                            : null,
+                        onAction: filter != CallFilter.all
+                            ? () => ref
+                                .read(callFilterProvider.notifier)
+                                .select(CallFilter.all)
+                            : null,
                       )
                     : RefreshIndicator(
+                        color: AppTokens.brandElectric,
+                        backgroundColor: AppTokens.surface2,
                         onRefresh: () =>
                             ref.read(callFeedProvider.notifier).refresh(),
                         child: ListView.builder(
                           controller: _scroll,
-                          padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+                          padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
                           itemCount: groups.length + 1,
                           itemBuilder: (context, index) {
                             if (index == groups.length) {
@@ -244,28 +282,17 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
                                           i++
                                         ) ...[
                                           if (i > 0)
-                                            Padding(
-                                              padding: const EdgeInsets.only(
+                                            const Padding(
+                                              padding: EdgeInsets.only(
                                                 left: 64,
                                               ),
                                               child: Divider(
                                                 height: 1,
-                                                color: context
-                                                    .colors
-                                                    .outlineVariant,
+                                                color: AppTokens.borderSubtle,
                                               ),
                                             ),
-                                          CallRowTile(
+                                          _TimelineItemDismissible(
                                             entry: calls[i],
-                                            onTap: () =>
-                                                Navigator.of(context).push(
-                                                  MaterialPageRoute<void>(
-                                                    builder: (_) =>
-                                                        CallDetailScreen(
-                                                          entry: calls[i],
-                                                        ),
-                                                  ),
-                                                ),
                                           ),
                                         ],
                                       ],
@@ -286,72 +313,58 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen>
   }
 }
 
-class _FilterBar extends StatelessWidget {
-  const _FilterBar({required this.selected, required this.onSelect});
+class _TimelineItemDismissible extends StatelessWidget {
+  const _TimelineItemDismissible({required this.entry});
 
-  final CallFilter selected;
-  final ValueChanged<CallFilter> onSelect;
-
-  static const _labels = {
-    CallFilter.all: 'All',
-    CallFilter.incoming: 'Incoming',
-    CallFilter.outgoing: 'Outgoing',
-    CallFilter.missed: 'Missed',
-  };
+  final CallEntry entry;
 
   @override
-  Widget build(BuildContext context) => SizedBox(
-    height: 52,
-    child: ListView(
-      scrollDirection: Axis.horizontal,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      children: [
-        for (final entry in _labels.entries) ...[
-          _Chip(
-            label: entry.value,
-            selected: entry.key == selected,
-            onTap: () => onSelect(entry.key),
-          ),
-          const SizedBox(width: 8),
-        ],
-      ],
-    ),
-  );
-}
-
-class _Chip extends StatelessWidget {
-  const _Chip({
-    required this.label,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) => Material(
-    color: selected ? context.colors.primary : context.palette.tab,
-    borderRadius: BorderRadius.circular(8),
-    child: InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(8),
-      child: Container(
-        height: 36,
-        alignment: Alignment.center,
-        padding: const EdgeInsets.symmetric(horizontal: 14),
-        child: Text(
-          label,
-          style: context.text.bodyMedium?.copyWith(
-            fontSize: 13.5,
-            fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-            color: selected ? Colors.white : context.palette.muted,
+  Widget build(BuildContext context) {
+    return Dismissible(
+      key: ValueKey(
+        'call-${entry.row.dateMillis}-${entry.row.number}-${entry.row.direction.name}',
+      ),
+      direction: DismissDirection.startToEnd,
+      background: Container(
+        alignment: Alignment.centerLeft,
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        color: AppTokens.success.withValues(alpha: 0.2),
+        child: const Row(
+          children: [
+            Icon(Icons.phone_rounded, color: AppTokens.success, size: 20),
+            SizedBox(width: 8),
+            Text(
+              'Call',
+              style: TextStyle(
+                color: AppTokens.success,
+                fontWeight: FontWeight.w700,
+                fontSize: 13.5,
+              ),
+            ),
+          ],
+        ),
+      ),
+      confirmDismiss: (direction) async {
+        if (direction == DismissDirection.startToEnd && entry.row.number != null) {
+          // Open system dialer or copy number
+          Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => CallDetailScreen(entry: entry),
+            ),
+          );
+        }
+        return false; // Do not dismiss row from list
+      },
+      child: CallRowTile(
+        entry: entry,
+        onTap: () => Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => CallDetailScreen(entry: entry),
           ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 class _Footer extends StatelessWidget {
@@ -378,8 +391,12 @@ class _Footer extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 20),
       child: Center(
         child: Text(
-          '$shown calls loaded',
-          style: context.text.bodySmall?.copyWith(color: context.palette.muted),
+          '$shown calls loaded · End of list',
+          style: const TextStyle(
+            color: AppTokens.textMuted,
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+          ),
         ),
       ),
     );

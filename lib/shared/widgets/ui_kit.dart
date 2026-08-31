@@ -3,47 +3,56 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/platform/native_call_bridge.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/theme/design_tokens.dart';
 import '../../core/utils/formatters.dart';
 import '../../features/call_tracking/domain/call_entry.dart';
 import '../../features/recording/domain/recording_matcher.dart';
 import '../../features/recording/presentation/recording_player_widget.dart';
 
-/// Convenience accessors so widgets stop repeating `Theme.of(context)`.
+/// Convenience accessors on BuildContext.
 extension ThemeX on BuildContext {
   ColorScheme get colors => Theme.of(this).colorScheme;
   TextTheme get text => Theme.of(this).textTheme;
-  AppPalette get palette => Theme.of(this).extension<AppPalette>() ?? AppPalette.light;
+  AppPalette get palette =>
+      Theme.of(this).extension<AppPalette>() ?? AppPalette.dark;
+  bool get isDark => Theme.of(this).brightness == Brightness.dark;
 }
 
-/// A rounded, tinted icon container — the app's one repeated visual motif.
+/// A rounded, tinted icon container with semantic glow wash.
 class IconChip extends StatelessWidget {
   const IconChip({
     super.key,
     required this.icon,
     required this.color,
-    this.size = 38,
-    this.iconSize = 20,
+    this.size = 36,
+    this.iconSize = 18,
+    this.roundedRadius,
   });
 
   final IconData icon;
   final Color color;
   final double size;
   final double iconSize;
+  final double? roundedRadius;
 
   @override
   Widget build(BuildContext context) => Container(
-    width: size,
-    height: size,
-    decoration: BoxDecoration(
-      // A 12%-alpha wash of the semantic colour, so the chip reads as the
-      // same family in both themes without a second token per colour.
-      color: color.withValues(alpha: 0.12),
-      borderRadius: BorderRadius.circular(size / 3.4),
-    ),
-    child: Icon(icon, size: iconSize, color: color),
-  );
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.14),
+          borderRadius: BorderRadius.circular(roundedRadius ?? (size / 3.4)),
+          border: Border.all(
+            color: color.withValues(alpha: 0.22),
+            width: 1,
+          ),
+        ),
+        alignment: Alignment.center,
+        child: Icon(icon, size: iconSize, color: color),
+      );
 }
 
+/// A compact, status badge pill with optional glow and icon.
 class StatusPill extends StatelessWidget {
   const StatusPill({
     super.key,
@@ -62,23 +71,31 @@ class StatusPill extends StatelessWidget {
   Widget build(BuildContext context) {
     final fg = filled ? Colors.white : color;
     return Container(
-      height: 26,
-      padding: const EdgeInsets.symmetric(horizontal: 9),
+      height: 24,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
       decoration: BoxDecoration(
-        color: filled ? color : color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(8),
+        color: filled ? color : color.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(
+          color: color.withValues(alpha: filled ? 0.0 : 0.25),
+          width: 1,
+        ),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          if (icon != null) Icon(icon, size: 13, color: fg),
-          if (icon != null) const SizedBox(width: 5),
+          if (icon != null) ...[
+            Icon(icon, size: 12, color: fg),
+            const SizedBox(width: 4),
+          ],
           Text(
             label,
-            style: context.text.labelSmall?.copyWith(
+            style: TextStyle(
               color: fg,
               fontWeight: FontWeight.w600,
-              fontSize: 12,
+              fontSize: 11.5,
+              letterSpacing: -0.2,
             ),
           ),
         ],
@@ -87,6 +104,7 @@ class StatusPill extends StatelessWidget {
   }
 }
 
+/// Section header with uppercase tracking label and optional trailing action.
 class SectionLabel extends StatelessWidget {
   const SectionLabel(this.text, {super.key, this.trailing});
 
@@ -95,57 +113,81 @@ class SectionLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(2, 4, 2, 0),
-    child: Row(
-      children: [
-        Expanded(
-          child: Text(
-            text.toUpperCase(),
-            style: context.text.labelSmall?.copyWith(
-              color: context.palette.muted,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.6,
-              fontSize: 12,
+        padding: const EdgeInsets.fromLTRB(2, 6, 2, 2),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                text.toUpperCase(),
+                style: const TextStyle(
+                  color: AppTokens.textMuted,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.8,
+                  fontSize: 11.5,
+                ),
+              ),
             ),
-          ),
+            ?trailing,
+          ],
         ),
-        ?trailing,
-      ],
-    ),
-  );
+      );
 }
 
-/// Card with the standard 12px radius and hairline outline, plus optional
-/// padding — used everywhere instead of raw [Card] so spacing stays uniform.
+/// Glass-morphic surface with layered dark background and hairline borders.
 class AppCard extends StatelessWidget {
   const AppCard({
     super.key,
     required this.child,
     this.padding = const EdgeInsets.all(16),
     this.borderColor,
+    this.backgroundColor,
     this.onTap,
+    this.borderRadius = AppTokens.r16,
   });
 
   final Widget child;
   final EdgeInsets padding;
   final Color? borderColor;
+  final Color? backgroundColor;
   final VoidCallback? onTap;
+  final double borderRadius;
 
   @override
   Widget build(BuildContext context) {
+    final isLight = Theme.of(context).brightness == Brightness.light;
+    final bg = backgroundColor ??
+        (isLight ? Colors.white : AppTokens.surface1);
+    final border = borderColor ??
+        (isLight ? const Color(0xFFE2E8F0) : AppTokens.borderDefault);
+
     final content = Padding(padding: padding, child: child);
+
     return Material(
-      color: context.colors.surface,
-      borderRadius: BorderRadius.circular(12),
+      color: Colors.transparent,
+      borderRadius: BorderRadius.circular(borderRadius),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(borderRadius),
         child: Ink(
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: borderColor ?? context.colors.outlineVariant,
-            ),
+            color: bg,
+            borderRadius: BorderRadius.circular(borderRadius),
+            border: Border.all(color: border, width: 1),
+            boxShadow: isLight
+                ? [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.03),
+                      blurRadius: 10,
+                      offset: const Offset(0, 3),
+                    ),
+                  ]
+                : [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.25),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
           ),
           child: content,
         ),
@@ -154,89 +196,313 @@ class AppCard extends StatelessWidget {
   }
 }
 
-/// Visual vocabulary for a call direction, resolved once so the list, the
-/// detail screen and the stats grid can never disagree about what "missed"
-/// looks like.
+/// Compact Metric Tile for analytics dashboards (2x3 or 3x2 grid).
+class MetricTile extends StatelessWidget {
+  const MetricTile({
+    super.key,
+    required this.title,
+    required this.count,
+    required this.icon,
+    required this.color,
+    this.trend,
+    this.duration,
+    this.onTap,
+  });
+
+  final String title;
+  final String count;
+  final IconData icon;
+  final Color color;
+  final String? trend;
+  final String? duration;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(AppTokens.r16),
+        child: Ink(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+          decoration: BoxDecoration(
+            color: AppTokens.surface1,
+            borderRadius: BorderRadius.circular(AppTokens.r16),
+            border: Border.all(color: AppTokens.borderDefault, width: 1),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.2),
+                blurRadius: 8,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              // Header: Icon + Title + (Trend if any)
+              Row(
+                children: [
+                  IconChip(
+                    icon: icon,
+                    color: color,
+                    size: 30,
+                    iconSize: 16,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      title,
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        color: AppTokens.textSecondary,
+                        letterSpacing: -0.2,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  if (trend != null) ...[
+                    const SizedBox(width: 4),
+                    Text(
+                      trend!,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        color: trend!.startsWith('+')
+                            ? AppTokens.success
+                            : (trend!.startsWith('-')
+                                ? AppTokens.danger
+                                : AppTokens.textMuted),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              const SizedBox(height: 12),
+
+              // Metric Count
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.baseline,
+                textBaseline: TextBaseline.alphabetic,
+                children: [
+                  Text(
+                    count,
+                    style: const TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w800,
+                      color: Colors.white,
+                      letterSpacing: -0.4,
+                      fontFeatures: [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                  if (duration != null) ...[
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        duration!,
+                        style: const TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w500,
+                          color: AppTokens.textMuted,
+                          fontFeatures: [FontFeature.tabularFigures()],
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Segmented Control with animated active pill selector.
+class ModernSegmentedControl<T> extends StatelessWidget {
+  const ModernSegmentedControl({
+    super.key,
+    required this.segments,
+    required this.selected,
+    required this.onSelected,
+  });
+
+  final Map<T, String> segments;
+  final T selected;
+  final ValueChanged<T> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 40,
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: const Color(0xFF101827),
+        borderRadius: BorderRadius.circular(AppTokens.r12),
+        border: Border.all(color: AppTokens.borderDefault, width: 1),
+      ),
+      child: Row(
+        children: segments.entries.map((entry) {
+          final isSelected = entry.key == selected;
+          return Expanded(
+            child: GestureDetector(
+              onTap: () => onSelected(entry.key),
+              behavior: HitTestBehavior.opaque,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                curve: Curves.easeInOut,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: isSelected
+                      ? AppTokens.brandElectric
+                      : Colors.transparent,
+                  borderRadius: BorderRadius.circular(AppTokens.r8),
+                  boxShadow: isSelected
+                      ? [
+                          BoxShadow(
+                            color: AppTokens.brandElectric
+                                .withValues(alpha: 0.35),
+                            blurRadius: 8,
+                            offset: const Offset(0, 2),
+                          ),
+                        ]
+                      : null,
+                ),
+                child: Text(
+                  entry.value,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+                    color: isSelected
+                        ? Colors.white
+                        : const Color(0xFF94A3B8),
+                  ),
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+}
+
+/// Visual style mapping for call directions.
 ({IconData icon, Color color, String label}) directionStyle(
   BuildContext context,
   CallDirection direction,
 ) {
-  final p = context.palette;
   return switch (direction) {
     CallDirection.incoming => (
-      icon: Icons.call_received_rounded,
-      color: p.answered,
-      label: 'Incoming',
-    ),
+        icon: Icons.call_received_rounded,
+        color: AppTokens.callIncoming,
+        label: 'Incoming',
+      ),
     CallDirection.outgoing => (
-      icon: Icons.call_made_rounded,
-      color: context.colors.primary,
-      label: 'Outgoing',
-    ),
+        icon: Icons.call_made_rounded,
+        color: AppTokens.callOutgoing,
+        label: 'Outgoing',
+      ),
     CallDirection.missed => (
-      icon: Icons.call_missed_rounded,
-      color: p.missed,
-      label: 'Missed',
-    ),
+        icon: Icons.call_missed_rounded,
+        color: AppTokens.callMissed,
+        label: 'Missed',
+      ),
     CallDirection.rejected => (
-      icon: Icons.do_not_disturb_on_outlined,
-      color: p.missed,
-      label: 'Rejected',
-    ),
+        icon: Icons.phone_disabled_rounded,
+        color: AppTokens.callRejected,
+        label: 'Rejected',
+      ),
     CallDirection.blocked => (
-      icon: Icons.block_rounded,
-      color: p.missed,
-      label: 'Blocked',
-    ),
+        icon: Icons.block_rounded,
+        color: AppTokens.callMissed,
+        label: 'Blocked',
+      ),
     CallDirection.voicemail => (
-      icon: Icons.voicemail_rounded,
-      color: p.muted,
-      label: 'Voicemail',
-    ),
+        icon: Icons.voicemail_rounded,
+        color: AppTokens.textMuted,
+        label: 'Voicemail',
+      ),
     CallDirection.unknown => (
-      icon: Icons.call_rounded,
-      color: p.muted,
-      label: 'Unknown',
-    ),
+        icon: Icons.call_rounded,
+        color: AppTokens.textMuted,
+        label: 'Unknown',
+      ),
   };
 }
 
+/// Visual style mapping for sync/upload state.
 ({IconData icon, Color color, String label}) uploadStyle(
   BuildContext context,
   UploadState state,
 ) {
-  final p = context.palette;
   return switch (state) {
     UploadState.uploaded => (
-      icon: Icons.check_rounded,
-      color: p.answered,
-      label: 'Uploaded',
-    ),
+        icon: Icons.check_circle_rounded,
+        color: AppTokens.success,
+        label: 'Uploaded',
+      ),
     UploadState.uploading => (
-      icon: Icons.arrow_upward_rounded,
-      color: context.colors.primary,
-      label: 'Uploading',
-    ),
+        icon: Icons.cloud_upload_rounded,
+        color: AppTokens.brandElectric,
+        label: 'Uploading',
+      ),
     UploadState.pending => (
-      icon: Icons.schedule_rounded,
-      color: p.waiting,
-      label: 'Waiting',
-    ),
+        icon: Icons.schedule_rounded,
+        color: AppTokens.warning,
+        label: 'Waiting',
+      ),
     UploadState.failed => (
-      icon: Icons.error_outline_rounded,
-      color: p.missed,
-      label: 'Failed',
-    ),
+        icon: Icons.error_rounded,
+        color: AppTokens.danger,
+        label: 'Failed',
+      ),
   };
 }
 
-/// One row in the call list.
-///
-/// A [ConsumerWidget] so the recording can be played from the list itself. The
-/// alternative — opening the detail screen to hear thirty seconds of a call —
-/// is enough friction that staff stop checking their recordings at all.
+/// Recording match status helper.
+({IconData icon, Color color, String label}) recordingStyle(
+  BuildContext context,
+  RecordingMatchStatus status,
+) {
+  return switch (status) {
+    RecordingMatchStatus.matched => (
+        icon: Icons.graphic_eq_rounded,
+        color: AppTokens.success,
+        label: 'Matched',
+      ),
+    RecordingMatchStatus.ambiguous => (
+        icon: Icons.help_outline_rounded,
+        color: AppTokens.warning,
+        label: 'Needs review',
+      ),
+    RecordingMatchStatus.unmatched => (
+        icon: Icons.link_off_rounded,
+        color: AppTokens.textMuted,
+        label: 'No match',
+      ),
+    RecordingMatchStatus.notFound => (
+        icon: Icons.mic_off_outlined,
+        color: AppTokens.textMuted,
+        label: 'No recording',
+      ),
+  };
+}
+
+/// Timeline call row widget for Call History and Recent Calls.
 class CallRowTile extends ConsumerWidget {
-  const CallRowTile({super.key, required this.entry, this.onTap});
+  const CallRowTile({
+    super.key,
+    required this.entry,
+    this.onTap,
+  });
 
   final CallEntry entry;
   final VoidCallback? onTap;
@@ -253,11 +519,19 @@ class CallRowTile extends ConsumerWidget {
     return InkWell(
       onTap: onTap,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         child: Row(
           children: [
-            IconChip(icon: dir.icon, color: dir.color, iconSize: 18),
-            const SizedBox(width: 12),
+            // Direction Icon Chip
+            IconChip(
+              icon: dir.icon,
+              color: dir.color,
+              size: 36,
+              iconSize: 18,
+            ),
+            const SizedBox(width: 14),
+
+            // Call Information (Title & Subtitle)
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -266,36 +540,38 @@ class CallRowTile extends ConsumerWidget {
                     entry.displayTitle,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: context.text.bodyLarge?.copyWith(
+                    style: TextStyle(
                       fontWeight: FontWeight.w600,
                       fontSize: 15,
-                      // An unnamed caller is real information, not an error —
-                      // muted rather than styled like a warning.
+                      letterSpacing: -0.2,
                       color: entry.hasName
-                          ? context.colors.onSurface
-                          : context.palette.muted,
+                          ? Colors.white
+                          : AppTokens.textSecondary,
                     ),
                   ),
-                  const SizedBox(height: 2),
+                  const SizedBox(height: 3),
                   Text(
                     subtitle,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: context.text.bodySmall?.copyWith(
-                      color: context.palette.muted,
-                      fontFeatures: const [FontFeature.tabularFigures()],
+                    style: const TextStyle(
+                      fontSize: 12.5,
+                      color: AppTokens.textMuted,
+                      fontFeatures: [FontFeature.tabularFigures()],
                     ),
                   ),
                 ],
               ),
             ),
-            const SizedBox(width: 8),
-            // The play control sits outside the row's InkWell so tapping it
-            // starts audio instead of opening the detail screen.
+            const SizedBox(width: 10),
+
+            // Play button if recording is matched
             if (entry.recording case final rec?) ...[
-              RecordingPlayButton(candidate: rec, size: 32),
+              RecordingPlayButton(candidate: rec, size: 34),
               const SizedBox(width: 10),
             ],
+
+            // Timestamp + Sync Indicator
             Column(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
@@ -303,9 +579,11 @@ class CallRowTile extends ConsumerWidget {
                   entry.startedAtUtc != null
                       ? Fmt.clock(entry.startedAtUtc!)
                       : '--:--',
-                  style: context.text.bodySmall?.copyWith(
-                    color: context.palette.muted,
-                    fontFeatures: const [FontFeature.tabularFigures()],
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                    color: AppTokens.textMuted,
+                    fontFeatures: [FontFeature.tabularFigures()],
                   ),
                 ),
                 const SizedBox(height: 5),
@@ -313,14 +591,14 @@ class CallRowTile extends ConsumerWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     if (entry.needsReview) ...[
-                      Icon(
+                      const Icon(
                         Icons.help_outline_rounded,
-                        size: 15,
-                        color: context.palette.waiting,
+                        size: 14,
+                        color: AppTokens.warning,
                       ),
                       const SizedBox(width: 4),
                     ],
-                    Icon(up.icon, size: 14, color: up.color),
+                    Icon(up.icon, size: 13.5, color: up.color),
                   ],
                 ),
               ],
@@ -332,8 +610,7 @@ class CallRowTile extends ConsumerWidget {
   }
 }
 
-/// Empty/blocked state with one clear action, used instead of a bare spinner or
-/// a blank list — both of which read as "broken" to a user.
+/// Rich Empty State widget with modern iconography.
 class EmptyState extends StatelessWidget {
   const EmptyState({
     super.key,
@@ -352,77 +629,59 @@ class EmptyState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Center(
-    child: Padding(
-      padding: const EdgeInsets.all(32),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          IconChip(
-            icon: icon,
-            color: context.palette.muted,
-            size: 56,
-            iconSize: 28,
-          ),
-          const SizedBox(height: 20),
-          Text(
-            title,
-            textAlign: TextAlign.center,
-            style: context.text.titleMedium?.copyWith(
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            message,
-            textAlign: TextAlign.center,
-            style: context.text.bodyMedium?.copyWith(
-              color: context.palette.muted,
-              height: 1.5,
-            ),
-          ),
-          if (actionLabel case final labelText?) ...[
-            const SizedBox(height: 24),
-            SizedBox(
-              width: 220,
-              child: FilledButton(
-                onPressed: onAction,
-                child: Text(labelText),
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                width: 64,
+                height: 64,
+                decoration: BoxDecoration(
+                  color: AppTokens.surface2,
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: AppTokens.borderDefault,
+                    width: 1.5,
+                  ),
+                ),
+                alignment: Alignment.center,
+                child: Icon(icon, size: 30, color: AppTokens.textMuted),
               ),
-            ),
-          ],
-        ],
-      ),
-    ),
-  );
-}
-
-/// Recording match state rendered as a chip. Kept beside the other status
-/// helpers so "needs review" always looks the same wherever it appears.
-({IconData icon, Color color, String label}) recordingStyle(
-  BuildContext context,
-  RecordingMatchStatus status,
-) {
-  final p = context.palette;
-  return switch (status) {
-    RecordingMatchStatus.matched => (
-      icon: Icons.graphic_eq_rounded,
-      color: p.answered,
-      label: 'Matched',
-    ),
-    RecordingMatchStatus.ambiguous => (
-      icon: Icons.help_outline_rounded,
-      color: p.waiting,
-      label: 'Needs review',
-    ),
-    RecordingMatchStatus.unmatched => (
-      icon: Icons.link_off_rounded,
-      color: p.muted,
-      label: 'No match',
-    ),
-    RecordingMatchStatus.notFound => (
-      icon: Icons.mic_off_outlined,
-      color: p.muted,
-      label: 'No recording',
-    ),
-  };
+              const SizedBox(height: 20),
+              Text(
+                title,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.white,
+                  letterSpacing: -0.3,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                message,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 13.5,
+                  color: AppTokens.textSecondary,
+                  height: 1.5,
+                ),
+              ),
+              if (actionLabel case final labelText?) ...[
+                const SizedBox(height: 24),
+                SizedBox(
+                  width: 200,
+                  height: 44,
+                  child: FilledButton(
+                    onPressed: onAction,
+                    child: Text(labelText),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      );
 }

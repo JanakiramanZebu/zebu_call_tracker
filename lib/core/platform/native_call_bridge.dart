@@ -70,8 +70,10 @@ abstract interface class NativeCallBridge {
 
   /// Discovers recordings the device's own dialer already wrote. Incremental by
   /// MediaStore DATE_ADDED, which is in SECONDS (the call log is milliseconds).
+  /// Pass [beforeEpochSeconds] to bound queries within a sliding window.
   Future<List<RecordingCandidate>> scanRecordings({
     required int sinceEpochSeconds,
+    int beforeEpochSeconds = 0,
     int limit = 200,
   });
 
@@ -284,10 +286,12 @@ class MethodChannelNativeCallBridge implements NativeCallBridge {
   @override
   Future<List<RecordingCandidate>> scanRecordings({
     required int sinceEpochSeconds,
+    int beforeEpochSeconds = 0,
     int limit = 200,
   }) async {
     final raw = await _invoke<List<Object?>>('scanRecordings', {
       'sinceEpochSeconds': sinceEpochSeconds,
+      'beforeEpochSeconds': beforeEpochSeconds,
       'limit': limit,
     });
     return raw

@@ -254,5 +254,24 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
   Future<int> deleteSyncedCalls() async {
     return (delete(_table)..where((t) => t.syncState.equals('synced'))).go();
   }
+
+  /// Purges synced calls older than [cutoff] (e.g. 180 days) to prevent
+  /// unbounded SQLite storage growth on low-end devices.
+  Future<int> deleteSyncedCallsOlderThan(DateTime cutoff) async {
+    return (delete(_table)
+          ..where((t) =>
+              t.syncState.equals('synced') &
+              t.startedAt.isSmallerThanValue(cutoff)))
+        .go();
+  }
+
+  /// Purges non-retryable permanently failed calls older than [cutoff].
+  Future<int> deletePermanentFailuresOlderThan(DateTime cutoff) async {
+    return (delete(_table)
+          ..where((t) =>
+              t.syncState.equals('failed_permanent') &
+              t.startedAt.isSmallerThanValue(cutoff)))
+        .go();
+  }
 }
 

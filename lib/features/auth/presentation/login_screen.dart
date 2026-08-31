@@ -178,334 +178,361 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
-    return Scaffold(
-      backgroundColor: isDark ? AppColors.bgDark : const Color(0xFFF4F6F9),
-      body: SafeArea(
-        child: BusyOverlay(
-          busy: _busy,
-          message: 'Registering device with server…',
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                // Top App Icon Brand Hero Header
-                Container(
-                  padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 20),
-                  decoration: BoxDecoration(
-                    gradient: const LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [
-                        Color(0xFF0044DB),
-                        AppColors.brand,
-                        Color(0xFF00237D),
+    return GestureDetector(
+      onTap: () => FocusScope.of(context).unfocus(),
+      child: Scaffold(
+        backgroundColor: isDark ? AppColors.bgDark : const Color(0xFFF4F6F9),
+        body: SafeArea(
+          child: BusyOverlay(
+            busy: _busy,
+            message: 'Registering device with server…',
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // Top App Icon Brand Hero Header
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 24,
+                      horizontal: 20,
+                    ),
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          Color(0xFF0044DB),
+                          AppColors.brand,
+                          Color(0xFF00237D),
+                        ],
+                      ),
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: [
+                        BoxShadow(
+                          color: AppColors.brand.withValues(alpha: 0.30),
+                          blurRadius: 20,
+                          offset: const Offset(0, 8),
+                        ),
                       ],
                     ),
-                    borderRadius: BorderRadius.circular(20),
-                    boxShadow: [
-                      BoxShadow(
-                        color: AppColors.brand.withValues(alpha: 0.30),
-                        blurRadius: 20,
-                        offset: const Offset(0, 8),
-                      ),
-                    ],
-                  ),
-                  child: Row(
-                    children: [
-                      // Official App Icon Tile
-                      Container(
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(16),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.25),
-                              blurRadius: 12,
-                              offset: const Offset(0, 4),
-                            ),
-                          ],
-                        ),
-                        child: const ZebuAppMark(size: 56),
-                      ),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              'Zebu Call Tracker',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 20,
-                                fontWeight: FontWeight.w700,
-                                letterSpacing: -0.4,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              'One-Time Device Setup',
-                              style: TextStyle(
-                                color: Colors.white.withValues(alpha: 0.8),
-                                fontSize: 13,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 20),
-
-                // Main Registration Form Card Container
-                Card(
-                  elevation: 0,
-                  color: isDark ? AppColors.surfaceDark : Colors.white,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(20),
-                    side: BorderSide(
-                      color: isDark ? AppColors.outlineDark : AppColors.outlineLight,
-                    ),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.all(20),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                    child: Row(
                       children: [
-                        Row(
-                          children: [
-                            Icon(
-                              Icons.app_registration_rounded,
-                              size: 22,
-                              color: context.colors.primary,
-                            ),
-                            const SizedBox(width: 10),
-                            Text(
-                              'Device Pairing & Setup',
-                              style: context.text.titleMedium?.copyWith(
-                                fontWeight: FontWeight.w700,
-                                fontSize: 17,
+                        // Official App Icon Tile
+                        Container(
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(16),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.25),
+                                blurRadius: 12,
+                                offset: const Offset(0, 4),
                               ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          'Enter the admin pairing word and your employee details to activate background call tracking.',
-                          style: context.text.bodySmall?.copyWith(
-                            color: context.palette.muted,
-                            height: 1.45,
+                            ],
                           ),
+                          child: const ZebuAppMark(size: 56),
                         ),
-                        const SizedBox(height: 20),
-
-                        if (_failure != null) ...[
-                          _ErrorBanner(failure: _failure!),
-                          const SizedBox(height: 16),
-                        ],
-
-                        Form(
-                          key: _formKey,
+                        const SizedBox(width: 16),
+                        Expanded(
                           child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const _FieldLabel('Pairing Word'),
-                              TextFormField(
-                                controller: _pairingWordController,
-                                enabled: !_busy,
-                                autocorrect: false,
-                                textCapitalization: TextCapitalization.characters,
-                                textInputAction: TextInputAction.next,
-                                inputFormatters: [
-                                  UpperCaseFormatter(),
-                                  FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9]')),
-                                ],
-                                decoration: _buildInputDecoration(
-                                  context,
-                                  hint: 'Provided by Administrator (e.g. ZEBU)',
-                                  prefixIcon: Icons.vpn_key_outlined,
+                              const Text(
+                                'Zebu Call Tracker',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w700,
+                                  letterSpacing: -0.4,
                                 ),
-                                validator: _validatePairingWord,
-                                onFieldSubmitted: (_) => _employeeFocus.requestFocus(),
                               ),
-                              const SizedBox(height: 14),
-
-                              const _FieldLabel('Employee Code / ID'),
-                              TextFormField(
-                                controller: _employeeCodeController,
-                                focusNode: _employeeFocus,
-                                enabled: !_busy,
-                                autocorrect: false,
-                                textCapitalization: TextCapitalization.characters,
-                                textInputAction: TextInputAction.next,
-                                inputFormatters: [
-                                  UpperCaseFormatter(),
-                                  FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9]')),
-                                  LengthLimitingTextInputFormatter(16),
-                                ],
-                                decoration: _buildInputDecoration(
-                                  context,
-                                  hint: 'e.g. ZE770 or EMP0042',
-                                  prefixIcon: Icons.badge_outlined,
+                              const SizedBox(height: 4),
+                              Text(
+                                'One-Time Device Setup',
+                                style: TextStyle(
+                                  color: Colors.white.withValues(alpha: 0.8),
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w500,
                                 ),
-                                validator: _validateEmployeeCode,
-                                onFieldSubmitted: (_) => _nameFocus.requestFocus(),
-                              ),
-                              const SizedBox(height: 14),
-
-                              const _FieldLabel('Full Name'),
-                              TextFormField(
-                                controller: _nameController,
-                                focusNode: _nameFocus,
-                                enabled: !_busy,
-                                textCapitalization: TextCapitalization.words,
-                                textInputAction: TextInputAction.next,
-                                decoration: _buildInputDecoration(
-                                  context,
-                                  hint: 'e.g. Ravi Kumar',
-                                  prefixIcon: Icons.person_outline_rounded,
-                                ),
-                                validator: _validateFullName,
-                                onFieldSubmitted: (_) => _emailFocus.requestFocus(),
-                              ),
-                              const SizedBox(height: 14),
-
-                              const _FieldLabel('Email Address (Optional)'),
-                              TextFormField(
-                                controller: _emailController,
-                                focusNode: _emailFocus,
-                                enabled: !_busy,
-                                autocorrect: false,
-                                keyboardType: TextInputType.emailAddress,
-                                textInputAction: TextInputAction.next,
-                                decoration: _buildInputDecoration(
-                                  context,
-                                  hint: 'e.g. ravi.kumar@example.com',
-                                  prefixIcon: Icons.email_outlined,
-                                ),
-                                validator: _validateEmail,
-                                onFieldSubmitted: (_) => _phoneFocus.requestFocus(),
-                              ),
-                              const SizedBox(height: 14),
-
-                              const _FieldLabel('Mobile Phone Number'),
-                              TextFormField(
-                                controller: _phoneController,
-                                focusNode: _phoneFocus,
-                                enabled: !_busy,
-                                autocorrect: false,
-                                textInputAction: TextInputAction.next,
-                                keyboardType: TextInputType.phone,
-                                inputFormatters: [
-                                  FilteringTextInputFormatter.digitsOnly,
-                                  LengthLimitingTextInputFormatter(10),
-                                ],
-                                decoration: _buildInputDecoration(
-                                  context,
-                                  hint: 'e.g. 9876543210',
-                                  prefixIcon: Icons.phone_android_rounded,
-                                ),
-                                validator: _validatePhone,
-                                onFieldSubmitted: (_) => _departmentFocus.requestFocus(),
-                              ),
-                              const SizedBox(height: 14),
-
-                              const _FieldLabel('Department'),
-                              TextFormField(
-                                controller: _departmentController,
-                                focusNode: _departmentFocus,
-                                enabled: !_busy,
-                                textCapitalization: TextCapitalization.words,
-                                textInputAction: TextInputAction.next,
-                                decoration: _buildInputDecoration(
-                                  context,
-                                  hint: 'e.g. Sales',
-                                  prefixIcon: Icons.business_outlined,
-                                ),
-                                validator: _validateDepartment,
-                                onFieldSubmitted: (_) => _designationFocus.requestFocus(),
-                              ),
-                              const SizedBox(height: 14),
-
-                              const _FieldLabel('Designation / Role'),
-                              TextFormField(
-                                controller: _designationController,
-                                focusNode: _designationFocus,
-                                enabled: !_busy,
-                                textCapitalization: TextCapitalization.words,
-                                textInputAction: TextInputAction.next,
-                                decoration: _buildInputDecoration(
-                                  context,
-                                  hint: 'e.g. Sales Executive',
-                                  prefixIcon: Icons.work_outline_rounded,
-                                ),
-                                validator: _validateDesignation,
-                                onFieldSubmitted: (_) => _locationFocus.requestFocus(),
-                              ),
-                              const SizedBox(height: 14),
-
-                              const _FieldLabel('Office Location / Branch'),
-                              TextFormField(
-                                controller: _locationController,
-                                focusNode: _locationFocus,
-                                enabled: !_busy,
-                                textCapitalization: TextCapitalization.words,
-                                textInputAction: TextInputAction.next,
-                                decoration: _buildInputDecoration(
-                                  context,
-                                  hint: 'e.g. Chennai or Head Office',
-                                  prefixIcon: Icons.location_on_outlined,
-                                ),
-                                validator: _validateLocation,
-                                onFieldSubmitted: (_) => _managerFocus.requestFocus(),
-                              ),
-                              const SizedBox(height: 14),
-
-                              const _FieldLabel('Reporting Manager Name (Optional)'),
-                              TextFormField(
-                                controller: _managerNameController,
-                                focusNode: _managerFocus,
-                                enabled: !_busy,
-                                textCapitalization: TextCapitalization.words,
-                                textInputAction: TextInputAction.done,
-                                decoration: _buildInputDecoration(
-                                  context,
-                                  hint: 'e.g. Priya Sharma',
-                                  prefixIcon: Icons.supervisor_account_outlined,
-                                ),
-                                onFieldSubmitted: (_) => _submit(),
                               ),
                             ],
                           ),
                         ),
-                        const SizedBox(height: 24),
-
-                        LoadingFilledButton(
-                          label: 'Register & Activate Device',
-                          loading: _busy,
-                          onPressed: _submit,
-                        ),
                       ],
                     ),
                   ),
-                ),
-                const SizedBox(height: 16),
+                  const SizedBox(height: 20),
 
-                const _DeviceNotice(),
-                const SizedBox(height: 20),
+                  // Main Registration Form Card Container
+                  Card(
+                    elevation: 0,
+                    color: isDark ? AppColors.surfaceDark : Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(20),
+                      side: BorderSide(
+                        color: isDark
+                            ? AppColors.outlineDark
+                            : AppColors.outlineLight,
+                      ),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(20),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.app_registration_rounded,
+                                size: 22,
+                                color: context.colors.primary,
+                              ),
+                              const SizedBox(width: 10),
+                              Text(
+                                'Device Pairing & Setup',
+                                style: context.text.titleMedium?.copyWith(
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 17,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Enter the admin pairing word and your employee details to activate background call tracking.',
+                            style: context.text.bodySmall?.copyWith(
+                              color: context.palette.muted,
+                              height: 1.45,
+                            ),
+                          ),
+                          const SizedBox(height: 20),
 
-                Center(
-                  child: Text(
-                    AppConfig.buildLabel,
-                    style: context.text.bodySmall?.copyWith(
-                      color: context.palette.muted,
-                      fontSize: 12,
+                          if (_failure != null) ...[
+                            _ErrorBanner(failure: _failure!),
+                            const SizedBox(height: 16),
+                          ],
+
+                          Form(
+                            key: _formKey,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                const _FieldLabel('Pairing Word'),
+                                TextFormField(
+                                  controller: _pairingWordController,
+                                  enabled: !_busy,
+                                  autocorrect: false,
+                                  textCapitalization:
+                                      TextCapitalization.characters,
+                                  textInputAction: TextInputAction.next,
+                                  inputFormatters: [
+                                    UpperCaseFormatter(),
+                                    FilteringTextInputFormatter.allow(
+                                      RegExp(r'[A-Za-z0-9]'),
+                                    ),
+                                  ],
+                                  decoration: _buildInputDecoration(
+                                    context,
+                                    hint: '',
+                                    prefixIcon: Icons.vpn_key_outlined,
+                                  ),
+                                  validator: _validatePairingWord,
+                                  onFieldSubmitted: (_) =>
+                                      _employeeFocus.requestFocus(),
+                                ),
+                                const SizedBox(height: 14),
+
+                                const _FieldLabel('Employee Code / ID'),
+                                TextFormField(
+                                  controller: _employeeCodeController,
+                                  focusNode: _employeeFocus,
+                                  enabled: !_busy,
+                                  autocorrect: false,
+                                  textCapitalization:
+                                      TextCapitalization.characters,
+                                  textInputAction: TextInputAction.next,
+                                  inputFormatters: [
+                                    UpperCaseFormatter(),
+                                    FilteringTextInputFormatter.allow(
+                                      RegExp(r'[A-Za-z0-9]'),
+                                    ),
+                                    LengthLimitingTextInputFormatter(16),
+                                  ],
+                                  decoration: _buildInputDecoration(
+                                    context,
+                                    hint: '',
+                                    prefixIcon: Icons.badge_outlined,
+                                  ),
+                                  validator: _validateEmployeeCode,
+                                  onFieldSubmitted: (_) =>
+                                      _nameFocus.requestFocus(),
+                                ),
+                                const SizedBox(height: 14),
+
+                                const _FieldLabel('Full Name'),
+                                TextFormField(
+                                  controller: _nameController,
+                                  focusNode: _nameFocus,
+                                  enabled: !_busy,
+                                  textCapitalization: TextCapitalization.words,
+                                  textInputAction: TextInputAction.next,
+                                  decoration: _buildInputDecoration(
+                                    context,
+                                    hint: '',
+                                    prefixIcon: Icons.person_outline_rounded,
+                                  ),
+                                  validator: _validateFullName,
+                                  onFieldSubmitted: (_) =>
+                                      _emailFocus.requestFocus(),
+                                ),
+                                const SizedBox(height: 14),
+      
+                                const _FieldLabel('Email Address'),
+                                TextFormField(
+                                  controller: _emailController,
+                                  focusNode: _emailFocus,
+                                  enabled: !_busy,
+                                  autocorrect: false,
+                                  keyboardType: TextInputType.emailAddress,
+                                  textInputAction: TextInputAction.next,
+                                  decoration: _buildInputDecoration(
+                                    context,
+                                    hint: '',
+                                    prefixIcon: Icons.email_outlined,
+                                  ),
+                                  validator: _validateEmail,
+                                  onFieldSubmitted: (_) =>
+                                      _phoneFocus.requestFocus(),
+                                ),
+                                const SizedBox(height: 14),
+
+                                const _FieldLabel('Mobile Phone Number'),
+                                TextFormField(
+                                  controller: _phoneController,
+                                  focusNode: _phoneFocus,
+                                  enabled: !_busy,
+                                  autocorrect: false,
+                                  textInputAction: TextInputAction.next,
+                                  keyboardType: TextInputType.phone,
+                                  inputFormatters: [
+                                    FilteringTextInputFormatter.digitsOnly,
+                                    LengthLimitingTextInputFormatter(10),
+                                  ],
+                                  decoration: _buildInputDecoration(
+                                    context,
+                                    hint: '',
+                                    prefixIcon: Icons.phone_android_rounded,
+                                  ),
+                                  validator: _validatePhone,
+                                  onFieldSubmitted: (_) =>
+                                      _departmentFocus.requestFocus(),
+                                ),
+                                const SizedBox(height: 14),
+
+                                const _FieldLabel('Department'),
+                                TextFormField(
+                                  controller: _departmentController,
+                                  focusNode: _departmentFocus,
+                                  enabled: !_busy,
+                                  textCapitalization: TextCapitalization.words,
+                                  textInputAction: TextInputAction.next,
+                                  inputFormatters: [UpperCaseFormatter()],
+                                  decoration: _buildInputDecoration(
+                                    context,
+                                    hint: '',
+                                    prefixIcon: Icons.business_outlined,
+                                  ),
+                                  validator: _validateDepartment,
+                                  onFieldSubmitted: (_) =>
+                                      _designationFocus.requestFocus(),
+                                ),
+                                const SizedBox(height: 14),
+
+                                const _FieldLabel('Designation / Role'),
+                                TextFormField(
+                                  controller: _designationController,
+                                  focusNode: _designationFocus,
+                                  enabled: !_busy,
+                                  textCapitalization: TextCapitalization.words,
+                                  textInputAction: TextInputAction.next,
+                                  inputFormatters: [UpperCaseFormatter()],
+                                  decoration: _buildInputDecoration(
+                                    context,
+                                    hint: '',
+                                    prefixIcon: Icons.work_outline_rounded,
+                                  ),
+                                  validator: _validateDesignation,
+                                  onFieldSubmitted: (_) =>
+                                      _locationFocus.requestFocus(),
+                                ),
+                                const SizedBox(height: 14),
+
+                                const _FieldLabel('Office Location / Branch'),
+                                TextFormField(
+                                  controller: _locationController,
+                                  focusNode: _locationFocus,
+                                  enabled: !_busy,
+                                  textCapitalization: TextCapitalization.words,
+                                  textInputAction: TextInputAction.next,
+                                  inputFormatters: [UpperCaseFormatter()],
+                                  decoration: _buildInputDecoration(
+                                    context,
+                                    hint: '',
+                                    prefixIcon: Icons.location_on_outlined,
+                                  ),
+                                  validator: _validateLocation,
+                                  onFieldSubmitted: (_) =>
+                                      _managerFocus.requestFocus(),
+                                ),
+                                const SizedBox(height: 14),
+      
+                                const _FieldLabel('Reporting Manager Name'),
+                                TextFormField(
+                                  controller: _managerNameController,
+                                  focusNode: _managerFocus,
+                                  enabled: !_busy,
+                                  textCapitalization: TextCapitalization.words,
+                                  textInputAction: TextInputAction.done,
+                                  inputFormatters: [UpperCaseFormatter()],
+                                  decoration: _buildInputDecoration(
+                                    context,
+                                    hint: '',
+                                    prefixIcon:
+                                        Icons.supervisor_account_outlined,
+                                  ),
+                                  onFieldSubmitted: (_) => _submit(),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+
+                          LoadingFilledButton(
+                            label: 'Register & Activate Device',
+                            loading: _busy,
+                            onPressed: _submit,
+                          ),
+                        ],
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(height: 12),
-              ],
+                  const SizedBox(height: 16),
+
+                  const _DeviceNotice(),
+                  const SizedBox(height: 20),
+
+                  Center(
+                    child: Text(
+                      AppConfig.buildLabel,
+                      style: context.text.bodySmall?.copyWith(
+                        color: context.palette.muted,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+              ),
             ),
           ),
         ),

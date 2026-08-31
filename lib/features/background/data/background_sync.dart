@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:workmanager/workmanager.dart';
 
 import '../../../core/notifications/notification_service.dart';
+import '../../../core/storage/database_providers.dart';
 import '../../synchronization/data/sync_service.dart';
 import 'background_service.dart';
 
@@ -23,6 +24,13 @@ void callbackDispatcher() {
       final syncNotifier = container.read(syncServiceProvider.notifier);
       await syncNotifier.ingestNativeCallLogs();
       await syncNotifier.triggerSync();
+
+      // Ensure local database remains lean even during offline or periodic background sweeps
+      final dao = container.read(callsDaoProvider);
+      final purgeCutoff = DateTime.now().toUtc().subtract(const Duration(days: 180));
+      await dao.deleteSyncedCallsOlderThan(purgeCutoff);
+      await dao.deletePermanentFailuresOlderThan(purgeCutoff);
+
       return Future.value(true);
     } catch (err) {
       // If sync fails due to network, workmanager can retry based on policy.
