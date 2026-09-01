@@ -19,6 +19,9 @@ void main() {
         overrides: [
           callFeedProvider.overrideWith(FakeCallFeed.new),
           analyticsPeriodStatsProvider.overrideWith((ref) => Stream.value(CallStats.empty)),
+          // Drives the trend badges. Without an override this reaches the real
+          // DAO and leaves a database timer pending past teardown.
+          analyticsPreviousStatsProvider.overrideWith((ref) => Stream.value(null)),
           analyticsHourlyActivityProvider.overrideWith((ref) => Stream.value(
                 (
                   incoming: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],

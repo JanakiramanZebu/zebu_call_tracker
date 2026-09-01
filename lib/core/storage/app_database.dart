@@ -7,6 +7,9 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqlite3/sqlite3.dart' as sql;
 
+import '../network/call_wire_format.dart';
+import 'sync_state.dart';
+
 part 'app_database.g.dart';
 
 class LocalCalls extends Table {
@@ -28,10 +31,12 @@ class LocalCalls extends Table {
   TextColumn get recordingPath => text().nullable()();
   IntColumn get recordingMediaStoreId => integer().nullable()();
   TextColumn get recordingChecksum => text().nullable()();
-  TextColumn get recordingUploadStatus => text().withDefault(const Constant('pending'))();
+  TextColumn get recordingUploadStatus =>
+      text().withDefault(const Constant(RecordingUploadStatus.pending))();
   IntColumn get simSlot => integer().nullable().withDefault(const Constant(1))();
   DateTimeColumn get clientCreatedAt => dateTime()();
-  TextColumn get syncState => text().withDefault(const Constant('pending'))();
+  TextColumn get syncState =>
+      text().withDefault(const Constant(CallSyncState.waiting))();
   IntColumn get attemptCount => integer().withDefault(const Constant(0))();
   DateTimeColumn get nextAttemptAt => dateTime().nullable()();
   TextColumn get lastErrorCode => text().nullable()();
@@ -71,8 +76,34 @@ class DatabaseHealthReport {
 class AppDatabase extends _$AppDatabase {
   AppDatabase([QueryExecutor? e]) : super(e ?? _openConnection());
 
+  /// **Locked to Kotlin's `ZebuDatabaseHelper.DATABASE_VERSION`.**
+  ///
+  /// Both sides open this same file. `SQLiteOpenHelper` throws outright when it
+  /// meets a database newer than its own version, so raising this number alone
+  /// would not cause a migration — it would take background sync down entirely,
+  /// silently, on the next call. Move both or neither.
   @override
   int get schemaVersion => 1;
+
+  @override
+  MigrationStrategy get migration => MigrationStrategy(
+        onCreate: (m) => m.createAll(),
+        beforeOpen: (details) async {
+          // Fold any rows still carrying the pre-unification lowercase state
+          // names onto the shared vocabulary. Idempotent and cheap, so it runs
+          // on every open rather than behind a schema version — see the note on
+          // [schemaVersion] for why bumping that is not an option here.
+          for (final statement in CallSyncState.normalizationStatements) {
+            await customStatement(statement);
+          }
+          // Likewise for `status`: a row captured by a build that wrote
+          // "completed" would keep being offered to the server with a value
+          // absent from its enum, and rejected as a permanent 422.
+          for (final statement in CallWireStatus.normalizationStatements) {
+            await customStatement(statement);
+          }
+        },
+      );
 
   static const String dbFilename = 'zebu_calls.sqlite';
 
@@ -281,7 +312,8 @@ class AppDatabase extends _$AppDatabase {
     }
 
     // Create a pristine reconstructed database
-    final tempCleanFile = File('${file.path}.clean_$DateTime.now().millisecondsSinceEpoch');
+    final tempCleanFile =
+        File('${file.path}.clean_${DateTime.now().millisecondsSinceEpoch}');
     sql.Database? cleanDb;
 
     try {
@@ -315,10 +347,10 @@ class AppDatabase extends _$AppDatabase {
           recording_path TEXT,
           recording_media_store_id INTEGER,
           recording_checksum TEXT,
-          recording_upload_status TEXT NOT NULL DEFAULT 'pending',
+          recording_upload_status TEXT NOT NULL DEFAULT '${RecordingUploadStatus.pending}',
           sim_slot INTEGER DEFAULT 1,
           client_created_at INTEGER NOT NULL,
-          sync_state TEXT NOT NULL DEFAULT 'pending',
+          sync_state TEXT NOT NULL DEFAULT '${CallSyncState.waiting}',
           attempt_count INTEGER NOT NULL DEFAULT 0,
           next_attempt_at INTEGER,
           last_error_code TEXT
@@ -359,10 +391,11 @@ class AppDatabase extends _$AppDatabase {
           row['recording_path'],
           row['recording_media_store_id'],
           row['recording_checksum'],
-          row['recording_upload_status'] ?? 'pending',
+          row['recording_upload_status'] ?? RecordingUploadStatus.pending,
           row['sim_slot'] ?? 1,
           row['client_created_at'] ?? (DateTime.now().millisecondsSinceEpoch ~/ 1000),
-          row['sync_state'] ?? 'pending',
+          CallSyncState.normalize(
+              (row['sync_state'] as String?) ?? CallSyncState.waiting),
           row['attempt_count'] ?? 0,
           row['next_attempt_at'],
           row['last_error_code'],

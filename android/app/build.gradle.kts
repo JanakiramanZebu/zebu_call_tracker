@@ -87,4 +87,10 @@ dependencies {
     // WorkManager owns the FGS lifecycle for expedited work, survives reboot,
     // and is the only scheduler the OEM battery managers on this fleet respect.
     implementation("androidx.work:work-runtime-ktx:2.9.1")
+    // EncryptedSharedPreferences for the background worker's auth session.
+    // The Dart side already keeps its copy in flutter_secure_storage; without
+    // this the native mirror of the same access and refresh tokens sat in a
+    // world-of-root-readable plaintext XML file, which made the secure store
+    // on the other side decorative.
+    implementation("androidx.security:security-crypto:1.0.0")
 }

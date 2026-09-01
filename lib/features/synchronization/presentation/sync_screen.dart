@@ -41,6 +41,9 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
     if (state == AppLifecycleState.resumed && mounted) {
       ref.invalidate(syncCountersProvider);
       ref.invalidate(backgroundStatusProvider);
+      // A run that completed while this screen was backgrounded leaves no
+      // trace in Dart; resume is the only reliable moment to re-read it.
+      ref.invalidate(nativeSyncStatusProvider);
     }
   }
 
@@ -54,6 +57,9 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
     final syncCountersAsync = ref.watch(syncCountersProvider);
     final syncState = ref.watch(syncServiceProvider);
     final isConnected = ref.watch(connectivityProvider).asData?.value ?? true;
+    // The native coordinator's own record of its last run — the only source
+    // that knows what happened while the Flutter engine was not running.
+    final nativeSync = ref.watch(nativeSyncStatusProvider).value;
 
     final counters = syncCountersAsync.asData?.value ??
         {
@@ -159,6 +165,7 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
         backgroundColor: AppTokens.surface2,
         onRefresh: () async {
           ref.invalidate(syncCountersProvider);
+          ref.invalidate(nativeSyncStatusProvider);
           await ref.read(callFeedProvider.notifier).refresh();
           await ref.read(syncServiceProvider.notifier).triggerSync();
         },
@@ -342,6 +349,7 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
                           : () async {
                               await ref.read(syncServiceProvider.notifier).triggerSync();
                               ref.invalidate(syncCountersProvider);
+                              ref.invalidate(nativeSyncStatusProvider);
                             },
                       style: FilledButton.styleFrom(
                         backgroundColor: failed > 0
@@ -438,10 +446,26 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
                   const _RowDivider(),
                   _BreakdownItem(
                     icon: Icons.mic_off_outlined,
-                    iconColor: AppTokens.textMuted,
-                    title: 'No Audio Recording',
-                    subtitle: 'Missed, rejected or unrecorded calls',
+                    iconColor: stats.recordingsAbsent > 0
+                        ? AppTokens.warning
+                        : AppTokens.textMuted,
+                    title: 'No Audio Found',
+                    // Connected calls only. Unanswered calls are counted
+                    // separately below, because a missing recording for a call
+                    // nobody answered is not a gap in coverage.
+                    subtitle: 'Answered calls with no matching audio file',
                     count: '${stats.recordingsAbsent}',
+                    countColor: stats.recordingsAbsent > 0
+                        ? AppTokens.warning
+                        : AppTokens.textMuted,
+                  ),
+                  const _RowDivider(),
+                  _BreakdownItem(
+                    icon: Icons.phone_missed_outlined,
+                    iconColor: AppTokens.textMuted,
+                    title: 'Not Recordable',
+                    subtitle: 'Missed or rejected — no audio can exist',
+                    count: '${stats.recordingsNotApplicable}',
                     countColor: AppTokens.textMuted,
                   ),
                 ],
@@ -466,14 +490,35 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
                   _HealthRow(
                     icon: Icons.dns_rounded,
                     label: 'Backend Server',
-                    value: AppConfig.hasServer ? 'Reachable' : 'Local Sandbox',
-                    valueColor: AppConfig.hasServer ? AppTokens.success : AppTokens.warning,
+                    // The outcome of the last real upload attempt, not whether
+                    // a base URL happens to be compiled in. `hasServer` is a
+                    // build constant, so this row previously read "Reachable"
+                    // on a handset that had never once reached the server.
+                    value: !AppConfig.hasServer
+                        ? 'Not configured'
+                        : (nativeSync?.statusLabel ?? 'Checking…'),
+                    valueColor: !AppConfig.hasServer
+                        ? AppTokens.warning
+                        : (nativeSync == null
+                            ? AppTokens.textMuted
+                            : (nativeSync.isHealthy
+                                ? AppTokens.success
+                                : AppTokens.warning)),
+                  ),
+                  const _RowDivider(leftPadding: 44),
+                  _HealthRow(
+                    icon: Icons.schedule_rounded,
+                    label: 'Last Background Sync',
+                    value: nativeSync?.lastSyncLabel ?? '—',
+                    valueColor: nativeSync?.hasRun == true
+                        ? AppTokens.textSecondary
+                        : AppTokens.textMuted,
                   ),
                   const _RowDivider(leftPadding: 44),
                   _HealthRow(
                     icon: Icons.inventory_2_outlined,
                     label: 'Local Outbox Queue',
-                    value: '$waiting calls waiting',
+                    value: '$waiting ${waiting == 1 ? "call" : "calls"} waiting',
                     valueColor: waiting > 0 ? AppTokens.warning : AppTokens.success,
                   ),
                 ],

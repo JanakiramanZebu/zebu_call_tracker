@@ -205,6 +205,7 @@ class MetricTile extends StatelessWidget {
     required this.icon,
     required this.color,
     this.trend,
+    this.higherIsWorse = false,
     this.duration,
     this.onTap,
   });
@@ -214,6 +215,11 @@ class MetricTile extends StatelessWidget {
   final IconData icon;
   final Color color;
   final String? trend;
+
+  /// True when a RISE in this metric is bad news — missed calls, rejections,
+  /// unanswered outgoing. Without it a worsening figure renders in the same
+  /// green as an improving one, which reads as the opposite of what happened.
+  final bool higherIsWorse;
   final String? duration;
   final VoidCallback? onTap;
 
@@ -272,11 +278,13 @@ class MetricTile extends StatelessWidget {
                       style: TextStyle(
                         fontSize: 11,
                         fontWeight: FontWeight.w700,
-                        color: trend!.startsWith('+')
-                            ? AppTokens.success
-                            : (trend!.startsWith('-')
-                                ? AppTokens.danger
-                                : AppTokens.textMuted),
+                        color: switch (trend![0]) {
+                          '+' =>
+                            higherIsWorse ? AppTokens.danger : AppTokens.success,
+                          '-' =>
+                            higherIsWorse ? AppTokens.success : AppTokens.danger,
+                          _ => AppTokens.textMuted,
+                        },
                       ),
                     ),
                   ],

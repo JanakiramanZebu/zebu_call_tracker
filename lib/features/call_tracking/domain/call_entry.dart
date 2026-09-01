@@ -89,6 +89,8 @@ class CallStats {
     required this.recordingsMatched,
     required this.recordingsNeedReview,
     required this.recordingsAbsent,
+    required this.recordingsNotApplicable,
+    required this.callsByHour,
   });
 
   final int incoming;
@@ -104,12 +106,60 @@ class CallStats {
   final int outgoingDurationSeconds;
   final int recordingsMatched;
   final int recordingsNeedReview;
+
+  /// Connected calls that should have audio and do not.
+  ///
+  /// Counts only calls that could have been recorded. A missed or rejected call
+  /// has no audio by definition, and lumping those in here — as this once did —
+  /// makes recording coverage look broken on any day with a normal number of
+  /// unanswered calls.
   final int recordingsAbsent;
+
+  /// Calls no recording could ever exist for: missed, rejected, never connected.
+  final int recordingsNotApplicable;
+
+  /// Connected-call counts indexed by local hour, 0–23. Drives peak-time.
+  final List<int> callsByHour;
 
   int get total => incoming + outgoing + missed + rejected;
 
   int get averageDurationSeconds =>
       answered == 0 ? 0 : talkTimeSeconds ~/ answered;
+
+  /// Calls a recording is expected for. The denominator for coverage.
+  int get recordingEligible =>
+      recordingsMatched + recordingsNeedReview + recordingsAbsent;
+
+  /// Share of recordable calls whose audio was found, 0–100.
+  ///
+  /// Measured against [recordingEligible], never against [total]: dividing by
+  /// every call silently caps this at the answered rate, so a handset capturing
+  /// every single recording still reported a number well under 100%.
+  double get recordingCoverageRate => recordingEligible == 0
+      ? 0
+      : recordingsMatched / recordingEligible * 100;
+
+  double get answeredRate => total == 0 ? 0 : answered / total * 100;
+
+  double get missedRate => total == 0 ? 0 : missed / total * 100;
+
+  /// Busiest two-hour band, or null when there is nothing to rank.
+  ///
+  /// Returned as the start hour of the band in local time. The dashboard used
+  /// to print a hardcoded "10 AM – 12 PM" here regardless of the data.
+  int? get peakHourStart {
+    if (callsByHour.length != 24) return null;
+    int? bestHour;
+    var bestCount = 0;
+    for (var h = 0; h < 24; h++) {
+      final count = callsByHour[h] + callsByHour[(h + 1) % 24];
+      if (count > bestCount) {
+        bestCount = count;
+        bestHour = h;
+      }
+    }
+    return bestCount == 0 ? null : bestHour;
+  }
 
   static const empty = CallStats(
     incoming: 0,
@@ -126,7 +176,14 @@ class CallStats {
     recordingsMatched: 0,
     recordingsNeedReview: 0,
     recordingsAbsent: 0,
+    recordingsNotApplicable: 0,
+    callsByHour: _noCalls,
   );
+
+  static const _noCalls = <int>[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  ];
 
   factory CallStats.from(Iterable<CallEntry> entries) {
     var incoming = 0,
@@ -141,15 +198,18 @@ class CallStats {
         outgoingTalk = 0,
         matched = 0,
         review = 0,
-        absent = 0;
+        absent = 0,
+        notApplicable = 0;
 
     final uniqueNumbers = <String>{};
+    final byHour = List<int>.filled(24, 0);
 
     for (final e in entries) {
-      final number = e.row.number?.trim() ?? '';
-      if (number.isNotEmpty) {
-        uniqueNumbers.add(number);
-      }
+      final key = _dedupeKey(e.row.number);
+      if (key != null) uniqueNumbers.add(key);
+
+      final startedAt = e.row.startedAtUtc?.toLocal();
+      if (startedAt != null && e.isConnected) byHour[startedAt.hour]++;
 
       switch (e.row.direction) {
         case CallDirection.incoming:
@@ -182,14 +242,20 @@ class CallStats {
         talk += e.durationSeconds;
       }
 
-      switch (e.match.status) {
-        case RecordingMatchStatus.matched:
-          matched++;
-        case RecordingMatchStatus.ambiguous:
-          review++;
-        case RecordingMatchStatus.unmatched:
-        case RecordingMatchStatus.notFound:
-          absent++;
+      // Only a call that connected can have audio. Anything else is not a
+      // coverage gap and must not be counted as one.
+      if (!e.isConnected) {
+        notApplicable++;
+      } else {
+        switch (e.match.status) {
+          case RecordingMatchStatus.matched:
+            matched++;
+          case RecordingMatchStatus.ambiguous:
+            review++;
+          case RecordingMatchStatus.unmatched:
+          case RecordingMatchStatus.notFound:
+            absent++;
+        }
       }
     }
 
@@ -208,7 +274,29 @@ class CallStats {
       recordingsMatched: matched,
       recordingsNeedReview: review,
       recordingsAbsent: absent,
+      recordingsNotApplicable: notApplicable,
+      callsByHour: byHour,
     );
+  }
+
+  /// Normalises a number down to what makes two records the same client.
+  ///
+  /// Unique-contact counts used the raw string, so `+919876543210`,
+  /// `09876543210` and `98765 43210` — one client — counted as three. Compares
+  /// on the last 10 digits, which is the national significant number in the
+  /// only market this ships to and is stable across the formats OEM dialers
+  /// write into the call log.
+  static String? _dedupeKey(String? raw) {
+    if (raw == null) return null;
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty || trimmed == 'Unknown' || trimmed == 'withheld') {
+      return null;
+    }
+    final digits = trimmed.replaceAll(RegExp(r'[^0-9]'), '');
+    if (digits.isEmpty) return trimmed.toLowerCase(); // short codes, SIP ids
+    return digits.length <= 10
+        ? digits
+        : digits.substring(digits.length - 10);
   }
 
   factory CallStats.fromLocalCalls(Iterable<LocalCall> calls) {
@@ -224,15 +312,18 @@ class CallStats {
         outgoingTalk = 0,
         matched = 0,
         review = 0,
-        absent = 0;
+        absent = 0,
+        notApplicable = 0;
 
     final uniqueNumbers = <String>{};
+    final byHour = List<int>.filled(24, 0);
 
     for (final c in calls) {
-      final number = c.phoneNumber.trim();
-      if (number.isNotEmpty && number != 'Unknown' && number != 'withheld') {
-        uniqueNumbers.add(number);
-      }
+      // Prefer the normalised column the ingest pipeline already computed;
+      // fall back to normalising the raw value the same way the feed does, so
+      // both factories agree on what "unique" means.
+      final key = _dedupeKey(c.normalizedPhoneNumber ?? c.phoneNumber);
+      if (key != null) uniqueNumbers.add(key);
 
       final dir = c.direction.toLowerCase();
       final status = c.status.toLowerCase();
@@ -265,9 +356,15 @@ class CallStats {
       if (isConnected) {
         answered++;
         talk += c.durationSeconds;
+        byHour[c.startedAt.toLocal().hour]++;
       }
 
-      if (c.hasRecording) {
+      // Mirrors CallStats.from: audio is only expected of a connected call.
+      // `review` stays 0 on this path — the ambiguity signal lives in the
+      // matcher's output, which the stored row does not carry.
+      if (!isConnected) {
+        notApplicable++;
+      } else if (c.hasRecording) {
         matched++;
       } else {
         absent++;
@@ -289,6 +386,8 @@ class CallStats {
       recordingsMatched: matched,
       recordingsNeedReview: review,
       recordingsAbsent: absent,
+      recordingsNotApplicable: notApplicable,
+      callsByHour: byHour,
     );
   }
 }

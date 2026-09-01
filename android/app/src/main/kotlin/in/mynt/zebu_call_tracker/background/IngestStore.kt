@@ -1,6 +1,10 @@
 package `in`.mynt.zebu_call_tracker.background
 
 import android.content.Context
+import android.content.SharedPreferences
+import android.util.Log
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKeys
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -41,8 +45,85 @@ object IngestStore {
     /** Roughly a fortnight of heavy use; well under the SharedPreferences limit. */
     private const val MAX_BATCHES = 60
 
+    /** Capture snapshots and run statistics — no secrets, plain storage. */
     private fun prefs(context: Context) =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    private const val SECURE_PREFS = "call_ingest_secure"
+    private const val TAG = "IngestStore"
+
+    @Volatile
+    private var securePrefsInstance: SharedPreferences? = null
+
+    /**
+     * Separate, encrypted store for the background worker's auth session.
+     *
+     * The access and refresh tokens used to live in [prefs] as plain XML, which
+     * put them within reach of any root/backup extraction while the Dart side's
+     * copy of the very same tokens sat in flutter_secure_storage. This closes
+     * that asymmetry.
+     *
+     * Falls back to the plain store if the keystore is unavailable — some
+     * devices fail EncryptedSharedPreferences construction outright, and an app
+     * that cannot sync at all is a worse outcome than one that stores its token
+     * the way it always did. The fallback is logged.
+     */
+    private fun securePrefs(context: Context): SharedPreferences {
+        securePrefsInstance?.let { return it }
+        return synchronized(this) {
+            securePrefsInstance ?: run {
+                val store = try {
+                    // security-crypto 1.0.0 API. The MasterKey.Builder form
+                    // belongs to the 1.1.0 alphas, which this project does not
+                    // take: see pubspec/build.gradle notes on holding stable
+                    // versions against the pinned AGP.
+                    val masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
+                    EncryptedSharedPreferences.create(
+                        SECURE_PREFS,
+                        masterKeyAlias,
+                        context.applicationContext,
+                        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "EncryptedSharedPreferences unavailable (${e.message}); using plain store.")
+                    prefs(context)
+                }
+                migrateLegacyPlaintextSession(context, store)
+                securePrefsInstance = store
+                store
+            }
+        }
+    }
+
+    /**
+     * Moves a session written by an earlier build out of the plaintext store.
+     *
+     * Without this an already-signed-in handset would keep its tokens in the
+     * clear until the user next signed in, and background sync would break
+     * immediately on upgrade because the new store starts empty.
+     */
+    private fun migrateLegacyPlaintextSession(context: Context, target: SharedPreferences) {
+        if (target === prefs(context)) return
+        val legacy = prefs(context)
+        val legacyToken = legacy.getString(KEY_AUTH_TOKEN, null) ?: return
+
+        target.edit().apply {
+            putString(KEY_AUTH_TOKEN, legacyToken)
+            legacy.getString(KEY_REFRESH_TOKEN, null)?.let { putString(KEY_REFRESH_TOKEN, it) }
+            legacy.getString(KEY_API_BASE_URL, null)?.let { putString(KEY_API_BASE_URL, it) }
+            legacy.getString(KEY_DEVICE_UUID, null)?.let { putString(KEY_DEVICE_UUID, it) }
+        }.apply()
+
+        legacy.edit()
+            .remove(KEY_AUTH_TOKEN)
+            .remove(KEY_REFRESH_TOKEN)
+            .remove(KEY_API_BASE_URL)
+            .remove(KEY_DEVICE_UUID)
+            .apply()
+
+        Log.i(TAG, "Migrated background auth session out of plaintext preferences.")
+    }
 
     // ------------------------------------------------------------- cursors
 
@@ -208,7 +289,7 @@ object IngestStore {
         apiBaseUrl: String,
         deviceUuid: String,
     ) {
-        prefs(context).edit().apply {
+        securePrefs(context).edit().apply {
             putString(KEY_AUTH_TOKEN, token)
             if (!refreshToken.isNullOrBlank()) {
                 putString(KEY_REFRESH_TOKEN, refreshToken)
@@ -223,7 +304,7 @@ object IngestStore {
         accessToken: String,
         refreshToken: String?,
     ) {
-        prefs(context).edit().apply {
+        securePrefs(context).edit().apply {
             putString(KEY_AUTH_TOKEN, accessToken)
             if (!refreshToken.isNullOrBlank()) {
                 putString(KEY_REFRESH_TOKEN, refreshToken)
@@ -232,7 +313,7 @@ object IngestStore {
     }
 
     fun clearAuthSession(context: Context) {
-        prefs(context).edit()
+        securePrefs(context).edit()
             .remove(KEY_AUTH_TOKEN)
             .remove(KEY_REFRESH_TOKEN)
             .remove(KEY_API_BASE_URL)
@@ -241,16 +322,16 @@ object IngestStore {
     }
 
     fun getAuthToken(context: Context): String? =
-        prefs(context).getString(KEY_AUTH_TOKEN, null)
+        securePrefs(context).getString(KEY_AUTH_TOKEN, null)
 
     fun getRefreshToken(context: Context): String? =
-        prefs(context).getString(KEY_REFRESH_TOKEN, null)
+        securePrefs(context).getString(KEY_REFRESH_TOKEN, null)
 
     fun getApiBaseUrl(context: Context): String? =
-        prefs(context).getString(KEY_API_BASE_URL, null)
+        securePrefs(context).getString(KEY_API_BASE_URL, null)
 
     fun getDeviceUuid(context: Context): String? =
-        prefs(context).getString(KEY_DEVICE_UUID, null)
+        securePrefs(context).getString(KEY_DEVICE_UUID, null)
 
     fun recordSyncOutcome(
         context: Context,

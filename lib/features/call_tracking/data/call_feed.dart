@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 import '../../../core/platform/native_call_bridge.dart';
 import '../../../core/storage/app_database.dart';
 import '../../../core/storage/database_providers.dart';
+import '../../../core/storage/sync_state.dart';
 import '../../recording/domain/recording_matcher.dart';
 import '../domain/call_entry.dart';
 
@@ -66,8 +67,14 @@ class PermissionSnapshot {
   /// Call log is the only hard requirement — everything else degrades.
   bool get canTrack => readCallLog;
 
-  int get grantedCount => [
+  /// Counted against [total], which must stay in step with `permissionAsks`.
+  ///
+  /// Background activity is included because the walkthrough shows a card for
+  /// it. Leaving it out is why Settings used to report "5/5 granted" on a
+  /// handset the Permissions screen showed as 5 of 6.
+  int grantedCount({bool ignoringBatteryOptimizations = false}) => [
     readPhoneState && readCallLog,
+    ignoringBatteryOptimizations,
     readContacts,
     readMediaAudio,
     notifications,
@@ -76,7 +83,7 @@ class PermissionSnapshot {
 
   /// One per entry in `permissionAsks`; the phone/call-log pair counts as one
   /// ask because the user is shown one card for it.
-  static const total = 5;
+  static const total = 6;
 }
 
 /// The call feed: log rows joined to whatever recording matched them.
@@ -184,13 +191,7 @@ class CallFeed extends AsyncNotifier<CallFeedState> {
 
       UploadState state = UploadState.pending;
       if (localCall != null) {
-        if (localCall.syncState == 'synced') {
-          state = UploadState.uploaded;
-        } else if (localCall.syncState == 'failed_permanent' || localCall.syncState == 'failed_retryable') {
-          state = UploadState.failed;
-        } else if (localCall.syncState == 'uploading') {
-          state = UploadState.uploading;
-        }
+        state = _uploadStateOf(localCall.syncState);
       }
 
       entries.add(CallEntry(row: row, match: match, uploadState: state, contactName: name));
@@ -383,6 +384,55 @@ final analyticsPeriodStatsProvider = StreamProvider<CallStats>((ref) {
   ).map(CallStats.fromLocalCalls);
 });
 
+/// The same-length window immediately before [periodRangeInfoProvider].
+///
+/// Exists so the dashboard's trend deltas are measured against something real.
+/// Null for "All time", which has no preceding period to compare with.
+final previousPeriodRangeProvider = Provider<({DateTime start, DateTime end})?>(
+  (ref) {
+    final period = ref.watch(dashboardPeriodProvider);
+    if (period == DashboardPeriod.all) return null;
+
+    final current = ref.watch(periodRangeInfoProvider);
+    final span = current.end.difference(current.start);
+    final end = current.start.subtract(const Duration(milliseconds: 1));
+    return (start: end.subtract(span), end: end);
+  },
+);
+
+/// Stats for the preceding window, used only to derive trends.
+final analyticsPreviousStatsProvider = StreamProvider<CallStats?>((ref) {
+  final range = ref.watch(previousPeriodRangeProvider);
+  if (range == null) return Stream.value(null);
+
+  final dao = ref.watch(callsDaoProvider);
+  final excludeInternal = ref.watch(analyticsExcludeInternalProvider);
+
+  return dao
+      .watchCallsForAnalytics(
+        startUtc: range.start.toUtc(),
+        endUtc: range.end.toUtc(),
+        excludeInternal: excludeInternal,
+      )
+      .map<CallStats?>(CallStats.fromLocalCalls);
+});
+
+/// Period-over-period change for one metric, as the dashboard renders it.
+///
+/// Returns null when there is nothing honest to show — no previous period, or
+/// a previous value of zero, where a percentage is undefined. Every metric card
+/// used to display a fixed string ('+8%', '-5%', …) that was never computed
+/// from anything.
+String? trendLabel(num current, num? previous) {
+  if (previous == null) return null;
+  if (previous == 0) return current == 0 ? null : 'New';
+
+  final delta = (current - previous) / previous * 100;
+  if (delta.abs() < 0.5) return '0%';
+  final sign = delta > 0 ? '+' : '-';
+  return '$sign${delta.abs().toStringAsFixed(0)}%';
+}
+
 /// Reactive hourly call activity point distribution for dashboard charts.
 final analyticsHourlyActivityProvider = StreamProvider<({List<double> incoming, List<double> outgoing, List<double> missed})>((ref) {
   final dao = ref.watch(callsDaoProvider);
@@ -467,12 +517,7 @@ CallEntry callEntryFromLocalCall(LocalCall lc) {
           confidence: 0.0,
         );
 
-  final upState = switch (lc.syncState) {
-    'synced' => UploadState.uploaded,
-    'uploading' => UploadState.uploading,
-    'failed_permanent' || 'failed_retryable' => UploadState.failed,
-    _ => UploadState.pending,
-  };
+  final upState = _uploadStateOf(lc.syncState);
 
   return CallEntry(
     row: CallLogRow(
@@ -550,3 +595,15 @@ final deviceInfoProvider = FutureProvider<Map<String, Object?>>(
 final simInfoProvider = FutureProvider<SimInfo>(
   (ref) => ref.watch(nativeBridgeProvider).getSimInfo(),
 );
+
+/// Maps a stored `sync_state` onto what the call list shows.
+///
+/// Goes through [CallSyncState] rather than comparing literals: the same row
+/// is written by Dart and by the native coordinator, and matching on one
+/// side's spelling is how every uploaded call previously rendered as pending.
+UploadState _uploadStateOf(String syncState) {
+  if (CallSyncState.isUploaded(syncState)) return UploadState.uploaded;
+  if (CallSyncState.isInFlight(syncState)) return UploadState.uploading;
+  if (CallSyncState.isFailed(syncState)) return UploadState.failed;
+  return UploadState.pending;
+}

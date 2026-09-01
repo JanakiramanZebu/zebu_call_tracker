@@ -111,7 +111,9 @@ class _HomeShellState extends ConsumerState<HomeShell>
       final background = ref.read(backgroundControllerProvider.notifier);
       await background.start();
       await background.drain();
-      await ref.read(syncServiceProvider.notifier).ingestNativeCallLogs();
+      // triggerSync ingests before it hands off, and drain() already folded in
+      // whatever the background worker captured. A third standalone ingest here
+      // only re-walked the same call log.
       await ref.read(syncServiceProvider.notifier).triggerSync();
       ref.invalidate(syncCountersProvider);
 

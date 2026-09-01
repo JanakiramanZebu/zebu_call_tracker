@@ -1,12 +1,5 @@
-import 'dart:io';
-
-import 'package:crypto/crypto.dart';
-import 'package:dio/dio.dart';
-
-import '../../../core/errors/api_exceptions.dart';
 import '../../../core/network/api_client.dart';
 import '../../../core/network/api_endpoints.dart';
-import '../../../core/storage/app_database.dart';
 
 class SyncPolicy {
   const SyncPolicy({
@@ -143,6 +136,12 @@ class BatchFailedItem {
   }
 }
 
+/// Response shape of `POST /sync/calls`.
+///
+/// Nothing in Dart posts to that endpoint any more — the native coordinator
+/// does, and parses the same three arrays in Kotlin. This stays as the written
+/// record of the contract both sides are coding against; if the server changes
+/// it, these fields and `SyncCoordinator.executeMetadataUpload` change together.
 class BatchSyncResult {
   const BatchSyncResult({
     required this.successful,
@@ -173,28 +172,17 @@ class BatchSyncResult {
   }
 }
 
-class SingleCallSyncResult {
-  const SingleCallSyncResult({
-    required this.idempotencyKey,
-    this.callId,
-    this.revision = 1,
-    this.isSuccess = false,
-    this.isDuplicate = false,
-    this.errorCode,
-    this.errorMessage,
-    this.isRetryable = true,
-  });
-
-  final String idempotencyKey;
-  final String? callId;
-  final int revision;
-  final bool isSuccess;
-  final bool isDuplicate;
-  final String? errorCode;
-  final String? errorMessage;
-  final bool isRetryable;
-}
-
+/// The Dart half of the server conversation: everything EXCEPT the upload.
+///
+/// Posting calls and recordings belongs to the native `SyncCoordinator` and to
+/// it alone, because that is the only path that still runs with the Flutter
+/// engine dead — which is the entire premise of the product. This class once
+/// carried a parallel `uploadSingleCall`/`syncBatch`/`uploadRecording`
+/// implementation of the same endpoints; nothing called it, and had anything
+/// started to, the two writers would have raced over the same outbox rows.
+///
+/// What is left is the half the coordinator cannot do: reading back what the
+/// server thinks it has, so local state can be corrected against it.
 class SyncRepository {
   SyncRepository({required ApiClient apiClient}) : _apiClient = apiClient;
 
@@ -205,202 +193,16 @@ class SyncRepository {
     return SyncStatusResponse.fromJson(res.data ?? {});
   }
 
-  Future<SingleCallSyncResult> uploadSingleCall({
-    required String deviceUuid,
-    required LocalCall call,
-  }) async {
-    final rawDir = call.direction.toLowerCase();
-    final normDirection = (rawDir == 'outgoing' || rawDir.contains('out')) ? 'outgoing' : 'incoming';
-    final normStatus = switch (call.status.toLowerCase()) {
-      'completed' => 'completed',
-      'missed' => 'missed',
-      'rejected' => 'rejected',
-      _ => (call.durationSeconds > 0) ? 'completed' : ((rawDir == 'missed' || rawDir == 'rejected') ? rawDir : 'missed'),
-    };
-
-    final startedAtUtc = call.startedAt.toUtc();
-    final endedAtUtc = (call.endedAt?.toUtc()) ??
-        startedAtUtc.add(Duration(seconds: call.durationSeconds));
-    final answeredAtUtc = call.answeredAt?.toUtc() ??
-        (call.durationSeconds > 0 ? startedAtUtc : null);
-
-    final payload = {
-      'idempotency_key': call.idempotencyKey,
-      'external_call_id': call.externalCallId ?? 'local-${call.localId}',
-      'device_uuid': deviceUuid,
-      'phone_number': call.phoneNumber,
-      if (call.contactName != null && call.contactName!.trim().isNotEmpty)
-        'contact_name': call.contactName!.trim(),
-      'direction': normDirection,
-      'status': normStatus,
-      'started_at': startedAtUtc.toIso8601String(),
-      if (answeredAtUtc != null) 'answered_at': answeredAtUtc.toIso8601String(),
-      'ended_at': endedAtUtc.toIso8601String(),
-      'duration_seconds': call.durationSeconds,
-      'has_recording': call.hasRecording,
-      'sim_slot': call.simSlot ?? 1,
-      'client_created_at': call.clientCreatedAt.toUtc().toIso8601String(),
-    };
-
-    try {
-      final res = await _apiClient.post<Map<String, dynamic>>(
-        ApiEndpoints.syncCalls,
-        data: {
-          'device_uuid': deviceUuid,
-          'client_synced_at': DateTime.now().toUtc().toIso8601String(),
-          'calls': [payload],
-        },
-      );
-
-      final batch = BatchSyncResult.fromJson(res.data ?? {});
-      if (batch.successful.isNotEmpty) {
-        final item = batch.successful.first;
-        return SingleCallSyncResult(
-          idempotencyKey: item.idempotencyKey.isNotEmpty ? item.idempotencyKey : call.idempotencyKey,
-          callId: item.callId.isNotEmpty ? item.callId : 'server-${call.localId}',
-          revision: item.revision,
-          isSuccess: true,
-        );
-      } else if (batch.duplicates.isNotEmpty) {
-        final item = batch.duplicates.first;
-        return SingleCallSyncResult(
-          idempotencyKey: item.idempotencyKey.isNotEmpty ? item.idempotencyKey : call.idempotencyKey,
-          callId: item.callId.isNotEmpty ? item.callId : 'server-${call.localId}',
-          revision: item.revision,
-          isSuccess: true,
-          isDuplicate: true,
-        );
-      } else if (batch.failed.isNotEmpty) {
-        final item = batch.failed.first;
-        return SingleCallSyncResult(
-          idempotencyKey: item.idempotencyKey.isNotEmpty ? item.idempotencyKey : call.idempotencyKey,
-          errorCode: item.errorCode,
-          errorMessage: item.message,
-          isRetryable: item.retryable,
-          isSuccess: false,
-        );
-      }
-
-      // Default success if 200 OK without specific array items
-      return SingleCallSyncResult(
-        idempotencyKey: call.idempotencyKey,
-        callId: 'server-${call.localId}',
-        revision: 1,
-        isSuccess: true,
-      );
-    } on ApiException catch (e) {
-      final is4xx = e.statusCode != null &&
-          e.statusCode! >= 400 &&
-          e.statusCode! < 500 &&
-          e.statusCode != 408 &&
-          e.statusCode != 429;
-      return SingleCallSyncResult(
-        idempotencyKey: call.idempotencyKey,
-        errorCode: e.code,
-        errorMessage: e.message,
-        isRetryable: !is4xx,
-        isSuccess: false,
-      );
-    } catch (e) {
-      return SingleCallSyncResult(
-        idempotencyKey: call.idempotencyKey,
-        errorCode: 'NETWORK_OR_CLIENT_ERROR',
-        errorMessage: e.toString(),
-        isRetryable: true,
-        isSuccess: false,
-      );
-    }
-  }
-
-  Future<BatchSyncResult> syncBatch({
-    required String deviceUuid,
-    required List<LocalCall> calls,
-  }) async {
-    final callPayloads = calls.map((c) {
-      final rawDir = c.direction.toLowerCase();
-      final normDirection = (rawDir == 'outgoing' || rawDir.contains('out')) ? 'outgoing' : 'incoming';
-      final normStatus = switch (c.status.toLowerCase()) {
-        'completed' => 'completed',
-        'missed' => 'missed',
-        'rejected' => 'rejected',
-        _ => (c.durationSeconds > 0) ? 'completed' : ((rawDir == 'missed' || rawDir == 'rejected') ? rawDir : 'missed'),
-      };
-
-      final startedAtUtc = c.startedAt.toUtc();
-      final endedAtUtc = (c.endedAt?.toUtc()) ??
-          startedAtUtc.add(Duration(seconds: c.durationSeconds));
-      final answeredAtUtc = c.answeredAt?.toUtc() ??
-          (c.durationSeconds > 0 ? startedAtUtc : null);
-
-      return {
-        'idempotency_key': c.idempotencyKey,
-        'external_call_id': c.externalCallId ?? 'local-${c.localId}',
-        'device_uuid': deviceUuid,
-        'phone_number': c.phoneNumber,
-        if (c.contactName != null && c.contactName!.trim().isNotEmpty)
-          'contact_name': c.contactName!.trim(),
-        'direction': normDirection,
-        'status': normStatus,
-        'started_at': startedAtUtc.toIso8601String(),
-        if (answeredAtUtc != null) 'answered_at': answeredAtUtc.toIso8601String(),
-        'ended_at': endedAtUtc.toIso8601String(),
-        'duration_seconds': c.durationSeconds,
-        'has_recording': c.hasRecording,
-        'sim_slot': c.simSlot ?? 1,
-        'client_created_at': c.clientCreatedAt.toUtc().toIso8601String(),
-      };
-    }).toList();
-
-    final res = await _apiClient.post<Map<String, dynamic>>(
-      ApiEndpoints.syncCalls,
-      data: {
-        'device_uuid': deviceUuid,
-        'client_synced_at': DateTime.now().toUtc().toIso8601String(),
-        'calls': callPayloads,
-      },
-    );
-
-    return BatchSyncResult.fromJson(res.data ?? {});
-  }
-
+  /// Tells the server a call it expects audio for is never getting any.
+  ///
+  /// Without this the server keeps the call in `pending_recording_uploads`
+  /// forever, and every reconciliation pass re-offers a recording that does
+  /// not exist.
   Future<void> updateCallNoRecording(String serverCallId) async {
     await _apiClient.patch<dynamic>(
       ApiEndpoints.callById(serverCallId),
       data: {'has_recording': false},
     );
-  }
-
-  Future<bool> uploadRecording({
-    required String serverCallId,
-    required File audioFile,
-    required String checksumSha256,
-    int? durationSeconds,
-  }) async {
-    final length = await audioFile.length();
-    final filename = audioFile.path.split(Platform.pathSeparator).last;
-
-    final formData = FormData.fromMap({
-      'file': await MultipartFile.fromFile(
-        audioFile.path,
-        filename: filename,
-      ),
-      'checksum': checksumSha256,
-      'file_size': length.toString(),
-      if (durationSeconds != null) 'duration_seconds': durationSeconds.toString(),
-    });
-
-    final res = await _apiClient.post<Map<String, dynamic>>(
-      ApiEndpoints.callRecording(serverCallId),
-      data: formData,
-    );
-
-    return res.success;
-  }
-
-  static Future<String> computeSha256(File file) async {
-    final stream = file.openRead();
-    final digest = await sha256.bind(stream).first;
-    return digest.toString().toLowerCase();
   }
 
   /// Section 5.4: Recovering from a lost response by looking up idempotency keys

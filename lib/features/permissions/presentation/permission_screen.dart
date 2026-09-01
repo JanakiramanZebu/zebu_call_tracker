@@ -60,8 +60,8 @@ class _PermissionScreenState extends ConsumerState<PermissionScreen>
           ),
           data: (perms) {
             final asks = permissionAsks(perms, background: background);
-            final grantedCount = asks.where((a) => a.granted).length;
-            final allGranted = grantedCount == asks.length;
+            final grantedCount = asks.grantedCount;
+            final allGranted = asks.allGranted;
 
             return ListView(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
@@ -147,22 +147,30 @@ class _PermissionScreenState extends ConsumerState<PermissionScreen>
 
                 const SizedBox(height: 16),
 
-                if (allGranted) ...[
-                  SizedBox(
-                    width: double.infinity,
-                    height: 48,
-                    child: FilledButton(
-                      onPressed: () => Navigator.of(context).pop(),
-                      style: FilledButton.styleFrom(
-                        backgroundColor: AppTokens.brandElectric,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(AppTokens.r12),
-                        ),
+                // Always offered. Hiding this until every permission was
+                // granted left anyone who had declined an optional one with no
+                // way off the screen but the system back gesture.
+                SizedBox(
+                  width: double.infinity,
+                  height: 48,
+                  child: FilledButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: allGranted
+                          ? AppTokens.brandElectric
+                          : AppTokens.surface2,
+                      foregroundColor:
+                          allGranted ? Colors.white : AppTokens.textSecondary,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(AppTokens.r12),
                       ),
-                      child: const Text('Done', style: TextStyle(fontWeight: FontWeight.w700)),
+                    ),
+                    child: Text(
+                      allGranted ? 'Done' : 'Back to app',
+                      style: const TextStyle(fontWeight: FontWeight.w700),
                     ),
                   ),
-                ],
+                ),
               ],
             );
           },

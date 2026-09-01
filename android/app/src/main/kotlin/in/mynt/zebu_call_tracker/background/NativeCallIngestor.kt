@@ -16,6 +16,23 @@ object NativeCallIngestor {
     private const val CALL_LIMIT = 200
     private const val RECORDING_LIMIT = 300
 
+    /**
+     * How far back the first run reaches.
+     *
+     * The server takes one call per request and rejects anything older than its
+     * `max_call_age_days` policy (90 at the time of writing). An unbounded
+     * backfill therefore queued up to 15,000 rows — most of them too old for
+     * the server to accept — ahead of every live call, and the outbox never
+     * drained. 30 days is comfortably inside the server's window and is the
+     * span anyone actually reviews.
+     *
+     * Calls older than this are not ingested at all. The call-history screen
+     * reads the system call log directly, so they remain visible in the app —
+     * they are simply never queued for an upload the server would refuse.
+     */
+    private const val BACKFILL_DAYS = 30L
+    private const val BACKFILL_PAGES = 12
+
     const val STATUS_OK = "ok"
     const val STATUS_BLOCKED = "blocked"
     const val STATUS_FAILED = "failed"
@@ -27,12 +44,20 @@ object NativeCallIngestor {
         }
 
         try {
-            val initialSinceMillis = IngestStore.callCursorMillis(context)
-            val isFirstRun = initialSinceMillis == 0L
-            
+            val cursorMillis = IngestStore.callCursorMillis(context)
+            val isFirstRun = cursorMillis == 0L
+
+            // On the first run, start from the backfill horizon rather than
+            // from the beginning of the call log.
+            val initialSinceMillis = if (isFirstRun) {
+                System.currentTimeMillis() - (BACKFILL_DAYS * 24L * 60L * 60L * 1000L)
+            } else {
+                cursorMillis
+            }
+
             var beforeMillis = if (isFirstRun) System.currentTimeMillis() else 0L
             var pageCount = 0
-            val maxPages = if (isFirstRun) 30 else 1
+            val maxPages = if (isFirstRun) BACKFILL_PAGES else 1
             var totalCallsIngested = 0
 
             while (pageCount < maxPages) {
@@ -163,7 +188,11 @@ object NativeCallIngestor {
                     callMillis = System.currentTimeMillis(),
                     recordingSeconds = System.currentTimeMillis() / 1000L
                 )
-                Log.i(TAG, "[CALL_INGEST] Historical initial backfill complete: ingested $totalCallsIngested calls across $pageCount pages.")
+                Log.i(
+                    TAG,
+                    "[CALL_INGEST] Backfill complete: $totalCallsIngested calls from the last " +
+                        "$BACKFILL_DAYS days across $pageCount pages."
+                )
             } else if (totalCallsIngested > 0) {
                 Log.i(TAG, "[CALL_INGEST] ingest[$reason]: $totalCallsIngested calls captured to SQLite outbox.")
             }

@@ -135,14 +135,24 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
   String? _validateFullName(String? v) {
     if (v == null || v.trim().isEmpty) return 'Enter your Full Name';
-    if (v.trim().length < 2) return 'Full Name must be at least 2 characters';
+    final clean = v.trim();
+    if (clean.length < 2) return 'Full Name must be at least 2 characters';
+    // A name field that accepts "12345" is not validating anything. Allows
+    // letters, spaces and the punctuation real names carry — apostrophes,
+    // hyphens and the full stop in an initial.
+    if (!RegExp(r"^[A-Za-z][A-Za-z .'\-]*$").hasMatch(clean)) {
+      return 'Use letters only (spaces, apostrophes and hyphens are allowed)';
+    }
     return null;
   }
 
   String? _validateEmail(String? v) {
     if (v == null || v.trim().isEmpty) return null;
     final clean = v.trim();
-    if (!RegExp(r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$').hasMatch(clean)) {
+    // The TLD is deliberately unbounded above 2 characters. The previous
+    // pattern capped it at 4, which rejected every address on .online,
+    // .finance, .trading and .company — all of them in use here.
+    if (!RegExp(r'^[\w.+\-]+@([\w\-]+\.)+[A-Za-z]{2,}$').hasMatch(clean)) {
       return 'Enter a valid email address';
     }
     return null;

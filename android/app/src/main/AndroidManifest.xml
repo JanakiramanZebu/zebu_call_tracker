@@ -67,10 +67,20 @@
          recording before the dialer rotates it. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- allowBackup=false is a requirement, not a default.
+         This app's private storage holds the call outbox (numbers, contact
+         names, timestamps) and the background worker's auth session. With
+         backup left at its default of true, all of that is eligible for
+         Google cloud backup and for `adb backup` off an unlocked handset —
+         call records leaving the device by a route nobody asked for. The two
+         rules files keep the same position on the API 31+ and legacy paths. -->
     <application
         android:label="Zebu Call Tracker"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
         android:usesCleartextTraffic="false"
         android:networkSecurityConfig="@xml/network_security_config">
         <activity
@@ -143,15 +153,16 @@
             </intent-filter>
         </receiver>
 
-        <!-- Network restoration recovery receiver -->
-        <receiver
-            android:name=".background.NetworkRecoveryReceiver"
-            android:exported="true"
-            android:enabled="true">
-            <intent-filter>
-                <action android:name="android.net.conn.CONNECTIVITY_CHANGE" />
-            </intent-filter>
-        </receiver>
+        <!-- NetworkRecoveryReceiver is deliberately NOT registered here.
+             CONNECTIVITY_CHANGE is an implicit broadcast, and manifest
+             receivers stopped being delivered those in Android 7 (API 24), so
+             the entry that used to sit here never fired once on any supported
+             device. Network recovery now has two real mechanisms:
+               - while the process is alive, the ConnectivityManager callback
+                 registered by NetworkRecoveryReceiver.registerNetworkCallback,
+               - while it is not, the NetworkType.CONNECTED constraint on the
+                 WorkManager sync jobs, which the system releases on its own
+                 once a connection exists. -->
 
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->

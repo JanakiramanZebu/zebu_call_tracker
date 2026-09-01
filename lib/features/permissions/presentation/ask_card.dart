@@ -86,6 +86,31 @@ class AskCard extends StatelessWidget {
                     height: 1.45,
                   ),
                 ),
+                // Optional is a choice, so state what it costs rather than
+                // leaving the user to guess whether skipping matters.
+                if (!ask.granted && ask.costIfSkipped != null) ...[
+                  const SizedBox(height: 6),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(
+                        Icons.arrow_right_rounded,
+                        size: 16,
+                        color: AppTokens.textDisabled,
+                      ),
+                      Expanded(
+                        child: Text(
+                          'If skipped: ${ask.costIfSkipped}',
+                          style: const TextStyle(
+                            color: AppTokens.textDisabled,
+                            fontSize: 11.5,
+                            height: 1.4,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
                 if (blocked && !ask.granted) ...[
                   const SizedBox(height: 8),
                   const Text(

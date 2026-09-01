@@ -226,7 +226,7 @@ class $LocalCallsTable extends LocalCalls
         false,
         type: DriftSqlType.string,
         requiredDuringInsert: false,
-        defaultValue: const Constant('pending'),
+        defaultValue: const Constant(RecordingUploadStatus.pending),
       );
   static const VerificationMeta _simSlotMeta = const VerificationMeta(
     'simSlot',
@@ -262,7 +262,7 @@ class $LocalCallsTable extends LocalCalls
     false,
     type: DriftSqlType.string,
     requiredDuringInsert: false,
-    defaultValue: const Constant('pending'),
+    defaultValue: const Constant(CallSyncState.waiting),
   );
   static const VerificationMeta _attemptCountMeta = const VerificationMeta(
     'attemptCount',

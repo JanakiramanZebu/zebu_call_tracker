@@ -46,13 +46,20 @@ class CallStateReceiver : BroadcastReceiver() {
         // log row and — critically — the dialer's recording file now exist.
         // Capturing on RINGING/OFFHOOK would run before either is written.
         if (normalised == "idle") {
-            // Trigger immediate unthrottled background processing in our active service
-            `in`.mynt.zebu_call_tracker.background.CallTrackingService.triggerImmediate(context, "call_ended")
-            
+            // WorkManager, not a direct service start. The class comment above
+            // is the reason: from Android 12 a background broadcast may not
+            // start a foreground service, and this receiver runs with the app
+            // backgrounded by definition. A revision that called
+            // CallTrackingService.triggerImmediate() from here threw
+            // ForegroundServiceStartNotAllowedException into a catch block on
+            // every single call, so the immediate pass never actually ran and
+            // capture silently fell back to the delayed passes below.
+            BackgroundScheduler.enqueueNow(context, BackgroundScheduler.REASON_CALL_ENDED)
+
             // Queue delayed ingest passes to capture late MediaStore indexing by OEM dialers
             BackgroundScheduler.enqueueDelayedIngest(context, 10L, "call_ended_delay_10s")
             BackgroundScheduler.enqueueDelayedIngest(context, 30L, "call_ended_delay_30s")
-            
+
             showPostCallOverlay(context)
         }
     }

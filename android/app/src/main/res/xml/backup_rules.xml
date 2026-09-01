@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Legacy (API 30 and below) auto-backup rules. Nothing in this app's private
+  storage may leave the device: the outbox holds call metadata and the
+  background worker's session tokens live alongside it.
+  android:allowBackup="false" already blocks this path; the file is here so the
+  intent survives anyone flipping that flag without reading the comment.
+-->
+<full-backup-content>
+    <exclude domain="database" path="." />
+    <exclude domain="sharedpref" path="." />
+    <exclude domain="file" path="." />
+    <exclude domain="external" path="." />
+</full-backup-content>

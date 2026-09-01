@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
 import '../../../core/storage/app_database.dart';
+import '../../../core/storage/sync_state.dart';
 import '../../../core/theme/design_tokens.dart';
 import '../../../core/utils/formatters.dart';
 import '../../../shared/widgets/loaders.dart';
@@ -170,21 +171,32 @@ class _OutboxItemCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final isSynced = item.syncState == 'synced';
-    final isFailed = item.syncState == 'failed_permanent' ||
-        item.syncState == 'failed_retryable';
+    final state = CallSyncState.normalize(item.syncState);
+    final isSynced = state == CallSyncState.uploaded;
+    final isFailed = CallSyncState.isFailed(state);
 
-    final Color statusColor = isSynced
-        ? AppTokens.success
-        : (isFailed ? AppTokens.danger : AppTokens.warning);
+    // A synced call whose audio never made it is not a clean success — the
+    // recording is the point of the product, so say so rather than showing a
+    // green SYNCED and leaving the gap invisible.
+    final recordingMissing = isSynced &&
+        item.hasRecording &&
+        item.recordingUploadStatus != RecordingUploadStatus.uploaded;
 
-    final String statusLabel = isSynced
-        ? 'SYNCED'
-        : (item.syncState == 'failed_permanent'
-            ? 'PERMANENT FAILURE'
-            : (item.syncState == 'failed_retryable'
-                ? 'RETRYING'
-                : 'PENDING'));
+    final Color statusColor = switch (state) {
+      _ when isFailed => AppTokens.danger,
+      _ when recordingMissing => AppTokens.warning,
+      _ when isSynced => AppTokens.success,
+      _ => AppTokens.warning,
+    };
+
+    final String statusLabel = switch (state) {
+      CallSyncState.failed => 'PERMANENT FAILURE',
+      CallSyncState.retryPending => 'RETRYING',
+      CallSyncState.uploading => 'UPLOADING',
+      CallSyncState.uploaded when recordingMissing => 'NO RECORDING',
+      CallSyncState.uploaded => 'SYNCED',
+      _ => 'PENDING',
+    };
 
     final iconData = switch (item.direction.toLowerCase()) {
       'incoming' => Icons.call_received_rounded,

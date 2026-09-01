@@ -1,6 +1,7 @@
 import 'package:drift/drift.dart';
 
 import 'app_database.dart';
+import 'sync_state.dart';
 
 part 'calls_dao.g.dart';
 
@@ -10,6 +11,18 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
 
   $LocalCallsTable get _table => db.localCalls;
 
+  /// The states the coordinator may pick up, as a reusable predicate.
+  ///
+  /// Written once here rather than inline at each call site: the native
+  /// coordinator holds the same predicate in raw SQL, and the two drifting
+  /// apart is exactly how rows become claimable by one side and invisible to
+  /// the other.
+  Expression<bool> _isClaimable($LocalCallsTable t, DateTime now) =>
+      t.syncState.equals(CallSyncState.waiting) |
+      (t.syncState.equals(CallSyncState.retryPending) &
+          (t.nextAttemptAt.isNull() |
+              t.nextAttemptAt.isSmallerOrEqualValue(now)));
+
   Future<int> insertOrUpdateCall(LocalCallsCompanion entry) async {
     return into(_table).insertOnConflictUpdate(entry);
   }
@@ -17,6 +30,31 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
   Future<LocalCall?> findByIdempotencyKey(String key) {
     return (select(_table)..where((t) => t.idempotencyKey.equals(key)))
         .getSingleOrNull();
+  }
+
+  Future<LocalCall?> findByServerCallId(String serverCallId) {
+    return (select(_table)..where((t) => t.serverCallId.equals(serverCallId)))
+        .getSingleOrNull();
+  }
+
+  /// Re-offers a recording the server says it never received.
+  ///
+  /// Only touches rows that still have a local file to send; a call whose audio
+  /// was expired to `absent` has nothing to re-offer and is left alone for the
+  /// caller to report back to the server instead.
+  Future<bool> reopenRecordingUpload(String idempotencyKey) async {
+    final updated = await (update(_table)
+          ..where((t) =>
+              t.idempotencyKey.equals(idempotencyKey) &
+              t.hasRecording.equals(true) &
+              t.recordingMediaStoreId.isNotNull()))
+        .write(
+      const LocalCallsCompanion(
+        recordingUploadStatus: Value(RecordingUploadStatus.pending),
+        nextAttemptAt: Value(null),
+      ),
+    );
+    return updated > 0;
   }
 
   Future<List<LocalCall>> findByIdempotencyKeys(List<String> keys) async {
@@ -28,7 +66,8 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
     final results = <LocalCall>[];
     for (var i = 0; i < keys.length; i += 50) {
       final chunk = keys.sublist(i, (i + 50 > keys.length) ? keys.length : i + 50);
-      final batch = await (select(_table)..where((t) => t.idempotencyKey.isIn(chunk))).get();
+      final batch =
+          await (select(_table)..where((t) => t.idempotencyKey.isIn(chunk))).get();
       results.addAll(batch);
     }
     return results;
@@ -37,12 +76,9 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
   Future<List<LocalCall>> getPendingCalls(int limit) {
     final now = DateTime.now().toUtc();
     return (select(_table)
-          ..where((t) =>
-              t.syncState.equals('WAITING') |
-              t.syncState.equals('pending') |
-              ((t.syncState.equals('RETRY_PENDING') | t.syncState.equals('failed_retryable')) &
-                  (t.nextAttemptAt.isNull() | t.nextAttemptAt.isSmallerThan(Variable(now)))))
-          ..orderBy([(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.asc)])
+          ..where((t) => _isClaimable(t, now))
+          ..orderBy(
+              [(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.asc)])
           ..limit(limit))
         .get();
   }
@@ -51,43 +87,39 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
     final now = DateTime.now().toUtc();
     return transaction(() async {
       final call = await (select(_table)
-            ..where((t) =>
-                t.syncState.equals('WAITING') |
-                t.syncState.equals('pending') |
-                ((t.syncState.equals('RETRY_PENDING') | t.syncState.equals('failed_retryable')) &
-                    (t.nextAttemptAt.isNull() | t.nextAttemptAt.isSmallerOrEqualValue(now))))
-            ..orderBy([(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.asc)])
+            ..where((t) => _isClaimable(t, now))
+            ..orderBy([
+              (t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.asc)
+            ])
             ..limit(1))
           .getSingleOrNull();
 
       if (call == null) return null;
 
-      await (update(_table)..where((t) => t.idempotencyKey.equals(call.idempotencyKey)))
+      await (update(_table)
+            ..where((t) => t.idempotencyKey.equals(call.idempotencyKey)))
           .write(
-        const LocalCallsCompanion(
-          syncState: Value('UPLOADING'),
-        ),
+        const LocalCallsCompanion(syncState: Value(CallSyncState.uploading)),
       );
 
-      return call.copyWith(syncState: 'UPLOADING');
+      return call.copyWith(syncState: CallSyncState.uploading);
     });
   }
 
-  Future<int> recoverStuckUploadingCalls({Duration timeout = const Duration(minutes: 5)}) async {
-    return (update(_table)..where((t) => t.syncState.equals('UPLOADING') | t.syncState.equals('uploading')))
+  /// Returns rows stuck mid-upload — the process died between claiming a call
+  /// and recording its outcome — to the claimable pool.
+  Future<int> recoverStuckUploadingCalls() async {
+    return (update(_table)
+          ..where((t) => t.syncState.equals(CallSyncState.uploading)))
         .write(
-      const LocalCallsCompanion(
-        syncState: Value('WAITING'),
-      ),
+      const LocalCallsCompanion(syncState: Value(CallSyncState.waiting)),
     );
   }
 
   Future<void> markUploading(String idempotencyKey) async {
     await (update(_table)..where((t) => t.idempotencyKey.equals(idempotencyKey)))
         .write(
-      const LocalCallsCompanion(
-        syncState: Value('UPLOADING'),
-      ),
+      const LocalCallsCompanion(syncState: Value(CallSyncState.uploading)),
     );
   }
 
@@ -101,7 +133,7 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
       LocalCallsCompanion(
         serverCallId: Value(serverCallId),
         revision: Value(revision),
-        syncState: const Value('UPLOADED'),
+        syncState: const Value(CallSyncState.uploaded),
         lastErrorCode: const Value(null),
       ),
     );
@@ -116,10 +148,11 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
     final attempts = (existing?.attemptCount ?? 0) + 1;
 
     if (!retryable) {
-      await (update(_table)..where((t) => t.idempotencyKey.equals(idempotencyKey)))
+      await (update(_table)
+            ..where((t) => t.idempotencyKey.equals(idempotencyKey)))
           .write(
         LocalCallsCompanion(
-          syncState: const Value('FAILED'),
+          syncState: const Value(CallSyncState.failed),
           attemptCount: Value(attempts),
           lastErrorCode: Value(errorCode),
         ),
@@ -127,13 +160,14 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
       return;
     }
 
-    final delaySeconds = (1 << attempts).clamp(2, 600);
-    final nextAttempt = DateTime.now().toUtc().add(Duration(seconds: delaySeconds));
+    final delaySeconds = (1 << attempts.clamp(0, 16)).clamp(2, 600);
+    final nextAttempt =
+        DateTime.now().toUtc().add(Duration(seconds: delaySeconds));
 
     await (update(_table)..where((t) => t.idempotencyKey.equals(idempotencyKey)))
         .write(
       LocalCallsCompanion(
-        syncState: const Value('RETRY_PENDING'),
+        syncState: const Value(CallSyncState.retryPending),
         attemptCount: Value(attempts),
         nextAttemptAt: Value(nextAttempt),
         lastErrorCode: Value(errorCode),
@@ -145,7 +179,7 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
     await (update(_table)..where((t) => t.idempotencyKey.equals(idempotencyKey)))
         .write(
       const LocalCallsCompanion(
-        recordingUploadStatus: Value('uploaded'),
+        recordingUploadStatus: Value(RecordingUploadStatus.uploaded),
       ),
     );
   }
@@ -153,9 +187,7 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
   Future<void> setHasRecording(String idempotencyKey, bool hasRecording) async {
     await (update(_table)..where((t) => t.idempotencyKey.equals(idempotencyKey)))
         .write(
-      LocalCallsCompanion(
-        hasRecording: Value(hasRecording),
-      ),
+      LocalCallsCompanion(hasRecording: Value(hasRecording)),
     );
   }
 
@@ -170,24 +202,23 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
         hasRecording: const Value(true),
         recordingPath: Value(recordingPath),
         recordingMediaStoreId: Value(mediaStoreId),
-        recordingUploadStatus: const Value('pending'),
+        recordingUploadStatus: const Value(RecordingUploadStatus.pending),
       ),
     );
   }
 
-  Future<Map<String, int>> getSyncCounters() async {
-    final all = await select(_table).get();
+  Map<String, int> _countStates(List<LocalCall> all) {
     int uploaded = 0;
     int uploading = 0;
     int waiting = 0;
     int failed = 0;
 
     for (final c in all) {
-      if (c.syncState == 'UPLOADED' || c.syncState == 'synced' || c.syncState == 'skipped') {
+      if (CallSyncState.isUploaded(c.syncState)) {
         uploaded++;
-      } else if (c.syncState == 'UPLOADING' || c.syncState == 'uploading') {
+      } else if (CallSyncState.isInFlight(c.syncState)) {
         uploading++;
-      } else if (c.syncState == 'FAILED' || c.syncState == 'failed_permanent') {
+      } else if (CallSyncState.isPermanentFailure(c.syncState)) {
         failed++;
       } else {
         waiting++;
@@ -203,41 +234,25 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
     };
   }
 
-  Stream<Map<String, int>> watchSyncCounters() {
-    return select(_table).watch().map((all) {
-      int uploaded = 0;
-      int uploading = 0;
-      int waiting = 0;
-      int failed = 0;
+  Future<Map<String, int>> getSyncCounters() async =>
+      _countStates(await select(_table).get());
 
-      for (final c in all) {
-        if (c.syncState == 'UPLOADED' || c.syncState == 'synced' || c.syncState == 'skipped') {
-          uploaded++;
-        } else if (c.syncState == 'UPLOADING' || c.syncState == 'uploading') {
-          uploading++;
-        } else if (c.syncState == 'FAILED' || c.syncState == 'failed_permanent') {
-          failed++;
-        } else {
-          waiting++;
-        }
-      }
+  Stream<Map<String, int>> watchSyncCounters() =>
+      select(_table).watch().map(_countStates);
 
-      return {
-        'uploaded': uploaded,
-        'uploading': uploading,
-        'waiting': waiting,
-        'failed': failed,
-        'total': all.length,
-      };
-    });
-  }
-
+  /// Calls the server already has, whose audio is still owed to it.
+  ///
+  /// Keyed on [CallSyncState.uploaded] rather than "not pending": a recording
+  /// can only be posted to `/calls/{id}/recording`, so a server call id has to
+  /// exist first.
   Future<List<LocalCall>> getPendingRecordingUploads() {
     return (select(_table)
           ..where((t) =>
               t.hasRecording.equals(true) &
-              t.recordingUploadStatus.equals('pending') &
-              t.syncState.equals('synced')))
+              (t.recordingUploadStatus.equals(RecordingUploadStatus.pending) |
+                  t.recordingUploadStatus
+                      .equals(RecordingUploadStatus.failed)) &
+              t.syncState.equals(CallSyncState.uploaded)))
         .get();
   }
 
@@ -247,7 +262,9 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
           ..where((t) =>
               t.durationSeconds.isBiggerThanValue(0) &
               (t.hasRecording.equals(false) | t.recordingMediaStoreId.isNull()))
-          ..orderBy([(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)])
+          ..orderBy([
+            (t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)
+          ])
           ..limit(limit))
         .get();
   }
@@ -256,41 +273,68 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
     var query = select(_table);
     if (filter == 'pending') {
       query.where((t) =>
-          t.syncState.equals('pending') |
-          t.syncState.equals('failed_retryable') |
-          t.syncState.equals('uploading'));
+          t.syncState.equals(CallSyncState.waiting) |
+          t.syncState.equals(CallSyncState.retryPending) |
+          t.syncState.equals(CallSyncState.uploading));
     } else if (filter == 'failed') {
       query.where((t) =>
-          t.syncState.equals('failed_permanent') |
-          t.syncState.equals('failed_retryable'));
+          t.syncState.equals(CallSyncState.failed) |
+          t.syncState.equals(CallSyncState.retryPending));
     } else if (filter == 'synced') {
-      query.where((t) => t.syncState.equals('synced'));
+      query.where((t) => t.syncState.equals(CallSyncState.uploaded));
     }
-    query.orderBy([(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)]);
+    query.orderBy(
+        [(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)]);
     return query.get();
   }
 
+  /// Puts one call back at the head of the queue, clearing its backoff.
+  ///
+  /// A failed recording is reset to pending alongside it: a manual retry means
+  /// the user wants the whole call re-attempted, audio included.
   Future<void> retryCall(String idempotencyKey) async {
+    await (update(_table)
+          ..where((t) =>
+              t.idempotencyKey.equals(idempotencyKey) &
+              t.recordingUploadStatus.equals(RecordingUploadStatus.failed)))
+        .write(
+      const LocalCallsCompanion(
+        recordingUploadStatus: Value(RecordingUploadStatus.pending),
+      ),
+    );
+
     await (update(_table)..where((t) => t.idempotencyKey.equals(idempotencyKey)))
         .write(
       const LocalCallsCompanion(
-        syncState: Value('pending'),
+        syncState: Value(CallSyncState.waiting),
         nextAttemptAt: Value(null),
         lastErrorCode: Value(null),
+        attemptCount: Value(0),
       ),
     );
   }
 
   Future<int> retryAllFailed() async {
-    return (update(_table)
+    Expression<bool> isFailed($LocalCallsTable t) =>
+        t.syncState.equals(CallSyncState.failed) |
+        t.syncState.equals(CallSyncState.retryPending);
+
+    await (update(_table)
           ..where((t) =>
-              t.syncState.equals('failed_permanent') |
-              t.syncState.equals('failed_retryable')))
+              isFailed(t) &
+              t.recordingUploadStatus.equals(RecordingUploadStatus.failed)))
         .write(
       const LocalCallsCompanion(
-        syncState: Value('pending'),
+        recordingUploadStatus: Value(RecordingUploadStatus.pending),
+      ),
+    );
+
+    return (update(_table)..where(isFailed)).write(
+      const LocalCallsCompanion(
+        syncState: Value(CallSyncState.waiting),
         nextAttemptAt: Value(null),
         lastErrorCode: Value(null),
+        attemptCount: Value(0),
       ),
     );
   }
@@ -300,7 +344,9 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
           ..where((t) =>
               t.startedAt.isBiggerOrEqualValue(startUtc) &
               t.startedAt.isSmallerOrEqualValue(endUtc))
-          ..orderBy([(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)]))
+          ..orderBy([
+            (t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)
+          ]))
         .get();
   }
 
@@ -324,7 +370,8 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
       query.where((t) => t.phoneNumber.length.isBiggerThanValue(4));
     }
 
-    query.orderBy([(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)]);
+    query.orderBy(
+        [(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)]);
     return query.get();
   }
 
@@ -348,32 +395,47 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
       query.where((t) => t.phoneNumber.length.isBiggerThanValue(4));
     }
 
-    query.orderBy([(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)]);
+    query.orderBy(
+        [(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)]);
     return query.watch();
   }
 
   Stream<List<LocalCall>> watchAllCalls() {
     return (select(_table)
-          ..orderBy([(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)]))
+          ..orderBy([
+            (t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)
+          ]))
         .watch();
   }
 
   Future<int> getUnsyncedCount() async {
-    final unsynced = await (select(_table)..where((t) => t.syncState.isNotValue('synced'))).get();
+    final unsynced = await (select(_table)
+          ..where((t) => t.syncState.isNotValue(CallSyncState.uploaded)))
+        .get();
     return unsynced.length;
   }
 
   Future<int> deleteSyncedCalls() async {
-    return (delete(_table)..where((t) => t.syncState.equals('synced'))).go();
+    return (delete(_table)
+          ..where((t) => t.syncState.equals(CallSyncState.uploaded)))
+        .go();
   }
 
   /// Purges synced calls older than [cutoff] (e.g. 180 days) to prevent
   /// unbounded SQLite storage growth on low-end devices.
+  ///
+  /// Rows whose audio is still owed to the server survive regardless of age:
+  /// deleting one is the single way to lose a recording permanently.
   Future<int> deleteSyncedCallsOlderThan(DateTime cutoff) async {
     return (delete(_table)
           ..where((t) =>
-              t.syncState.equals('synced') &
-              t.startedAt.isSmallerThanValue(cutoff)))
+              t.syncState.equals(CallSyncState.uploaded) &
+              t.startedAt.isSmallerThanValue(cutoff) &
+              (t.hasRecording.equals(false) |
+                  t.recordingUploadStatus
+                      .equals(RecordingUploadStatus.uploaded) |
+                  t.recordingUploadStatus
+                      .equals(RecordingUploadStatus.absent))))
         .go();
   }
 
@@ -381,9 +443,8 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
   Future<int> deletePermanentFailuresOlderThan(DateTime cutoff) async {
     return (delete(_table)
           ..where((t) =>
-              t.syncState.equals('failed_permanent') &
+              t.syncState.equals(CallSyncState.failed) &
               t.startedAt.isSmallerThanValue(cutoff)))
         .go();
   }
 }
-

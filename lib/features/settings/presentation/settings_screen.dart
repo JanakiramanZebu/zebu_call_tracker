@@ -44,6 +44,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     if (state == AppLifecycleState.resumed && mounted) {
       ref.invalidate(permissionStatusProvider);
       ref.invalidate(backgroundStatusProvider);
+      // A background run leaves no trace in Dart, so resume is the moment to
+      // re-read what happened while this screen was away.
+      ref.invalidate(nativeSyncStatusProvider);
     }
   }
 
@@ -56,10 +59,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     final feed = ref.watch(callFeedProvider).value;
     final counters = ref.watch(syncCountersProvider).value ?? const {};
     final isOnline = ref.watch(connectivityProvider).value ?? true;
-    final lastSyncResult = ref.watch(syncServiceProvider).value;
+    // What the NATIVE coordinator recorded, not what this Dart session did.
+    final nativeSync = ref.watch(nativeSyncStatusProvider).value;
+
+    // Counted the same way the Permissions screen counts, including the
+    // background-activity card, so the two screens cannot disagree.
+    final canTrack = perms?.canTrack ?? false;
+    final permissionsGranted = perms?.grantedCount(
+      ignoringBatteryOptimizations:
+          background?.ignoringBatteryOptimizations ?? false,
+    );
 
     final isTrackingHealthy = (background?.ignoringBatteryOptimizations ?? false) &&
-        (perms?.readCallLog ?? false);
+        canTrack;
 
     final pendingCount = counters['waiting'] ?? 0;
     final failedCount = counters['failed'] ?? 0;
@@ -232,28 +244,60 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               _SettingsTile(
                 icon: Icons.cloud_done_outlined,
                 title: 'Sync Status',
+                subtitle: !isOnline
+                    ? 'Waiting for a connection'
+                    : (nativeSync?.error != null
+                        ? 'Last error: ${nativeSync!.error}'
+                        : null),
                 valueWidget: StatusPill(
-                  label: isOnline ? 'Connected' : 'Offline',
-                  color: isOnline ? AppTokens.success : AppTokens.danger,
+                  label: !isOnline
+                      ? 'Offline'
+                      : (nativeSync?.statusLabel ?? 'Checking…'),
+                  color: !isOnline
+                      ? AppTokens.danger
+                      : (nativeSync == null
+                          ? AppTokens.textMuted
+                          : (nativeSync.isHealthy
+                              ? AppTokens.success
+                              : (nativeSync.isUnauthenticated
+                                  ? AppTokens.danger
+                                  : AppTokens.warning))),
                 ),
               ),
               _SettingsTile(
                 icon: Icons.schedule_rounded,
-                title: 'Last Successful Sync',
-                value: lastSyncResult?.isSuccess == true
-                    ? 'Just now'
-                    : (uploadedCount > 0 ? 'Active' : 'Pending'),
+                title: 'Last Sync',
+                // The real timestamp the background coordinator wrote. This
+                // tile used to print 'Just now'/'Active'/'Pending' inferred
+                // from the current session, which said nothing about whether
+                // the phone had actually reached the server.
+                subtitle: nativeSync?.hasRun == true
+                    ? '${nativeSync!.syncedCount} '
+                        '${nativeSync.syncedCount == 1 ? "call" : "calls"} on that run'
+                    : 'No background run recorded yet',
+                value: nativeSync?.lastSyncLabel ?? '—',
+                valueColor: nativeSync?.hasRun == true
+                    ? AppTokens.textSecondary
+                    : AppTokens.textMuted,
+              ),
+              _SettingsTile(
+                icon: Icons.cloud_done_rounded,
+                title: 'Synced to Server',
+                value: '$uploadedCount calls',
+                valueColor: uploadedCount > 0
+                    ? AppTokens.success
+                    : AppTokens.textMuted,
               ),
               _SettingsTile(
                 icon: Icons.cloud_upload_outlined,
                 title: 'Pending Uploads',
-                value: '$pendingCount calls',
+                value: '$pendingCount ${pendingCount == 1 ? "call" : "calls"}',
                 valueColor: pendingCount > 0 ? AppTokens.warning : AppTokens.textMuted,
               ),
               _SettingsTile(
                 icon: Icons.error_outline_rounded,
                 title: 'Failed Records',
-                value: '$failedCount records',
+                value: '$failedCount ${failedCount == 1 ? "record" : "records"}',
                 valueColor: failedCount > 0 ? AppTokens.danger : AppTokens.textMuted,
               ),
               _SettingsTile(
@@ -265,6 +309,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                 onTap: () async {
                   await ref.read(syncServiceProvider.notifier).triggerSync();
                   ref.invalidate(syncCountersProvider);
+                  ref.invalidate(nativeSyncStatusProvider);
                 },
               ),
               if (failedCount > 0)
@@ -277,6 +322,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                     await ref.read(callsDaoProvider).retryAllFailed();
                     await ref.read(syncServiceProvider.notifier).triggerSync();
                     ref.invalidate(syncCountersProvider);
+                    ref.invalidate(nativeSyncStatusProvider);
                   },
                 ),
               _SettingsTile(
@@ -346,15 +392,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               _SettingsTile(
                 icon: Icons.shield_outlined,
                 title: 'Permissions Summary',
-                subtitle: 'Call logs, phone state, audio, notifications',
+                subtitle: permissionsGranted == null
+                    ? 'Reading current grants…'
+                    : (permissionsGranted == PermissionSnapshot.total
+                        ? 'All access granted'
+                        : (canTrack
+                            ? 'Tracking active; some optional access missing'
+                            : 'Call log access required to track calls')),
                 valueWidget: StatusPill(
-                  label: perms == null
+                  label: permissionsGranted == null
                       ? '—'
-                      : '${perms.grantedCount}/${PermissionSnapshot.total} Granted',
-                  color: (perms?.grantedCount ?? 0) == PermissionSnapshot.total
+                      : '$permissionsGranted/${PermissionSnapshot.total} Granted',
+                  color: permissionsGranted == PermissionSnapshot.total
                       ? AppTokens.success
-                      : AppTokens.warning,
-                  icon: (perms?.grantedCount ?? 0) == PermissionSnapshot.total
+                      : (canTrack ? AppTokens.warning : AppTokens.danger),
+                  icon: permissionsGranted == PermissionSnapshot.total
                       ? Icons.check_rounded
                       : Icons.warning_amber_rounded,
                 ),

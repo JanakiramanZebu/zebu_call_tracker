@@ -12,15 +12,23 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
- * Persistent foreground service to prevent the OS from killing the app process
- * when it is swiped away from the Recent Apps list. This ensures WorkManager
- * and BroadcastReceivers continue to fire reliably.
+ * Keeps the process warm so ingest and upload run at conversation speed rather
+ * than at WorkManager's 15-minute floor.
+ *
+ * An accelerator, NOT the mechanism. A `dataSync` foreground service is capped
+ * at six hours per 24 from Android 15, OEM battery managers stop it earlier
+ * than that, and Android 12+ forbids starting it from the background — so
+ * anything that must survive the app being killed belongs in
+ * [BackgroundScheduler.ensurePeriodic], which is what actually guarantees
+ * delivery. If this service never starts, the app still syncs; it just syncs
+ * on the periodic schedule.
  */
 class CallTrackingService : Service() {
 
@@ -41,8 +49,9 @@ class CallTrackingService : Service() {
                 } catch (e: Exception) {
                     Log.e(TAG, "Error in periodic tracking loop: ${e.message}")
                 }
-                // Sleep for 15 minutes before the next run
-                delay(15 * 60 * 1000L)
+                // Faster than WorkManager's floor — the whole point of being
+                // here. The periodic jobs remain armed underneath regardless.
+                delay(LOOP_INTERVAL_MILLIS)
             }
         }
     }
@@ -105,6 +114,23 @@ class CallTrackingService : Service() {
         }
     }
 
+    /**
+     * Android 15+ calls this when a `dataSync` service exhausts its six-hour
+     * daily budget. Returning without stopping earns a
+     * ForegroundServiceDidNotStopInTimeException crash, so stand down cleanly
+     * and let the WorkManager schedule carry the load until the quota resets.
+     */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Log.i(TAG, "Foreground service quota exhausted; stopping. Periodic work continues.")
+        BackgroundScheduler.ensurePeriodic(applicationContext)
+        stopSelf(startId)
+    }
+
+    override fun onDestroy() {
+        serviceScope.cancel()
+        super.onDestroy()
+    }
+
     override fun onBind(intent: Intent?): IBinder? {
         // Not a bound service
         return null
@@ -113,6 +139,7 @@ class CallTrackingService : Service() {
     companion object {
         private const val TAG = "CallTrackingService"
         private const val NOTIF_ID = 1003
+        private const val LOOP_INTERVAL_MILLIS = 15 * 60 * 1000L
         
         const val ACTION_TRIGGER_NOW = "in.mynt.zebu.TRIGGER_NOW"
         const val EXTRA_REASON = "reason"

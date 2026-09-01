@@ -42,6 +42,10 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final period = ref.watch(dashboardPeriodProvider);
     final rangeInfo = ref.watch(periodRangeInfoProvider);
     final statsAsync = ref.watch(analyticsPeriodStatsProvider);
+    // The equivalent window immediately before this one. Every trend badge is
+    // derived from it; null (All time, or no prior data) hides the badge rather
+    // than inventing a number.
+    final previousStats = ref.watch(analyticsPreviousStatsProvider).value;
     final sparklineAsync = ref.watch(analyticsSparklineProvider);
     final activityAsync = ref.watch(analyticsHourlyActivityProvider);
     final excludeNumbers = ref.watch(analyticsExcludeInternalProvider);
@@ -252,7 +256,13 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
 
                 // ── Active Tab View ──────────────────────────────────────────
                 if (_tabIndex == 0)
-                  _buildSummaryTab(context, stats, sparklineData, activityData)
+                  _buildSummaryTab(
+                    context,
+                    stats,
+                    previousStats,
+                    sparklineData,
+                    activityData,
+                  )
                 else
                   _buildAnalysisTab(context, stats),
               ],
@@ -266,6 +276,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   Widget _buildSummaryTab(
     BuildContext context,
     CallStats stats,
+    CallStats? previous,
     List<double> sparklineData,
     ({List<double> incoming, List<double> outgoing, List<double> missed}) activityData,
   ) {
@@ -295,7 +306,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 duration: Fmt.exactDuration(stats.incomingDurationSeconds),
                 icon: Icons.call_received_rounded,
                 color: AppTokens.callIncoming,
-                trend: '+8%',
+                trend: trendLabel(stats.incoming, previous?.incoming),
                 onTap: () => CardAnalyticalPopup.show(
                   context,
                   category: PopupFilterCategory.incoming,
@@ -311,7 +322,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 duration: Fmt.exactDuration(stats.outgoingDurationSeconds),
                 icon: Icons.call_made_rounded,
                 color: AppTokens.callOutgoing,
-                trend: '+15%',
+                trend: trendLabel(stats.outgoing, previous?.outgoing),
                 onTap: () => CardAnalyticalPopup.show(
                   context,
                   category: PopupFilterCategory.outgoing,
@@ -332,7 +343,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 duration: '0h  0m 0s',
                 icon: Icons.call_missed_rounded,
                 color: AppTokens.callMissed,
-                trend: '-5%',
+                trend: trendLabel(stats.missed, previous?.missed),
+                higherIsWorse: true,
                 onTap: () => CardAnalyticalPopup.show(
                   context,
                   category: PopupFilterCategory.missed,
@@ -348,7 +360,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 duration: '0h  0m 0s',
                 icon: Icons.phone_disabled_rounded,
                 color: AppTokens.callRejected,
-                trend: '-12%',
+                trend: trendLabel(stats.rejected, previous?.rejected),
+                higherIsWorse: true,
                 onTap: () => CardAnalyticalPopup.show(
                   context,
                   category: PopupFilterCategory.rejected,
@@ -368,7 +381,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 count: '${stats.neverAttended}',
                 icon: Icons.phone_paused_rounded,
                 color: AppTokens.callNeverAttended,
-                trend: '+6%',
+                trend: trendLabel(stats.neverAttended, previous?.neverAttended),
+                higherIsWorse: true,
                 onTap: () => CardAnalyticalPopup.show(
                   context,
                   category: PopupFilterCategory.neverAttended,
@@ -383,7 +397,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 count: '${stats.notPickupByClient}',
                 icon: Icons.call_end_rounded,
                 color: AppTokens.textMuted,
-                trend: '-2%',
+                trend: trendLabel(stats.notPickupByClient, previous?.notPickupByClient),
+                higherIsWorse: true,
                 onTap: () => CardAnalyticalPopup.show(
                   context,
                   category: PopupFilterCategory.notPickup,
@@ -403,7 +418,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 count: '${stats.uniqueCalls}',
                 icon: Icons.contact_phone_rounded,
                 color: AppTokens.brandPurple,
-                trend: '+4%',
+                trend: trendLabel(stats.uniqueCalls, previous?.uniqueCalls),
                 onTap: () => CardAnalyticalPopup.show(
                   context,
                   category: PopupFilterCategory.uniqueCalls,
@@ -418,7 +433,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 count: Fmt.duration(stats.averageDurationSeconds),
                 icon: Icons.timer_outlined,
                 color: AppTokens.brandIndigo,
-                trend: '+9%',
+                trend: trendLabel(stats.averageDurationSeconds, previous?.averageDurationSeconds),
                 onTap: () => CardAnalyticalPopup.show(
                   context,
                   category: PopupFilterCategory.totalCalls,
@@ -483,15 +498,10 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     BuildContext context,
     CallStats stats,
   ) {
-    final answeredRate = stats.total == 0
-        ? 0.0
-        : (stats.answered / stats.total * 100);
-    final missedRate = stats.total == 0
-        ? 0.0
-        : (stats.missed / stats.total * 100);
-    final recordingRate = stats.total == 0
-        ? 0.0
-        : (stats.recordingsMatched / stats.total * 100);
+    final answeredRate = stats.answeredRate;
+    final missedRate = stats.missedRate;
+    // Against recordable calls, not every call — see CallStats.recordingCoverageRate.
+    final recordingRate = stats.recordingCoverageRate;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -648,6 +658,20 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                   ),
                 ],
               ),
+              const SizedBox(height: 8),
+              Text(
+                stats.recordingEligible == 0
+                    ? 'No connected calls in this period.'
+                    : 'Of ${stats.recordingEligible} recordable '
+                        '${stats.recordingEligible == 1 ? "call" : "calls"}. '
+                        '${stats.recordingsNotApplicable} unanswered '
+                        '${stats.recordingsNotApplicable == 1 ? "call" : "calls"} excluded.',
+                style: const TextStyle(
+                  color: AppTokens.textMuted,
+                  fontSize: 11,
+                  height: 1.4,
+                ),
+              ),
               const SizedBox(height: 14),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -677,9 +701,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   }
 
   Widget _buildInsightsGrid(CallStats stats) {
-    final missedRate = stats.total == 0
-        ? '0.0%'
-        : '${(stats.missed / stats.total * 100).toStringAsFixed(1)}%';
+    final missedRate = '${stats.missedRate.toStringAsFixed(1)}%';
 
     return Row(
       children: [
@@ -687,7 +709,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
           child: _InsightTile(
             icon: Icons.schedule_rounded,
             label: 'Peak Time',
-            value: '10 AM – 12 PM',
+            // Computed from the period's connected calls. This tile used to
+            // print a fixed "10 AM – 12 PM" whatever the data said.
+            value: _peakWindowLabel(stats.peakHourStart),
             color: AppTokens.brandElectric,
           ),
         ),
@@ -702,6 +726,19 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         ),
       ],
     );
+  }
+
+  /// Formats the busiest two-hour band, e.g. `10 AM – 12 PM`.
+  static String _peakWindowLabel(int? startHour) {
+    if (startHour == null) return 'No data';
+    String label(int hour) {
+      final h = hour % 24;
+      final suffix = h < 12 ? 'AM' : 'PM';
+      final display = h % 12 == 0 ? 12 : h % 12;
+      return '$display $suffix';
+    }
+
+    return '${label(startHour)} – ${label(startHour + 2)}';
   }
 
   String _periodLabel(DashboardPeriod p) => switch (p) {

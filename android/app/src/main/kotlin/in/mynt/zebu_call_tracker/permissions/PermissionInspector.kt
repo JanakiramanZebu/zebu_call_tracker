@@ -18,8 +18,17 @@ object PermissionInspector {
     const val PHONE_STATE = Manifest.permission.READ_PHONE_STATE
     const val CALL_LOG = Manifest.permission.READ_CALL_LOG
     const val CONTACTS = Manifest.permission.READ_CONTACTS
-    const val RECORD_AUDIO = Manifest.permission.RECORD_AUDIO
     const val PHONE_NUMBERS = Manifest.permission.READ_PHONE_NUMBERS
+
+    /**
+     * Referenced only by [in.mynt.zebu_call_tracker.recording.RecordingCapabilityProbe],
+     * which reports on the platform's *own* recording ability.
+     *
+     * Deliberately absent from [snapshot]: this app captures no audio and does
+     * not declare RECORD_AUDIO, so reporting it always returned false and
+     * invited the reader to conclude something was broken.
+     */
+    const val RECORD_AUDIO = Manifest.permission.RECORD_AUDIO
 
     fun isGranted(context: Context, permission: String): Boolean =
         ContextCompat.checkSelfPermission(context, permission) ==
@@ -29,7 +38,6 @@ object PermissionInspector {
         "readPhoneState" to isGranted(context, PHONE_STATE),
         "readCallLog" to isGranted(context, CALL_LOG),
         "readContacts" to isGranted(context, CONTACTS),
-        "recordAudio" to isGranted(context, RECORD_AUDIO),
         "readPhoneNumbers" to isGranted(context, PHONE_NUMBERS),
     )
 }

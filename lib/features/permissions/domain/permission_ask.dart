@@ -29,6 +29,7 @@ class PermissionAsk {
     this.permission,
     this.kind = AskKind.runtime,
     this.essential = false,
+    this.costIfSkipped,
   });
 
   /// Stable identity, used to track per-ask busy/blocked state without relying
@@ -47,7 +48,17 @@ class PermissionAsk {
 
   /// Essential permissions block tracking entirely when denied; the rest only
   /// reduce detail.
+  ///
+  /// Only mark an ask essential when the app genuinely cannot do its job
+  /// without it. Everything essential gates the onboarding button, and two of
+  /// these asks are settings-page grants the app cannot force — marking those
+  /// essential (as an earlier revision marked all six) means a user who
+  /// declines one can never leave the walkthrough.
   final bool essential;
+
+  /// What the user loses by skipping this. Shown on optional asks so "Optional"
+  /// is an informed choice rather than a shrug.
+  final String? costIfSkipped;
 }
 
 /// The full ask list, resolved against the current grants.
@@ -82,7 +93,11 @@ List<PermissionAsk> permissionAsks(
         'Required to prevent the OS from pausing upload jobs.',
     icon: Icons.battery_saver_rounded,
     granted: background?.ignoringBatteryOptimizations ?? false,
-    essential: true,
+    // Cannot be forced: it is a system settings page, and the OS may refuse.
+    // Strongly recommended, never blocking — the app degrades to whatever
+    // scheduling the OS allows.
+    costIfSkipped:
+        'Sync may be delayed by hours when the phone is idle.',
   ),
   PermissionAsk(
     id: 'contacts',
@@ -93,7 +108,7 @@ List<PermissionAsk> permissionAsks(
         'Required for accurate caller identification.',
     icon: Icons.contacts_outlined,
     granted: perms.readContacts,
-    essential: true,
+    costIfSkipped: 'Calls are logged by number, without a client name.',
   ),
   PermissionAsk(
     id: 'recordings',
@@ -104,7 +119,7 @@ List<PermissionAsk> permissionAsks(
         'the call records. Required for recording uploads.',
     icon: Icons.graphic_eq_rounded,
     granted: perms.readMediaAudio,
-    essential: true,
+    costIfSkipped: 'Call records still sync, but without their audio.',
   ),
   PermissionAsk(
     id: 'notifications',
@@ -115,7 +130,7 @@ List<PermissionAsk> permissionAsks(
         'Required to keep you informed of sync activity.',
     icon: Icons.notifications_none_rounded,
     granted: perms.notifications,
-    essential: true,
+    costIfSkipped: 'Sync runs silently, with no progress shown.',
   ),
   PermissionAsk(
     id: 'overlay',
@@ -126,9 +141,28 @@ List<PermissionAsk> permissionAsks(
         'and verification. Required for immediate post-call action.',
     icon: Icons.picture_in_picture_rounded,
     granted: perms.overlayWindow,
-    essential: true,
+    costIfSkipped: 'No summary card appears after a call.',
   ),
 ];
+
+/// Whether the ask list as a whole clears the bar for entering the app.
+extension PermissionAskList on List<PermissionAsk> {
+  Iterable<PermissionAsk> get missing => where((a) => !a.granted);
+
+  Iterable<PermissionAsk> get missingEssential =>
+      missing.where((a) => a.essential);
+
+  Iterable<PermissionAsk> get missingOptional =>
+      missing.where((a) => !a.essential);
+
+  int get grantedCount => where((a) => a.granted).length;
+
+  /// The gate. Tracking works the moment the essentials are in place; the rest
+  /// change how much detail is captured, not whether capture happens.
+  bool get canProceed => missingEssential.isEmpty;
+
+  bool get allGranted => missing.isEmpty;
+}
 
 /// Outcome of a single request, so the caller can react without inspecting
 /// [PermissionStatus] in the widget layer.

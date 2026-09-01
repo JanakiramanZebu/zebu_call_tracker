@@ -27,6 +27,7 @@ object SimInfoReader {
                 mapOf(
                     "subscriptionId" to info.subscriptionId,
                     "simSlotIndex" to info.simSlotIndex,
+                    "iccId" to info.iccId,
                     "carrierName" to info.carrierName?.toString(),
                     "displayName" to info.displayName?.toString(),
                     "countryIso" to info.countryIso,
@@ -36,6 +37,46 @@ object SimInfoReader {
             // Some OEMs additionally gate this behind carrier privileges.
             emptyList()
         }
+    }
+
+    /**
+     * Maps `CallLog.Calls.PHONE_ACCOUNT_ID` to a 1-based SIM slot.
+     *
+     * The call log stores a subscription id on most OEMs, an opaque ICCID on
+     * some, and null on single-SIM handsets. Anything that cannot be resolved
+     * returns slot 1 rather than failing: an unattributed call is still a valid
+     * call record, and the feasibility report is explicit that SIM attribution
+     * is best-effort.
+     *
+     * Pass the result of [activeSubscriptions] so a batch resolves against one
+     * lookup instead of querying SubscriptionManager per row.
+     */
+    fun slotForAccountId(
+        accountId: String?,
+        subscriptions: List<Map<String, Any?>>,
+    ): Int {
+        if (accountId.isNullOrBlank() || subscriptions.isEmpty()) return 1
+
+        // Usual case: the account id IS the subscription id.
+        val asSubscriptionId = accountId.toIntOrNull()
+        if (asSubscriptionId != null) {
+            val match = subscriptions.firstOrNull {
+                (it["subscriptionId"] as? Number)?.toInt() == asSubscriptionId
+            }
+            val slot = (match?.get("simSlotIndex") as? Number)?.toInt()
+            // simSlotIndex is 0-based; the wire format and UI are 1-based.
+            if (slot != null && slot >= 0) return slot + 1
+        }
+
+        // ICCID form: some OEMs write the SIM serial instead.
+        val byIccid = subscriptions.firstOrNull {
+            (it["iccId"] as? String)?.isNotBlank() == true &&
+                it["iccId"] == accountId
+        }
+        val iccSlot = (byIccid?.get("simSlotIndex") as? Number)?.toInt()
+        if (iccSlot != null && iccSlot >= 0) return iccSlot + 1
+
+        return 1
     }
 
     /**

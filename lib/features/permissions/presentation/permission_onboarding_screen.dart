@@ -54,8 +54,6 @@ class _PermissionOnboardingScreenState
           ),
           data: (perms) {
             final asks = permissionAsks(perms, background: background);
-            final grantedCount = asks.where((a) => a.granted).length;
-            final allGranted = grantedCount == asks.length;
 
             return Column(
               children: [
@@ -64,10 +62,15 @@ class _PermissionOnboardingScreenState
                   child: ListView(
                     padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
                     children: [
-                      AskProgress(granted: grantedCount, total: asks.length),
+                      AskProgress(
+                        granted: asks.grantedCount,
+                        total: asks.length,
+                      ),
                       const SizedBox(height: 16),
                       const Text(
-                        'All permissions are required for full autonomous call logging, recording uploads, and background syncing.',
+                        'Phone and call log access is required to track calls at '
+                        'all. The rest are optional — each one adds detail, and '
+                        'you can grant them later from Settings.',
                         style: TextStyle(
                           color: AppTokens.textSecondary,
                           fontSize: 13,
@@ -88,7 +91,7 @@ class _PermissionOnboardingScreenState
                   ),
                 ),
                 _Footer(
-                  allGranted: allGranted,
+                  asks: asks,
                   finishing: _finishing,
                   onContinue: _finish,
                 ),
@@ -137,12 +140,12 @@ class _Header extends StatelessWidget {
 
 class _Footer extends StatelessWidget {
   const _Footer({
-    required this.allGranted,
+    required this.asks,
     required this.finishing,
     required this.onContinue,
   });
 
-  final bool allGranted;
+  final List<PermissionAsk> asks;
   final bool finishing;
   final VoidCallback onContinue;
 
@@ -156,34 +159,70 @@ class _Footer extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (!allGranted)
-              const Padding(
-                padding: EdgeInsets.only(bottom: 12),
-                child: Row(
-                  children: [
-                    Icon(
-                      Icons.info_outline_rounded,
-                      size: 16,
-                      color: AppTokens.warning,
-                    ),
-                    SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        'All permissions are required to activate automatic call tracking.',
-                        style: TextStyle(
-                          color: AppTokens.warning,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
+            if (!asks.canProceed)
+              _FooterNote(
+                icon: Icons.lock_outline_rounded,
+                color: AppTokens.danger,
+                message:
+                    'Grant ${_join(asks.missingEssential.map((a) => a.title))} '
+                    'to start tracking calls.',
+              )
+            else if (asks.missingOptional.isNotEmpty)
+              _FooterNote(
+                icon: Icons.info_outline_rounded,
+                color: AppTokens.warning,
+                message:
+                    '${asks.missingOptional.length} optional '
+                    '${asks.missingOptional.length == 1 ? "permission is" : "permissions are"} '
+                    'not granted. You can add them any time from Settings.',
               ),
             LoadingFilledButton(
-              label: 'Start tracking',
+              label: asks.allGranted ? 'Start tracking' : 'Continue',
               loading: finishing,
-              onPressed: allGranted ? onContinue : null,
+              onPressed: asks.canProceed ? onContinue : null,
+            ),
+          ],
+        ),
+      );
+}
+
+/// Joins titles into readable prose: "A", "A and B", "A, B and C".
+String _join(Iterable<String> parts) {
+  final list = parts.toList();
+  if (list.isEmpty) return '';
+  if (list.length == 1) return list.single;
+  return '${list.take(list.length - 1).join(', ')} and ${list.last}';
+}
+
+class _FooterNote extends StatelessWidget {
+  const _FooterNote({
+    required this.icon,
+    required this.color,
+    required this.message,
+  });
+
+  final IconData icon;
+  final Color color;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, size: 16, color: color),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                message,
+                style: TextStyle(
+                  color: color,
+                  fontSize: 12,
+                  height: 1.4,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
             ),
           ],
         ),

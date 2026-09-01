@@ -64,11 +64,32 @@ class CallSyncWorker(
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         Log.i(TAG, "CallSyncWorker starting background sync run...")
         val outcome = SyncCoordinator.runSync(applicationContext, "workmanager_job")
-        
-        return@withContext if (outcome.failedCount == 0) {
-            Result.success()
-        } else {
-            Result.retry()
+
+        Log.i(
+            TAG,
+            "CallSyncWorker finished: status=${outcome.status} " +
+                "uploaded=${outcome.uploadedCount} failed=${outcome.failedCount} " +
+                "moreWork=${outcome.hasMoreWork}"
+        )
+
+        return@withContext when {
+            // Budget exhausted or the run gave up with rows still queued.
+            // Retry is the only way back in without cancelling ourselves —
+            // WORK_SYNC_NOW is this worker's own unique name.
+            outcome.hasMoreWork -> Result.retry()
+
+            // Another run already holds the lock; it will finish the queue.
+            outcome.status == "ALREADY_RUNNING" -> Result.success()
+
+            // No credentials yet. Retrying on a backoff would spin until the
+            // user signs in; the periodic job and the post-sign-in trigger
+            // both cover that case.
+            outcome.status == "SKIPPED_NO_AUTH" -> Result.success()
+
+            // Individual calls failed but each carries its own next_attempt_at,
+            // so the queue reschedules itself. Reporting failure here would add
+            // a second, competing backoff on top of that.
+            else -> Result.success()
         }
     }
 
