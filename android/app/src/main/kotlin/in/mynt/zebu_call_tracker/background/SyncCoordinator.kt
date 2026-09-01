@@ -866,10 +866,17 @@ object SyncCoordinator {
                 val json = JSONObject(responseBody)
                 val isSuccess = json.optBoolean("success", false)
                 val data = json.optJSONObject("data")
-                val tokens = data?.optJSONObject("tokens")
+
+                // `/auth/refresh` returns a bare TokenPair in `data`; only
+                // `/auth/login` and `/mobile/register` nest it under `tokens`.
+                // Looking solely for the nested shape meant every refresh
+                // returned null, which this reports as AUTH_EXPIRED — fatal and
+                // non-retryable — so the outbox halted permanently 30 minutes
+                // after sign-in and its rows were marked FAILED for good.
+                val tokens = data?.optJSONObject("tokens") ?: data
 
                 val newAccessToken = tokens?.optString("access_token")
-                val newRefreshToken = tokens?.optString("refresh_token")
+                val newRefreshToken = tokens?.optString("refresh_token")?.takeIf { it.isNotBlank() }
 
                 if (!newAccessToken.isNullOrBlank()) {
                     IngestStore.updateAuthTokens(context, newAccessToken, newRefreshToken)

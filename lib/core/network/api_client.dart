@@ -138,8 +138,15 @@ class ApiClient {
       }
 
       final data = body['data'] as Map<String, dynamic>;
-      final tokens = data['tokens'] as Map<String, dynamic>?;
-      if (tokens == null) {
+
+      // `/auth/refresh` answers with a bare TokenPair — `data.access_token` —
+      // while `/auth/login` and `/mobile/register` nest the same object under
+      // `data.tokens`. Reading only the nested shape found nothing on every
+      // refresh, and the `null` was read as "session revoked": the store was
+      // cleared and the user thrown back to the login screen 30 minutes after
+      // signing in, with the queued calls still unsent.
+      final tokens = data['tokens'] as Map<String, dynamic>? ?? data;
+      if (tokens['access_token'] is! String) {
         await _handleRevokedSession();
         completer.complete(false);
         return false;
