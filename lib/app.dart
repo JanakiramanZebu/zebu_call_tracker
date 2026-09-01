@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'core/config/app_config.dart';
+import 'core/network/api_client.dart';
+import 'core/network/api_client_provider.dart';
 import 'core/network/connectivity_service.dart';
 import 'core/notifications/notification_service.dart';
 import 'core/theme/app_theme.dart';
@@ -41,6 +43,15 @@ class AppGate extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // The server has refused this session and ApiClient has cleared it. Until
+    // this listener existed the app carried on showing the signed-in shell
+    // holding no credential, failing every request, until it was force-closed.
+    // Rebuilding the controller re-reads storage, finds nothing, and routes to
+    // sign-in; LoginScreen reads the reason and says why.
+    ref.listen<SessionRevokedReason?>(sessionRevocationProvider, (_, next) {
+      if (next != null) ref.invalidate(authControllerProvider);
+    });
+
     final auth = ref.watch(authControllerProvider);
 
     final screen = auth.when(
@@ -53,17 +64,52 @@ class AppGate extends ConsumerWidget {
       data: (session) {
         if (session == null) return const LoginScreen(key: ValueKey('login'));
 
-        // Signed in: the permission walkthrough runs once per install.
+        // Signed in. The walkthrough runs once per install — but finishing it
+        // is not a promise that the permissions are still there. Android lets
+        // the user revoke call-log access at any time afterwards, and the flag
+        // below is a one-way `SharedPreferences` bool that cannot notice.
+        // Before this check, revoking it left the user inside the app looking
+        // at an empty dashboard with no explanation and no way back.
         return ref.watch(onboardingProvider).when(
               loading: () => const SplashScreen(key: ValueKey('splash-onb')),
               error: (_, _) => const PermissionOnboardingScreen(
                 key: ValueKey('onboarding'),
               ),
-              data: (done) => done
-                  ? const HomeShell(key: ValueKey('home'))
-                  : const PermissionOnboardingScreen(
-                      key: ValueKey('onboarding'),
-                    ),
+              data: (done) {
+                if (!done) {
+                  return const PermissionOnboardingScreen(
+                    key: ValueKey('onboarding'),
+                  );
+                }
+
+                // Only divert on a KNOWN revocation. While the first read is in
+                // flight the value is null, and treating that as "revoked"
+                // would flash this screen on every cold start.
+                final perms = ref.watch(permissionStatusProvider).value;
+                final dismissed =
+                    ref.watch(permissionRecoveryDismissedProvider);
+
+                if (perms != null && perms.canTrack) {
+                  // Access is back. Clear any earlier "carry on anyway" so a
+                  // future revocation gates again instead of inheriting a
+                  // decision made about a different situation. Guarded on
+                  // `dismissed` so the common path schedules nothing.
+                  if (dismissed) {
+                    Future.microtask(
+                      () => ref
+                          .read(permissionRecoveryDismissedProvider.notifier)
+                          .reset(),
+                    );
+                  }
+                } else if (perms != null && !dismissed) {
+                  return const PermissionOnboardingScreen(
+                    key: ValueKey('permission-recovery'),
+                    recovery: true,
+                  );
+                }
+
+                return const HomeShell(key: ValueKey('home'));
+              },
             );
       },
     );
@@ -202,6 +248,18 @@ class _HomeShellState extends ConsumerState<HomeShell>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
     if (state == AppLifecycleState.resumed && mounted) {
+      // Android gives no broadcast when a permission is revoked, so resume is
+      // the only reliable moment to re-read. Without this the snapshot stayed
+      // as it was at launch: a user could turn call-log access off in Android
+      // Settings, come straight back, and the app would carry on showing a
+      // healthy dashboard that was no longer recording anything.
+      //
+      // Both consumers depend on it — the gate in AppGate, which diverts to the
+      // recovery walkthrough, and the alert banner.
+      ref
+        ..invalidate(permissionStatusProvider)
+        ..invalidate(backgroundStatusProvider);
+
       ref.read(backgroundControllerProvider.notifier).drain().then((_) {
         if (!mounted) return;
         ref.read(syncServiceProvider.notifier).ingestNativeCallLogs().then((_) {

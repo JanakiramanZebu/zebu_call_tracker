@@ -55,6 +55,12 @@ dependencies:
   # 2.28.0 is the newest pair that satisfies both ends. Re-evaluate after a
   # Flutter SDK upgrade raises the pinned `meta` version.
   drift: 2.28.0
+  # Imported directly by app_database.dart for the integrity-check and recovery
+  # paths, which open the file with the raw sqlite3 API rather than through
+  # drift. Declared here rather than relied on transitively: without this a
+  # `pub upgrade` is free to move it, and the 2.x line is not optional - drift
+  # 2.28 pairs with sqlite3 2.x, per the note above.
+  sqlite3: ^2.9.4
   crypto: ^3.0.7
   uuid: ^4.6.0
   phone_numbers_parser: ^9.0.25

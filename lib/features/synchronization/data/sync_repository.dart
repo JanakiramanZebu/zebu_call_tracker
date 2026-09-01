@@ -70,6 +70,7 @@ class SyncStatusResponse {
     required this.deviceRegistered,
     required this.policy,
     required this.pendingRecordingUploads,
+    this.rawPolicy,
   });
 
   final String serverTime;
@@ -78,6 +79,13 @@ class SyncStatusResponse {
   final SyncPolicy policy;
   final List<PendingRecordingItem> pendingRecordingUploads;
 
+  /// The `policy` object exactly as the server sent it.
+  ///
+  /// Kept alongside the parsed form because the native coordinator is what
+  /// actually enforces these limits, and handing it the original JSON means the
+  /// two sides cannot disagree about what the server said.
+  final Map<String, dynamic>? rawPolicy;
+
   factory SyncStatusResponse.fromJson(Map<String, dynamic> json) {
     final pendingList = json['pending_recording_uploads'] as List? ?? [];
     return SyncStatusResponse(
@@ -85,6 +93,7 @@ class SyncStatusResponse {
       deviceStatus: json['device_status'] as String? ?? 'ACTIVE',
       deviceRegistered: json['device_registered'] as bool? ?? true,
       policy: SyncPolicy.fromJson(json['policy'] as Map<String, dynamic>?),
+      rawPolicy: json['policy'] as Map<String, dynamic>?,
       pendingRecordingUploads: pendingList
           .map((i) => PendingRecordingItem.fromJson(i as Map<String, dynamic>))
           .toList(),
@@ -203,62 +212,6 @@ class SyncRepository {
       ApiEndpoints.callById(serverCallId),
       data: {'has_recording': false},
     );
-  }
-
-  /// Section 5.4: Recovering from a lost response by looking up idempotency keys
-  Future<Map<String, dynamic>> lookupSyncKeys(List<String> idempotencyKeys) async {
-    final res = await _apiClient.post<Map<String, dynamic>>(
-      ApiEndpoints.syncLookup,
-      data: {'idempotency_keys': idempotencyKeys},
-    );
-    return res.data ?? {};
-  }
-
-  /// Section 4: Post single call (upsert)
-  Future<Map<String, dynamic>> postSingleCall(Map<String, dynamic> callPayload) async {
-    final res = await _apiClient.post<Map<String, dynamic>>(
-      ApiEndpoints.calls,
-      data: callPayload,
-    );
-    return res.data ?? {};
-  }
-
-  /// Section 7: Obtain playback token for remote recording streaming
-  Future<Map<String, dynamic>> getPlaybackToken(String recordingId) async {
-    final res = await _apiClient.post<Map<String, dynamic>>(
-      ApiEndpoints.playbackToken(recordingId),
-    );
-    return res.data ?? {};
-  }
-
-  /// Section 8: Fetch remote call records with filtering and pagination
-  Future<Map<String, dynamic>> fetchRemoteCalls({
-    int page = 1,
-    int pageSize = 50,
-    String? updatedSince,
-    String? direction,
-    String? status,
-  }) async {
-    final res = await _apiClient.get<Map<String, dynamic>>(
-      ApiEndpoints.calls,
-      queryParameters: {
-        'page': page,
-        'page_size': pageSize,
-        'updated_since': ?updatedSince,
-        'direction': ?direction,
-        'status': ?status,
-      },
-    );
-    return res.data ?? {};
-  }
-
-  /// Section 8: Fetch user's call dashboard statistics
-  Future<Map<String, dynamic>> fetchRemoteDashboard({String range = 'today'}) async {
-    final res = await _apiClient.get<Map<String, dynamic>>(
-      ApiEndpoints.dashboard,
-      queryParameters: {'range': range},
-    );
-    return res.data ?? {};
   }
 }
 

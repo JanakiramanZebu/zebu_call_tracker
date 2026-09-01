@@ -11,13 +11,6 @@ import '../../device/data/device_uuid_store.dart';
 import '../domain/session.dart';
 
 abstract interface class AuthRepository {
-  Future<Session> signIn({
-    required String clientId,
-    required String mobileNumber,
-    required String deviceId,
-    required Map<String, Object?> device,
-  });
-
   Future<Session> signInWithPairingWord({
     required String pairingWord,
     required String employeeCode,
@@ -35,12 +28,6 @@ abstract interface class AuthRepository {
     required String appVersion,
     required String mobileUniqueId,
   });
-
-  Future<Session?> getUserProfile();
-  Future<void> changePassword({required String oldPassword, required String newPassword});
-  Future<List<Map<String, dynamic>>> getSessions();
-  Future<void> revokeSession(String sessionId);
-
   Future<Session?> restore();
   Future<void> signOut();
 }
@@ -100,74 +87,6 @@ class RemoteAuthRepository implements AuthRepository {
   final ApiClient _apiClient;
   final SessionStore _store;
   final DeviceUuidStore _deviceUuidStore;
-
-  @override
-  Future<Session> signIn({
-    required String clientId,
-    required String mobileNumber,
-    required String deviceId,
-    required Map<String, Object?> device,
-  }) async {
-    try {
-      final deviceUuid = deviceId.isNotEmpty
-          ? deviceId
-          : await _deviceUuidStore.getOrCreateUuid();
-
-      final response = await _apiClient.post<Map<String, dynamic>>(
-        ApiEndpoints.login,
-        data: {
-          'identifier': clientId,
-          'password': mobileNumber,
-          'mobile_number': mobileNumber,
-          'phone': mobileNumber,
-          'client_id': clientId,
-          'employee_code': clientId,
-          'device_uuid': deviceUuid,
-          'device_id': deviceUuid,
-        },
-      );
-
-      final data = response.data ?? {};
-      final userMap = data['user'] as Map<String, dynamic>? ?? {};
-      final tokensMap = data['tokens'] as Map<String, dynamic>? ?? {};
-
-      final accessToken = tokensMap['access_token'] as String? ??
-          'session-${DateTime.now().millisecondsSinceEpoch}';
-      final refreshToken = tokensMap['refresh_token'] as String?;
-
-      final session = Session(
-        userId: (userMap['id'] as num?)?.toInt(),
-        employeeId: userMap['employee_code'] as String? ?? clientId,
-        displayName: userMap['name'] as String? ?? clientId,
-        email: userMap['email'] as String?,
-        phone: userMap['phone'] as String? ?? mobileNumber,
-        role: userMap['role'] as String?,
-        department: userMap['department'] as String?,
-        token: accessToken,
-        refreshToken: refreshToken,
-        signedInAt: DateTime.now().toUtc(),
-        expiresAt: DateTime.tryParse(
-          tokensMap['access_token_expires_at'] as String? ?? '',
-        )?.toUtc(),
-        refreshTokenExpiresAt: DateTime.tryParse(
-          tokensMap['refresh_token_expires_at'] as String? ?? '',
-        )?.toUtc(),
-        deviceRegistered: data['device_registered'] as bool? ?? true,
-        mustChangePassword: false,
-      );
-
-      await _store.write(session);
-      return session;
-    } on ApiException catch (e) {
-      throw _translateApiException(e);
-    } catch (e) {
-      throw AuthFailure(
-        AuthFailureKind.unknown,
-        e.toString(),
-      );
-    }
-  }
-
   @override
   Future<Session> signInWithPairingWord({
     required String pairingWord,
@@ -221,10 +140,20 @@ class RemoteAuthRepository implements AuthRepository {
       final userMap = data['user'] as Map<String, dynamic>? ?? {};
       final tokensMap = data['tokens'] as Map<String, dynamic>? ?? {};
 
-      final accessToken = (tokensMap['access_token'] as String?) ??
-          (data['access_token'] as String?) ??
-          (data['token'] as String?) ??
-          'session-pairing-${DateTime.now().millisecondsSinceEpoch}';
+      final accessToken = ((tokensMap['access_token'] as String?) ??
+              (data['access_token'] as String?) ??
+              (data['token'] as String?))
+          ?.trim();
+      if (accessToken == null || accessToken.isEmpty) {
+        // Registration without a token is a failed registration, whatever the
+        // HTTP status said. Inventing 'session-pairing-<millis>' here left the
+        // user apparently signed in and permanently unable to sync.
+        throw const AuthFailure(
+          AuthFailureKind.server,
+          'Registration did not return a session token. '
+          'Check the pairing word with your administrator and try again.',
+        );
+      }
       final refreshToken = (tokensMap['refresh_token'] as String?) ??
           (data['refresh_token'] as String?);
 
@@ -264,73 +193,6 @@ class RemoteAuthRepository implements AuthRepository {
       throw AuthFailure(AuthFailureKind.unknown, e.toString());
     }
   }
-
-  @override
-  Future<Session?> getUserProfile() async {
-    try {
-      final res = await _apiClient.get<Map<String, dynamic>>(ApiEndpoints.me);
-      final userMap = res.data ?? {};
-      final currentSession = await _store.read();
-      if (currentSession == null) return null;
-
-      final updated = currentSession.copyWith(
-        userId: (userMap['id'] as num?)?.toInt() ?? currentSession.userId,
-        employeeId: userMap['employee_code'] as String? ?? currentSession.employeeId,
-        displayName: userMap['name'] as String? ?? currentSession.displayName,
-        email: userMap['email'] as String? ?? currentSession.email,
-        phone: userMap['phone'] as String? ?? currentSession.phone,
-        role: userMap['role'] as String? ?? currentSession.role,
-        department: userMap['department'] as String? ?? currentSession.department,
-      );
-      await _store.write(updated);
-      return updated;
-    } catch (_) {
-      return await _store.read();
-    }
-  }
-
-  @override
-  Future<void> changePassword({
-    required String oldPassword,
-    required String newPassword,
-  }) async {
-    try {
-      await _apiClient.post<dynamic>(
-        ApiEndpoints.changePassword,
-        data: {
-          'old_password': oldPassword,
-          'new_password': newPassword,
-        },
-      );
-      await _store.clear();
-    } on ApiException catch (e) {
-      throw _translateApiException(e);
-    }
-  }
-
-  @override
-  Future<List<Map<String, dynamic>>> getSessions() async {
-    try {
-      final res = await _apiClient.get<List<dynamic>>(ApiEndpoints.sessions);
-      final rawList = res.data ?? [];
-      return rawList.whereType<Map<String, dynamic>>().toList();
-    } catch (_) {
-      return [];
-    }
-  }
-
-  @override
-  Future<void> revokeSession(String sessionId) async {
-    try {
-      await _apiClient.request<dynamic>(
-        ApiEndpoints.sessionById(sessionId),
-        method: 'DELETE',
-      );
-    } on ApiException catch (e) {
-      throw _translateApiException(e);
-    }
-  }
-
   AuthFailure _translateApiException(ApiException e) {
     if (e.code == 'INVALID_CREDENTIALS' || e.statusCode == 401) {
       return const AuthFailure(
@@ -400,57 +262,6 @@ class LocalAuthRepository implements AuthRepository {
   const LocalAuthRepository(this._store);
 
   final SessionStore _store;
-  static final clientIdPattern = RegExp(r'^[ZJ][A-Z0-9]{1,15}$', caseSensitive: false);
-  static final mobileNumberPattern = RegExp(r'^[6-9]\d{9}$');
-
-  @override
-  Future<Session> signIn({
-    required String clientId,
-    required String mobileNumber,
-    required String deviceId,
-    required Map<String, Object?> device,
-  }) async {
-    await Future<void>.delayed(const Duration(milliseconds: 500));
-
-    final cleanClient = clientId.trim().toUpperCase();
-    if (!clientIdPattern.hasMatch(cleanClient)) {
-      throw const AuthFailure(
-        AuthFailureKind.invalidCredentials,
-        'Enter a valid Employee ID (e.g. ZE770 or Z12345).',
-      );
-    }
-
-    final cleanMobile = mobileNumber.replaceAll(RegExp(r'\D'), '');
-    final phone10 = cleanMobile.length == 12 && cleanMobile.startsWith('91')
-        ? cleanMobile.substring(2)
-        : cleanMobile;
-
-    if (!mobileNumberPattern.hasMatch(phone10)) {
-      throw const AuthFailure(
-        AuthFailureKind.invalidCredentials,
-        'Enter a valid 10-digit mobile number.',
-      );
-    }
-
-    if (deviceId.trim().isEmpty) {
-      throw const AuthFailure(
-        AuthFailureKind.invalidCredentials,
-        'Device ID cannot be empty.',
-      );
-    }
-
-    final session = Session(
-      employeeId: cleanClient,
-      displayName: cleanClient,
-      phone: phone10,
-      token: 'local-${DateTime.now().microsecondsSinceEpoch}',
-      signedInAt: DateTime.now().toUtc(),
-      deviceRegistered: true,
-    );
-    await _store.write(session);
-    return session;
-  }
-
   @override
   Future<Session> signInWithPairingWord({
     required String pairingWord,
@@ -483,21 +294,6 @@ class LocalAuthRepository implements AuthRepository {
     await _store.write(session);
     return session;
   }
-
-  @override
-  Future<Session?> getUserProfile() => _store.read();
-
-  @override
-  Future<void> changePassword({required String oldPassword, required String newPassword}) async {
-    await _store.clear();
-  }
-
-  @override
-  Future<List<Map<String, dynamic>>> getSessions() async => [];
-
-  @override
-  Future<void> revokeSession(String sessionId) async {}
-
   @override
   Future<Session?> restore() => _store.read();
 
@@ -505,11 +301,16 @@ class LocalAuthRepository implements AuthRepository {
   Future<void> signOut() => _store.clear();
 }
 
-AuthRepository buildAuthRepository({ApiClient? apiClient}) {
+/// Builds the repository around an [ApiClient] the caller owns.
+///
+/// [apiClient] is required rather than defaulted: constructing one here is how
+/// the app ended up with three of them, each refreshing tokens independently
+/// against a server that rotates them. There is now exactly one, held by
+/// `apiClientProvider`.
+AuthRepository buildAuthRepository({required ApiClient apiClient}) {
   const store = SecureSessionStore();
 
   if (!AppConfig.hasServer) return const LocalAuthRepository(store);
 
-  final client = apiClient ?? ApiClient(sessionStore: store);
-  return RemoteAuthRepository(apiClient: client, store: store);
+  return RemoteAuthRepository(apiClient: apiClient, store: store);
 }

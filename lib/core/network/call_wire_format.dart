@@ -1,3 +1,5 @@
+import 'package:uuid/uuid.dart';
+
 /// The `direction` and `status` vocabulary the server accepts, and the only
 /// sanctioned way to derive them from an Android call-log row.
 ///
@@ -125,4 +127,71 @@ CallWireOutcome callWireOutcome({
     direction: CallWireDirection.unknown,
     status: connected ? CallWireStatus.ended : CallWireStatus.unknown,
   );
+}
+
+/// How a call's identity is derived, on both sides of the platform channel.
+///
+/// Two independent ingesters write the same outbox table: `NativeCallIngestor`
+/// in Kotlin and `ingestNativeCallLogs` in Dart. They are allowed to disagree
+/// about when they run, but not about what a given call is *called*, because
+/// the idempotency key is the only thing stopping the server from storing the
+/// same conversation twice.
+///
+/// They did disagree. For a withheld or private number the call log yields a
+/// null number; Kotlin substituted `"Unknown"` while Dart interpolated the null
+/// straight into a string and produced the literal text `"null"`. Same call,
+/// two external ids, two v5 UUIDs, two rows locally and **two separate call
+/// records on the server** — one per ingester, every time somebody rang from a
+/// withheld number.
+///
+/// **Mirror of `CallWireFormat` in `android/.../call/CallWireFormat.kt`.**
+/// Changing either without the other re-opens exactly this bug.
+abstract final class CallWireIdentity {
+  /// RFC 4122 namespace used for the v5 key. Arbitrary but fixed forever:
+  /// changing it renames every call that has ever been queued.
+  static const dnsNamespace = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+
+  /// Placeholder for a number the call log withheld.
+  ///
+  /// The value matches what Kotlin has always written, so this correction
+  /// renames no natively-captured call — only the Dart path moves, onto the
+  /// name the other side was already using.
+  static const withheldNumber = 'Unknown';
+
+  /// The number as it goes into the external id, the key, and the outbox row.
+  ///
+  /// Only null is folded. An empty string is left alone deliberately: both
+  /// sides already produced the same (ugly) id for it, and folding it here
+  /// would rename rows that are not broken.
+  static String number(String? raw) => raw ?? withheldNumber;
+
+  /// Stable per-call id built from the call log's own timestamp and number.
+  static String externalId({required int startedAtMillis, String? rawNumber}) =>
+      'android-$startedAtMillis-${number(rawNumber)}';
+
+  /// The name hashed into the v5 UUID. Both languages must build this string
+  /// byte-for-byte identically.
+  static String keyName({
+    required String externalCallId,
+    required int startedAtMillis,
+  }) =>
+      'zebu:call:$externalCallId:$startedAtMillis';
+
+  /// The idempotency key for a call-log row.
+  static String key({required int startedAtMillis, String? rawNumber}) {
+    final extId = externalId(
+      startedAtMillis: startedAtMillis,
+      rawNumber: rawNumber,
+    );
+    return const Uuid().v5(
+      dnsNamespace,
+      keyName(externalCallId: extId, startedAtMillis: startedAtMillis),
+    );
+  }
+
+  /// True for an external id built by the Dart path before the two agreed.
+  ///
+  /// Used by the one-time repair in `CallsDao.repairDivergentWithheldKeys`.
+  static bool isLegacyWithheldExternalId(String? externalCallId) =>
+      externalCallId != null && externalCallId.endsWith('-null');
 }

@@ -6,7 +6,9 @@
   This is the RELEASE position and it is not negotiable here. Local development
   against a plain-HTTP LAN server is handled by a same-named resource in
   `src/debug/res/xml/`, which the resource merger substitutes for this file in
-  debug builds only. Do not add a debug-overrides block to this file: the tag
+  debug builds only. AppConfig enforces the same rule ahead of the platform: an
+  http:// address in a release build is reported as a configuration error rather
+  than left to fail per-request down here. Do not add a debug-overrides block to this file: the tag
   cannot carry per-domain rules, and a permissive entry added here would ship.
 -->
 <network-security-config>

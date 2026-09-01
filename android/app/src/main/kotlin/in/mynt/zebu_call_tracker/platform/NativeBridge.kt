@@ -15,9 +15,12 @@ import `in`.mynt.zebu_call_tracker.background.BackgroundScheduler
 import `in`.mynt.zebu_call_tracker.background.IngestStore
 import `in`.mynt.zebu_call_tracker.background.NativeCallOutboxDao
 import `in`.mynt.zebu_call_tracker.background.SyncCoordinator
+import `in`.mynt.zebu_call_tracker.background.SyncPolicyStore
+import `in`.mynt.zebu_call_tracker.background.TokenRefresher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import `in`.mynt.zebu_call_tracker.overlay.PostCallData
 import `in`.mynt.zebu_call_tracker.permissions.BatteryOptimization
 import `in`.mynt.zebu_call_tracker.permissions.PermissionInspector
@@ -259,6 +262,74 @@ class NativeBridge(private val context: Context) : MethodChannel.MethodCallHandl
                     result.success(null)
                 }
 
+                // Dart does not exchange refresh tokens itself. It asks here,
+                // so that every refresh in the app — foreground request,
+                // background upload — passes the one single-flight gate in
+                // TokenRefresher and writes to the one store of record.
+                //
+                // The alternative, which this replaces, was for Dart and the
+                // coordinator to refresh independently against a server that
+                // invalidates the token you present. The loser of that race
+                // replayed a dead token, and the server revoked the entire
+                // session chain in response.
+                "refreshAuthTokens" -> {
+                    val staleToken = call.argument<String>("staleToken")
+                    val baseUrl = call.argument<String>("apiBaseUrl")
+                        ?: IngestStore.getApiBaseUrl(context)
+                        ?: ""
+                    if (baseUrl.isBlank()) {
+                        result.success(
+                            mapOf(
+                                "ok" to false,
+                                "failure" to TokenRefresher.Failure.NO_SESSION.name,
+                            ),
+                        )
+                    } else {
+                        // Blocking network work: it cannot run on the platform
+                        // thread, and the reply has to come back on it.
+                        CoroutineScope(Dispatchers.IO).launch {
+                            val outcome = TokenRefresher.refresh(context, baseUrl, staleToken)
+                            withContext(Dispatchers.Main) {
+                                result.success(
+                                    mapOf(
+                                        "ok" to outcome.isSuccess,
+                                        "accessToken" to outcome.accessToken,
+                                        "refreshToken" to outcome.refreshToken,
+                                        "accessTokenExpiresAt" to outcome.accessTokenExpiresAt,
+                                        "refreshTokenExpiresAt" to outcome.refreshTokenExpiresAt,
+                                        "failure" to outcome.failure?.name,
+                                    ),
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // The server's own limits, from GET /sync/status. The app used
+                // to fetch these, parse them, and then hardcode every value the
+                // coordinator actually used.
+                "setSyncPolicy" -> {
+                    val json = call.argument<String>("policyJson")
+                    if (json.isNullOrBlank()) {
+                        result.success(false)
+                    } else {
+                        SyncPolicyStore.save(context, json)
+                        result.success(true)
+                    }
+                }
+
+                "getRecordingsOnMeteredNetworks" -> result.success(
+                    SyncPolicyStore.recordingsAllowedOnMeteredNetworks(context),
+                )
+
+                "setRecordingsOnMeteredNetworks" -> {
+                    SyncPolicyStore.setRecordingsAllowedOnMeteredNetworks(
+                        context,
+                        call.argument<Boolean>("allowed") ?: false,
+                    )
+                    result.success(null)
+                }
+
                 "getNativeSyncStatus" -> {
                     result.success(IngestStore.getLastSyncInfo(context))
                 }
@@ -288,6 +359,9 @@ class NativeBridge(private val context: Context) : MethodChannel.MethodCallHandl
 
                 "stopBackgroundTracking" -> {
                     BackgroundScheduler.cancelAll(context)
+                    // Before the session goes, so the service's own guard cannot
+                    // race this and see a token that is about to be cleared.
+                    `in`.mynt.zebu_call_tracker.background.CallTrackingService.stop(context)
                     IngestStore.clearAuthSession(context)
                     // Names resolved for the previous user must not survive into
                     // the next one's session on a shared handset.

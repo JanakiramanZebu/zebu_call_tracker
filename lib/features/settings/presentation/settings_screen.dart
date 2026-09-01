@@ -3,11 +3,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../../../core/config/app_config.dart';
+import '../../../core/config/app_version.dart';
 import '../../../core/network/connectivity_service.dart';
-import '../../../core/storage/app_database.dart';
 import '../../../core/storage/database_providers.dart';
 import '../../../core/theme/design_tokens.dart';
-import '../../../core/utils/formatters.dart';
 import '../../../shared/widgets/ui_kit.dart';
 import '../../auth/data/auth_controller.dart';
 import '../../auth/domain/session.dart';
@@ -15,7 +14,10 @@ import '../../background/data/background_service.dart';
 import '../../call_tracking/data/call_feed.dart';
 import '../../permissions/presentation/permission_screen.dart';
 import '../../synchronization/data/sync_service.dart';
+import 'diagnostics_screen.dart';
+import '../../synchronization/data/sync_health_provider.dart';
 import '../../synchronization/presentation/outbox_queue_screen.dart';
+import '../../synchronization/presentation/sync_alert_banner.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -53,10 +55,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
   @override
   Widget build(BuildContext context) {
     final session = ref.watch(authControllerProvider).value;
+    final meteredAllowed =
+        ref.watch(recordingsOnMeteredProvider).value ?? false;
     final device = ref.watch(deviceInfoProvider).value;
     final background = ref.watch(backgroundStatusProvider).value;
     final perms = ref.watch(permissionStatusProvider).value;
-    final feed = ref.watch(callFeedProvider).value;
     final counters = ref.watch(syncCountersProvider).value ?? const {};
     final isOnline = ref.watch(connectivityProvider).value ?? true;
     // What the NATIVE coordinator recorded, not what this Dart session did.
@@ -96,6 +99,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
       body: ListView(
         padding: const EdgeInsets.fromLTRB(16, 4, 16, 40),
         children: [
+          // Every outstanding problem, not just the top two the compact
+          // banners on Dashboard and Sync have room for — those point here
+          // when they run out of space.
+          const SyncAlertBanner(maxAlerts: 99),
+
           // ── PROFILE SUMMARY HERO ───────────────────────────────────────────
           _ProfileHeroCard(session: session),
           const SizedBox(height: 20),
@@ -113,7 +121,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               ),
               _SettingsTile(
                 icon: Icons.verified_outlined,
-                title: 'Account Status',
+                title: 'Account',
                 valueWidget: StatusPill(
                   label: session == null ? 'Inactive' : 'Active',
                   color: session == null ? AppTokens.textMuted : AppTokens.success,
@@ -151,7 +159,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             children: [
               _SettingsTile(
                 icon: Icons.autorenew_rounded,
-                title: 'Background Tracking',
+                title: 'Background activity',
                 subtitle: background?.ignoringBatteryOptimizations == true
                     ? 'Running continuously in background'
                     : 'Battery optimization is restricting tracking',
@@ -171,7 +179,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               ),
               _SettingsTile(
                 icon: Icons.phone_callback_rounded,
-                title: 'Call Log Access',
+                title: 'Call log access',
                 valueWidget: StatusPill(
                   label: (perms?.readCallLog ?? false) ? 'Granted' : 'Required',
                   color: (perms?.readCallLog ?? false)
@@ -186,7 +194,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               ),
               _SettingsTile(
                 icon: Icons.graphic_eq_rounded,
-                title: 'Recording Ingestion',
+                title: 'Recordings on this phone',
                 subtitle: (perms?.readMediaAudio ?? false)
                     ? 'Audio matched automatically'
                     : 'Media permission needed for call audio',
@@ -204,7 +212,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               ),
               _SettingsTile(
                 icon: Icons.health_and_safety_outlined,
-                title: 'Tracking Health',
+                title: 'Tracking status',
                 valueWidget: StatusPill(
                   label: isTrackingHealthy ? 'Healthy' : 'Needs Attention',
                   color: isTrackingHealthy ? AppTokens.success : AppTokens.warning,
@@ -215,8 +223,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               ),
               _SettingsTile(
                 icon: Icons.radar_rounded,
-                title: 'Run Device Check',
-                subtitle: 'Perform instant background sweep',
+                title: 'Look for new calls now',
+                subtitle: 'Checks the call log straight away',
                 value: 'Run Scan',
                 valueColor: AppTokens.brandElectric,
                 onTap: () async {
@@ -243,12 +251,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             children: [
               _SettingsTile(
                 icon: Icons.cloud_done_outlined,
-                title: 'Sync Status',
+                title: 'Syncing',
+                // The server's own `error.message` is written for people and
+                // is safe here; the raw code and request id are not, and the
+                // banner above already says what to do about it. Settings is
+                // where you look for detail, so a trimmed version stays.
                 subtitle: !isOnline
                     ? 'Waiting for a connection'
-                    : (nativeSync?.error != null
-                        ? 'Last error: ${nativeSync!.error}'
-                        : null),
+                    : _lastErrorSummary(nativeSync?.error),
                 valueWidget: StatusPill(
                   label: !isOnline
                       ? 'Offline'
@@ -266,7 +276,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               ),
               _SettingsTile(
                 icon: Icons.schedule_rounded,
-                title: 'Last Sync',
+                title: 'Last sent',
                 // The real timestamp the background coordinator wrote. This
                 // tile used to print 'Just now'/'Active'/'Pending' inferred
                 // from the current session, which said nothing about whether
@@ -282,7 +292,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               ),
               _SettingsTile(
                 icon: Icons.cloud_done_rounded,
-                title: 'Synced to Server',
+                title: 'Sent to server',
                 value: '$uploadedCount calls',
                 valueColor: uploadedCount > 0
                     ? AppTokens.success
@@ -290,20 +300,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               ),
               _SettingsTile(
                 icon: Icons.cloud_upload_outlined,
-                title: 'Pending Uploads',
+                title: 'Waiting to send',
                 value: '$pendingCount ${pendingCount == 1 ? "call" : "calls"}',
                 valueColor: pendingCount > 0 ? AppTokens.warning : AppTokens.textMuted,
               ),
               _SettingsTile(
                 icon: Icons.error_outline_rounded,
-                title: 'Failed Records',
+                title: 'Could not be sent',
                 value: '$failedCount ${failedCount == 1 ? "record" : "records"}',
                 valueColor: failedCount > 0 ? AppTokens.danger : AppTokens.textMuted,
               ),
               _SettingsTile(
                 icon: Icons.sync_rounded,
-                title: 'Manual Sync Now',
-                subtitle: 'Push all waiting calls to server',
+                title: 'Send now',
+                subtitle: 'Send everything waiting, without waiting for the schedule',
                 value: 'Sync',
                 valueColor: AppTokens.brandElectric,
                 onTap: () async {
@@ -315,7 +325,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               if (failedCount > 0)
                 _SettingsTile(
                   icon: Icons.replay_rounded,
-                  title: 'Retry Failed Records',
+                  title: 'Try failed calls again',
                   value: 'Retry',
                   valueColor: AppTokens.warning,
                   onTap: () async {
@@ -326,9 +336,23 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                   },
                 ),
               _SettingsTile(
+                icon: Icons.network_cell_rounded,
+                title: 'Send recordings on mobile data',
+                subtitle: meteredAllowed
+                    ? 'Recordings upload on any connection'
+                    : 'Recordings wait for Wi-Fi; call details always send',
+                valueWidget: Switch.adaptive(
+                  value: meteredAllowed,
+                  activeThumbColor: AppTokens.brandElectric,
+                  onChanged: (value) => ref
+                      .read(recordingsOnMeteredProvider.notifier)
+                      .set(value),
+                ),
+              ),
+              _SettingsTile(
                 icon: Icons.queue_outlined,
-                title: 'View Sync Queue',
-                value: 'Open Outbox',
+                title: 'Calls waiting to send',
+                value: 'View',
                 valueColor: AppTokens.brandElectric,
                 onTap: () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
@@ -340,46 +364,33 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           ),
           const SizedBox(height: 18),
 
-          // ── 5. DATA & STORAGE ──────────────────────────────────────────────
-          const _SettingsSectionHeader('Data & Storage'),
+          // ── 5. YOUR DATA ───────────────────────────────────────────────────
+          //
+          // What is left here is what a user can act on. The storage internals
+          // that used to sit in this group -- integrity checks, journal mode,
+          // row counts, an invented "storage footprint" -- moved to
+          // Technical details, at the bottom of this screen.
+          const _SettingsSectionHeader('Your data'),
           _SettingsGroup(
             children: [
               _SettingsTile(
-                icon: Icons.health_and_safety_rounded,
-                title: 'Database Health & Diagnostics',
-                subtitle: 'SQLite storage integrity, WAL & safe recovery',
-                value: 'Inspect',
-                valueColor: AppTokens.brandElectric,
-                onTap: () => _showDatabaseHealthDialog(context, ref),
-              ),
-              _SettingsTile(
-                icon: Icons.inventory_2_outlined,
-                title: 'Call Metadata Outbox',
-                value: 'View queue',
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => const OutboxQueueScreen(),
-                  ),
-                ),
-              ),
-              _SettingsTile(
-                icon: Icons.list_alt_rounded,
-                title: 'Calls Loaded in Memory',
-                value: '${feed?.entries.length ?? 0}',
-              ),
-              _SettingsTile(
-                icon: Icons.storage_rounded,
-                title: 'Storage Footprint',
-                value: Fmt.fileSize(
-                  ((feed?.entries.length ?? 0) * 1280) + 124000,
-                ),
-              ),
-              _SettingsTile(
                 icon: Icons.security_rounded,
-                title: 'Privacy & Security',
+                title: 'How your call data is handled',
                 value: 'Encrypted',
                 valueColor: AppTokens.success,
                 onTap: () => _showPrivacyDialog(context),
+              ),
+              _SettingsTile(
+                icon: Icons.build_outlined,
+                title: 'Technical details',
+                subtitle: 'Storage checks and version info for support',
+                value: 'Open',
+                valueColor: AppTokens.brandElectric,
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const DiagnosticsScreen(),
+                  ),
+                ),
               ),
             ],
           ),
@@ -391,7 +402,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             children: [
               _SettingsTile(
                 icon: Icons.shield_outlined,
-                title: 'Permissions Summary',
+                title: 'App permissions',
                 subtitle: permissionsGranted == null
                     ? 'Reading current grants…'
                     : (permissionsGranted == PermissionSnapshot.total
@@ -424,19 +435,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           const _SettingsSectionHeader('Application'),
           _SettingsGroup(
             children: [
-              const _SettingsTile(
+              _SettingsTile(
                 icon: Icons.info_outline_rounded,
                 title: 'Version',
-                value: '1.0.0',
+                value: AppVersion.full,
               ),
               _SettingsTile(
                 icon: Icons.numbers_rounded,
-                title: 'Build Label',
-                value: AppConfig.buildLabel,
+                title: 'Build',
+                value: AppConfig.buildLabel(AppVersion.name),
               ),
               _SettingsTile(
                 icon: Icons.help_outline_rounded,
-                title: 'About Zebu Call Tracker',
+                title: 'About this app',
                 onTap: () => _showAboutDialog(context),
               ),
             ],
@@ -449,8 +460,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             children: [
               _SettingsTile(
                 icon: Icons.refresh_rounded,
-                title: 'Rescan Device Call Logs',
-                subtitle: 'Reload recent call logs from native storage',
+                title: 'Reload call history',
+                subtitle: 'Re-reads recent calls from this phone',
                 onTap: () {
                   ref.read(callFeedProvider.notifier).refresh();
                   ScaffoldMessenger.of(context).showSnackBar(
@@ -463,13 +474,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               ),
               _SettingsTile(
                 icon: Icons.restart_alt_rounded,
-                title: 'Redo Setup Walkthrough',
-                subtitle: 'Re-run first time permission onboarding',
+                title: 'Show the setup steps again',
+                subtitle: 'Walk through the permissions once more',
                 onTap: () => ref.read(onboardingProvider.notifier).reset(),
               ),
               _SettingsTile(
                 icon: Icons.open_in_new_rounded,
-                title: 'Open Android App Settings',
+                title: 'Open Android settings',
                 onTap: openAppSettings,
               ),
             ],
@@ -490,8 +501,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               borderRadius: BorderRadius.circular(AppTokens.r12),
               child: _SettingsTile(
                 icon: Icons.logout_rounded,
-                title: 'Sign Out',
-                subtitle: 'Unregister device and clear active session',
+                title: 'Sign out',
+                subtitle: 'Signs this phone out and stops syncing',
                 destructive: true,
                 onTap: () => _confirmSignOut(context, ref),
               ),
@@ -502,7 +513,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           // Footer info
           Center(
             child: Text(
-              '${AppConfig.appName} · v${AppConfig.buildLabel}',
+              '${AppConfig.appName} · ${AppConfig.buildLabel(AppVersion.name)}',
               style: const TextStyle(
                 color: AppTokens.textMuted,
                 fontSize: 12,
@@ -557,11 +568,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           borderRadius: BorderRadius.circular(AppTokens.r16),
           side: const BorderSide(color: AppTokens.borderDefault),
         ),
-        title: const Text('Privacy & Security', style: TextStyle(color: Colors.white)),
+        title: const Text('How your call data is handled', style: TextStyle(color: Colors.white)),
         content: const Text(
-          'All call tracking metadata and audio recordings are stored locally '
-          'in encrypted SQLite storage on this device. Synchronization uses '
-          'authenticated TLS 1.3 endpoints with SHA-256 integrity verification.',
+          'Call details and any recordings are kept on this phone in encrypted '
+          'storage until they reach your company server. They are sent over an '
+          'encrypted connection, and each recording is checked on arrival so '
+          'that a partial upload is never mistaken for a complete one. Only '
+          'you and your administrators can see your calls, and every playback '
+          'of a recording is written to an audit log.',
           style: TextStyle(color: AppTokens.textSecondary, fontSize: 13.5, height: 1.5),
         ),
         actions: [
@@ -574,16 +588,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     );
   }
 
-  void _showDatabaseHealthDialog(BuildContext context, WidgetRef ref) {
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) => _DatabaseHealthSheet(
-        onRefreshFeed: () => ref.read(callFeedProvider.notifier).refresh(),
-      ),
-    );
-  }
 
   void _showAboutDialog(BuildContext context) {
     showDialog<void>(
@@ -610,7 +614,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
             ),
             const SizedBox(height: 12),
             Text(
-              'Build: ${AppConfig.buildLabel}',
+              'Build: ${AppConfig.buildLabel(AppVersion.name)}',
               style: const TextStyle(color: AppTokens.textMuted, fontSize: 12),
             ),
           ],
@@ -976,253 +980,19 @@ class _SettingsTile extends StatelessWidget {
   }
 }
 
-class _DatabaseHealthSheet extends StatefulWidget {
-  const _DatabaseHealthSheet({required this.onRefreshFeed});
 
-  final VoidCallback onRefreshFeed;
 
-  @override
-  State<_DatabaseHealthSheet> createState() => _DatabaseHealthSheetState();
-}
-
-class _DatabaseHealthSheetState extends State<_DatabaseHealthSheet> {
-  DatabaseHealthReport? _report;
-  bool _loading = true;
-  bool _repairing = false;
-  String? _repairMessage;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadHealth();
-  }
-
-  Future<void> _loadHealth() async {
-    setState(() => _loading = true);
-    final report = await AppDatabase.checkHealth();
-    if (mounted) {
-      setState(() {
-        _report = report;
-        _loading = false;
-      });
-    }
-  }
-
-  Future<void> _runRepair() async {
-    setState(() {
-      _repairing = true;
-      _repairMessage = null;
-    });
-
-    final file = await AppDatabase.getDatabaseFile();
-    final success = await AppDatabase.checkAndRepairDatabaseFile(file);
-    final updated = await AppDatabase.checkHealth();
-
-    widget.onRefreshFeed();
-
-    if (mounted) {
-      setState(() {
-        _report = updated;
-        _repairing = false;
-        _repairMessage = success
-            ? 'Database repaired successfully! Integrity check: ${updated.integrityCheckResult}'
-            : 'Repair finished with warnings. Review report.';
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
-      decoration: const BoxDecoration(
-        color: AppTokens.surface1,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(AppTokens.r24)),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Center(
-            child: Container(
-              width: 40,
-              height: 4,
-              decoration: BoxDecoration(
-                color: AppTokens.textMuted.withValues(alpha: 0.3),
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              const Icon(Icons.storage_rounded, color: AppTokens.brandElectric, size: 22),
-              const SizedBox(width: 10),
-              const Text(
-                'Database Health & Diagnostics',
-                style: TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
-                  color: Colors.white,
-                ),
-              ),
-              const Spacer(),
-              IconButton(
-                icon: const Icon(Icons.refresh_rounded, color: AppTokens.textSecondary, size: 20),
-                onPressed: _loading || _repairing ? null : _loadHealth,
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          if (_loading)
-            const Center(
-              child: Padding(
-                padding: EdgeInsets.symmetric(vertical: 32),
-                child: CircularProgressIndicator(),
-              ),
-            )
-          else if (_report != null) ...[
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: _report!.isHealthy
-                    ? AppTokens.success.withValues(alpha: 0.12)
-                    : AppTokens.danger.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(AppTokens.r12),
-                border: Border.all(
-                  color: _report!.isHealthy ? AppTokens.success : AppTokens.danger,
-                ),
-              ),
-              child: Row(
-                children: [
-                  Icon(
-                    _report!.isHealthy ? Icons.check_circle_rounded : Icons.warning_amber_rounded,
-                    color: _report!.isHealthy ? AppTokens.success : AppTokens.danger,
-                    size: 24,
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          _report!.isHealthy ? 'Database Healthy' : 'Database Needs Attention',
-                          style: TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w700,
-                            color: _report!.isHealthy ? AppTokens.success : AppTokens.danger,
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          'Integrity check: ${_report!.integrityCheckResult}',
-                          style: const TextStyle(fontSize: 12.5, color: AppTokens.textSecondary),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: AppTokens.surface2,
-                borderRadius: BorderRadius.circular(AppTokens.r12),
-                border: Border.all(color: AppTokens.borderSubtle),
-              ),
-              child: Column(
-                children: [
-                  _diagRow('Database File', AppDatabase.dbFilename),
-                  const Divider(color: AppTokens.borderSubtle, height: 12),
-                  _diagRow('Journal Mode', _report!.journalMode.toUpperCase()),
-                  const Divider(color: AppTokens.borderSubtle, height: 12),
-                  _diagRow('Quick Check', _report!.quickCheckResult),
-                  const Divider(color: AppTokens.borderSubtle, height: 12),
-                  _diagRow('Foreign Key Check', _report!.foreignKeyCheckResult),
-                  const Divider(color: AppTokens.borderSubtle, height: 12),
-                  _diagRow('Total Records', '${_report!.totalRows} rows'),
-                  const Divider(color: AppTokens.borderSubtle, height: 12),
-                  _diagRow('File Size', Fmt.fileSize(_report!.fileSizeBytes)),
-                  const Divider(color: AppTokens.borderSubtle, height: 12),
-                  _diagRow('Database Path', _report!.dbPath, isLong: true),
-                ],
-              ),
-            ),
-            if (_repairMessage != null) ...[
-              const SizedBox(height: 12),
-              Text(
-                _repairMessage!,
-                style: const TextStyle(color: AppTokens.brandElectric, fontSize: 13, fontWeight: FontWeight.w500),
-              ),
-            ],
-            const SizedBox(height: 20),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _repairing ? null : _loadHealth,
-                    icon: const Icon(Icons.verified_outlined, size: 18),
-                    label: const Text('Check Integrity'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.white,
-                      side: const BorderSide(color: AppTokens.borderDefault),
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _repairing ? null : _runRepair,
-                    icon: _repairing
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                          )
-                        : const Icon(Icons.build_rounded, size: 18),
-                    label: Text(_repairing ? 'Repairing...' : 'Repair Database'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppTokens.brandElectric,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _diagRow(String label, String value, {bool isLong = false}) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
-      child: Row(
-        crossAxisAlignment: isLong ? CrossAxisAlignment.start : CrossAxisAlignment.center,
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Text(label, style: const TextStyle(color: AppTokens.textMuted, fontSize: 12.5)),
-          const SizedBox(width: 12),
-          Flexible(
-            child: Text(
-              value,
-              textAlign: TextAlign.end,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12.5,
-                fontWeight: FontWeight.w600,
-              ),
-              maxLines: isLong ? 2 : 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+/// Trims the coordinator's stored failure into one readable line.
+///
+/// It stores `CODE: message details` so a report can be diagnosed; the code is
+/// the half a user cannot act on, so only the human half is shown, capped so a
+/// long validation payload cannot push the rest of the tile off screen.
+String? _lastErrorSummary(String? raw) {
+  if (raw == null || raw.trim().isEmpty) return null;
+  final text = raw.contains(': ') ? raw.split(': ').skip(1).join(': ') : raw;
+  final clean = text.trim();
+  if (clean.isEmpty) return null;
+  return clean.length > 140
+      ? 'Last problem: ${clean.substring(0, 140)}…'
+      : 'Last problem: $clean';
 }

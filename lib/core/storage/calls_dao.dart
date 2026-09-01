@@ -1,5 +1,7 @@
 import 'package:drift/drift.dart';
+import 'package:flutter/foundation.dart';
 
+import '../network/call_wire_format.dart';
 import 'app_database.dart';
 import 'sync_state.dart';
 
@@ -10,18 +12,79 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
   CallsDao(super.db);
 
   $LocalCallsTable get _table => db.localCalls;
+  /// Matches an external id the Dart ingester wrote before the two sides
+  /// agreed on how to name a withheld number: `android-<millis>-null`.
+  static final _legacyWithheldExtId = RegExp(r'^android-(\d+)-null$');
 
-  /// The states the coordinator may pick up, as a reusable predicate.
+  /// Renames rows the two ingesters disagreed about, before they reach the
+  /// server.
   ///
-  /// Written once here rather than inline at each call site: the native
-  /// coordinator holds the same predicate in raw SQL, and the two drifting
-  /// apart is exactly how rows become claimable by one side and invisible to
-  /// the other.
-  Expression<bool> _isClaimable($LocalCallsTable t, DateTime now) =>
-      t.syncState.equals(CallSyncState.waiting) |
-      (t.syncState.equals(CallSyncState.retryPending) &
-          (t.nextAttemptAt.isNull() |
-              t.nextAttemptAt.isSmallerOrEqualValue(now)));
+  /// A withheld number used to produce `android-<millis>-null` from Dart and
+  /// `android-<millis>-Unknown` from Kotlin. Both rows sat in this table under
+  /// different keys, and both were uploaded, so one phone call became two call
+  /// records on the server.
+  ///
+  /// Only rows the server has never accepted (`server_call_id IS NULL`) are
+  /// touched. A row that has already synced keeps its historical key: the
+  /// server knows that record by it, and renaming it locally would send the
+  /// record a second time under the new name — creating exactly the duplicate
+  /// this is here to prevent.
+  ///
+  /// The timestamp is read back out of the external id rather than from
+  /// `started_at`, because drift stores that column in whole seconds and the
+  /// key was built from milliseconds. Recomputing from the truncated value
+  /// would invent a third key.
+  ///
+  /// Self-limiting and safe to call on every ingest: after the first pass no
+  /// row matches.
+  Future<int> repairDivergentWithheldKeys() async {
+    final legacy = await (select(_table)
+          ..where((t) => t.externalCallId.like('%-null'))
+          ..where((t) => t.serverCallId.isNull()))
+        .get();
+    if (legacy.isEmpty) return 0;
+
+    var repaired = 0;
+    for (final row in legacy) {
+      final match = _legacyWithheldExtId.firstMatch(row.externalCallId ?? '');
+      if (match == null) continue;
+
+      final startedAtMillis = int.tryParse(match.group(1)!);
+      if (startedAtMillis == null) continue;
+
+      final correctExtId =
+          CallWireIdentity.externalId(startedAtMillis: startedAtMillis);
+      final correctKey =
+          CallWireIdentity.key(startedAtMillis: startedAtMillis);
+
+      final existing = await findByIdempotencyKey(correctKey);
+      if (existing != null) {
+        // The Kotlin ingester already captured this call under the agreed
+        // name. This row is the duplicate, and it has never been sent, so
+        // dropping it costs nothing and saves the server a second record.
+        await (delete(_table)
+              ..where((t) => t.idempotencyKey.equals(row.idempotencyKey)))
+            .go();
+      } else {
+        await (update(_table)
+              ..where((t) => t.idempotencyKey.equals(row.idempotencyKey)))
+            .write(
+          LocalCallsCompanion(
+            idempotencyKey: Value(correctKey),
+            externalCallId: Value(correctExtId),
+            phoneNumber: Value(CallWireIdentity.withheldNumber),
+          ),
+        );
+      }
+      repaired++;
+    }
+
+    debugPrint(
+      '[OUTBOX] Repaired $repaired withheld-number call(s) that the two '
+      'ingesters had named differently.',
+    );
+    return repaired;
+  }
 
   Future<int> insertOrUpdateCall(LocalCallsCompanion entry) async {
     return into(_table).insertOnConflictUpdate(entry);
@@ -73,56 +136,12 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
     return results;
   }
 
-  Future<List<LocalCall>> getPendingCalls(int limit) {
-    final now = DateTime.now().toUtc();
-    return (select(_table)
-          ..where((t) => _isClaimable(t, now))
-          ..orderBy(
-              [(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.asc)])
-          ..limit(limit))
-        .get();
-  }
-
-  Future<LocalCall?> claimNextPendingCall() async {
-    final now = DateTime.now().toUtc();
-    return transaction(() async {
-      final call = await (select(_table)
-            ..where((t) => _isClaimable(t, now))
-            ..orderBy([
-              (t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.asc)
-            ])
-            ..limit(1))
-          .getSingleOrNull();
-
-      if (call == null) return null;
-
-      await (update(_table)
-            ..where((t) => t.idempotencyKey.equals(call.idempotencyKey)))
-          .write(
-        const LocalCallsCompanion(syncState: Value(CallSyncState.uploading)),
-      );
-
-      return call.copyWith(syncState: CallSyncState.uploading);
-    });
-  }
-
-  /// Returns rows stuck mid-upload — the process died between claiming a call
-  /// and recording its outcome — to the claimable pool.
-  Future<int> recoverStuckUploadingCalls() async {
-    return (update(_table)
-          ..where((t) => t.syncState.equals(CallSyncState.uploading)))
-        .write(
-      const LocalCallsCompanion(syncState: Value(CallSyncState.waiting)),
-    );
-  }
-
-  Future<void> markUploading(String idempotencyKey) async {
-    await (update(_table)..where((t) => t.idempotencyKey.equals(idempotencyKey)))
-        .write(
-      const LocalCallsCompanion(syncState: Value(CallSyncState.uploading)),
-    );
-  }
-
+  /// Records a successful upload.
+  ///
+  /// The one writer left on the Dart side, used when `BackgroundController`
+  /// folds in what the native coordinator reported while the engine was
+  /// down. Everything else that moves a row through the state machine now
+  /// lives in `NativeCallOutboxDao`, so there is one writer per transition.
   Future<void> markSynced({
     required String idempotencyKey,
     required String serverCallId,
@@ -136,58 +155,6 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
         syncState: const Value(CallSyncState.uploaded),
         lastErrorCode: const Value(null),
       ),
-    );
-  }
-
-  Future<void> markFailed({
-    required String idempotencyKey,
-    required String errorCode,
-    required bool retryable,
-  }) async {
-    final existing = await findByIdempotencyKey(idempotencyKey);
-    final attempts = (existing?.attemptCount ?? 0) + 1;
-
-    if (!retryable) {
-      await (update(_table)
-            ..where((t) => t.idempotencyKey.equals(idempotencyKey)))
-          .write(
-        LocalCallsCompanion(
-          syncState: const Value(CallSyncState.failed),
-          attemptCount: Value(attempts),
-          lastErrorCode: Value(errorCode),
-        ),
-      );
-      return;
-    }
-
-    final delaySeconds = (1 << attempts.clamp(0, 16)).clamp(2, 600);
-    final nextAttempt =
-        DateTime.now().toUtc().add(Duration(seconds: delaySeconds));
-
-    await (update(_table)..where((t) => t.idempotencyKey.equals(idempotencyKey)))
-        .write(
-      LocalCallsCompanion(
-        syncState: const Value(CallSyncState.retryPending),
-        attemptCount: Value(attempts),
-        nextAttemptAt: Value(nextAttempt),
-        lastErrorCode: Value(errorCode),
-      ),
-    );
-  }
-
-  Future<void> markRecordingUploaded(String idempotencyKey) async {
-    await (update(_table)..where((t) => t.idempotencyKey.equals(idempotencyKey)))
-        .write(
-      const LocalCallsCompanion(
-        recordingUploadStatus: Value(RecordingUploadStatus.uploaded),
-      ),
-    );
-  }
-
-  Future<void> setHasRecording(String idempotencyKey, bool hasRecording) async {
-    await (update(_table)..where((t) => t.idempotencyKey.equals(idempotencyKey)))
-        .write(
-      LocalCallsCompanion(hasRecording: Value(hasRecording)),
     );
   }
 
@@ -337,17 +304,6 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
         attemptCount: Value(0),
       ),
     );
-  }
-
-  Future<List<LocalCall>> getCallsBetween(DateTime startUtc, DateTime endUtc) {
-    return (select(_table)
-          ..where((t) =>
-              t.startedAt.isBiggerOrEqualValue(startUtc) &
-              t.startedAt.isSmallerOrEqualValue(endUtc))
-          ..orderBy([
-            (t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)
-          ]))
-        .get();
   }
 
   Future<List<LocalCall>> getCallsForAnalytics({

@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import '../../../core/config/app_version.dart';
 import '../../../core/network/api_client.dart';
 import '../../../core/network/api_endpoints.dart';
 import 'device_uuid_store.dart';
@@ -41,7 +42,7 @@ class DeviceRepository {
       'model': deviceInfo['model'] as String? ?? 'Unknown',
       'platform': Platform.isAndroid ? 'android' : 'ios',
       'os_version': deviceInfo['version'] as String? ?? Platform.operatingSystemVersion,
-      'app_version': '1.0.0',
+      'app_version': AppVersion.name,
       'phone_number': deviceInfo['phone_number'] as String?,
     };
 
@@ -66,35 +67,12 @@ class DeviceRepository {
     await _apiClient.post<dynamic>(
       ApiEndpoints.heartbeat(uuid),
       data: {
-        'app_version': '1.0.0',
+        'app_version': AppVersion.name,
         'os_version': Platform.operatingSystemVersion,
         'pending_calls': pendingCalls,
         'pending_recordings': pendingRecordings,
       },
     );
-  }
-
-  Future<List<Map<String, dynamic>>> getMyDevices() async {
-    final response = await _apiClient.get<List<dynamic>>(ApiEndpoints.myDevices);
-    final rawList = response.data ?? [];
-    return rawList.whereType<Map<String, dynamic>>().toList();
-  }
-
-  Future<bool> updateDevice({
-    required String deviceUuid,
-    String? deviceName,
-    String? appVersion,
-    String? osVersion,
-  }) async {
-    final response = await _apiClient.patch<Map<String, dynamic>>(
-      ApiEndpoints.updateDevice(deviceUuid),
-      data: {
-        'device_name': ?deviceName,
-        'app_version': ?appVersion,
-        'os_version': ?osVersion,
-      },
-    );
-    return response.success;
   }
 }
 

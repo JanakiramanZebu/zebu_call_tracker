@@ -5,7 +5,7 @@
   see it.
 
   It exists because the development API server is a LAN host on plain HTTP (see
-  AppConfig.defaultApiBaseUrl). With the release policy in force, every upload —
+  env/dev.json). With the release policy in force, every upload —
   Dio's from Dart and HttpURLConnection's from the native SyncCoordinator alike —
   fails with "CLEARTEXT communication not permitted", which presents as a
   totally broken sync pipeline rather than as the policy decision it is.
@@ -22,7 +22,11 @@
     </base-config>
 
     <domain-config cleartextTrafficPermitted="true">
-        <!-- Keep in step with AppConfig.defaultApiBaseUrl. -->
+        <!-- Keep in step with API_BASE_URL in env/dev.json. A LAN server on
+             any OTHER address is refused with "CLEARTEXT communication not
+             permitted" — add it here as well as in env/dev.json. Android's
+             network-security-config has no CIDR or wildcard form, so each
+             development host has to be listed by name. -->
         <domain includeSubdomains="false">192.168.5.46</domain>
         <!-- Emulator loopback to the host machine, and adb reverse. -->
         <domain includeSubdomains="false">10.0.2.2</domain>

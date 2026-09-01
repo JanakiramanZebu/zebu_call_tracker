@@ -5,16 +5,37 @@ import 'package:uuid/uuid.dart';
 
 import '../config/app_config.dart';
 import '../errors/api_exceptions.dart';
+import '../platform/native_call_bridge.dart';
 import '../../features/auth/data/auth_repository.dart';
-import 'api_endpoints.dart';
 import 'api_response.dart';
+
+/// Exchanges a refresh token for a new pair.
+///
+/// Injected rather than called inline so that the one implementation that may
+/// touch `/auth/refresh` — the native `TokenRefresher` — is reachable from here
+/// without this file depending on the platform provider graph, and so tests can
+/// drive the 401 path without a method channel.
+typedef TokenRefreshDelegate = Future<TokenRefreshResult> Function(
+  String? staleToken,
+);
+
+/// Why a session stopped being usable.
+enum SessionRevokedReason {
+  /// The server refused the refresh token: expired, revoked, or replayed.
+  invalidToken,
+
+  /// There was nothing to refresh with — already signed out.
+  noSession,
+}
 
 class ApiClient {
   ApiClient({
     required SessionStore sessionStore,
+    required TokenRefreshDelegate refreshDelegate,
     Dio? dio,
-    void Function()? onSessionRevoked,
+    void Function(SessionRevokedReason reason)? onSessionRevoked,
   })  : _sessionStore = sessionStore,
+        _refreshDelegate = refreshDelegate,
         _onSessionRevoked = onSessionRevoked {
     _dio = dio ??
         Dio(
@@ -33,7 +54,8 @@ class ApiClient {
 
   late final Dio _dio;
   final SessionStore _sessionStore;
-  final void Function()? _onSessionRevoked;
+  final TokenRefreshDelegate _refreshDelegate;
+  final void Function(SessionRevokedReason reason)? _onSessionRevoked;
   final _uuid = const Uuid();
 
   Completer<bool>? _refreshCompleter;
@@ -93,77 +115,77 @@ class ApiClient {
     );
   }
 
-  /// Single-flight mutex for token refresh according to Section 2.3 of Mobile API Guide
+  /// Refreshes the access token, at most once at a time, per §2.3.
+  ///
+  /// The exchange itself happens in the native `TokenRefresher`, not here.
+  /// That is the correction to the bug this method used to be: three
+  /// `ApiClient` instances each held their own `_refreshCompleter`, so the
+  /// "single-flight mutex" only ever serialised callers that happened to share
+  /// an instance — and the native coordinator refreshed on a fourth path
+  /// entirely. `/auth/refresh` rotates, so the second refresher presented a
+  /// token the server had already invalidated, and the server responded by
+  /// revoking the whole session chain. Users saw it as being signed out at
+  /// random.
+  ///
+  /// The completer below still matters: it collapses the stampede of queued
+  /// requests that all 401 at the same moment inside this isolate, so only one
+  /// crosses the method channel.
   Future<bool> _refreshTokensSingleFlight() async {
-    if (_refreshCompleter != null) {
-      return _refreshCompleter!.future;
-    }
+    final inFlight = _refreshCompleter;
+    if (inFlight != null) return inFlight.future;
 
     final completer = Completer<bool>();
     _refreshCompleter = completer;
 
     try {
       final session = await _sessionStore.read();
-      if (session == null || session.refreshToken == null || session.refreshToken!.isEmpty) {
-        await _handleRevokedSession();
+      if (session == null ||
+          session.refreshToken == null ||
+          session.refreshToken!.isEmpty) {
+        await _handleRevokedSession(SessionRevokedReason.noSession);
         completer.complete(false);
         return false;
       }
 
-      // Dedicated un-intercepted Dio instance for auth refresh to prevent loops
-      final refreshDio = Dio(
-        BaseOptions(
-          baseUrl: AppConfig.apiBaseUrl,
-          connectTimeout: const Duration(seconds: 10),
-          receiveTimeout: const Duration(seconds: 10),
-          contentType: Headers.jsonContentType,
-        ),
-      );
+      // The token we came in with. If another caller — Dart or native — has
+      // already rotated past it, the refresher hands back the current one
+      // instead of starting a second exchange.
+      final result = await _refreshDelegate(session.token);
 
-      final cleanRefreshPath = ApiEndpoints.refresh.startsWith('/')
-          ? ApiEndpoints.refresh.substring(1)
-          : ApiEndpoints.refresh;
+      if (result.isSuccess) {
+        final updated = session.copyWith(
+          token: result.accessToken,
+          // A null replacement means the stored refresh token still stands;
+          // overwriting it with null would strand the session.
+          refreshToken: result.refreshToken ?? session.refreshToken,
+          expiresAt: result.accessTokenExpiresAt,
+          refreshTokenExpiresAt:
+              result.refreshTokenExpiresAt ?? session.refreshTokenExpiresAt,
+        );
+        // §2.3 rule 1: persisted before anything is allowed to use it.
+        await _sessionStore.write(updated);
+        completer.complete(true);
+        return true;
+      }
 
-      final res = await refreshDio.post<Map<String, dynamic>>(
-        cleanRefreshPath,
-        data: {'refresh_token': session.refreshToken},
-      );
-
-      final body = res.data ?? {};
-      final success = body['success'] as bool? ?? false;
-      if (!success || !body.containsKey('data')) {
-        await _handleRevokedSession();
+      if (result.isTerminal) {
+        await _handleRevokedSession(
+          result.failure == TokenRefreshFailure.noSession
+              ? SessionRevokedReason.noSession
+              : SessionRevokedReason.invalidToken,
+        );
         completer.complete(false);
         return false;
       }
 
-      final data = body['data'] as Map<String, dynamic>;
-      final tokens = data['tokens'] as Map<String, dynamic>?;
-      if (tokens == null) {
-        await _handleRevokedSession();
-        completer.complete(false);
-        return false;
-      }
-
-      final newAccessToken = tokens['access_token'] as String;
-      final newRefreshToken = tokens['refresh_token'] as String;
-      final expiresAtStr = tokens['access_token_expires_at'] as String?;
-      final refreshExpiresAtStr = tokens['refresh_token_expires_at'] as String?;
-
-      final updatedSession = session.copyWith(
-        token: newAccessToken,
-        refreshToken: newRefreshToken,
-        expiresAt: expiresAtStr != null ? DateTime.tryParse(expiresAtStr)?.toUtc() : null,
-        refreshTokenExpiresAt:
-            refreshExpiresAtStr != null ? DateTime.tryParse(refreshExpiresAtStr)?.toUtc() : null,
-      );
-
-      // Rule 1: Persist the new refresh token before using the new access token.
-      await _sessionStore.write(updatedSession);
-      completer.complete(true);
-      return true;
-    } catch (e) {
-      await _handleRevokedSession();
+      // Transient: a timeout, a 5xx, no signal. The session is very probably
+      // fine. Clearing it here — which this method used to do for *any*
+      // exception — signed the user out every time the network hiccupped.
+      completer.complete(false);
+      return false;
+    } catch (_) {
+      // Reaching here means the channel itself failed, not the server. Same
+      // reasoning: keep the session, let the caller surface the 401.
       completer.complete(false);
       return false;
     } finally {
@@ -171,9 +193,14 @@ class ApiClient {
     }
   }
 
-  Future<void> _handleRevokedSession() async {
+  /// Drops the local session and tells whoever is listening.
+  ///
+  /// Only called when the server has actually refused the credential. The
+  /// callback is what moves the UI to the sign-in screen; without it wired the
+  /// app sat on a signed-in shell holding no token until it was force-closed.
+  Future<void> _handleRevokedSession(SessionRevokedReason reason) async {
     await _sessionStore.clear();
-    _onSessionRevoked?.call();
+    _onSessionRevoked?.call(reason);
   }
 
   Future<Response<dynamic>> _retryRequest(RequestOptions requestOptions) async {

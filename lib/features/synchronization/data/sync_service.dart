@@ -1,19 +1,18 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:drift/drift.dart' hide Column;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:uuid/uuid.dart';
 
 import '../../../core/config/app_config.dart';
-import '../../../core/network/api_client.dart';
+import '../../../core/network/api_client_provider.dart';
 import '../../../core/network/call_wire_format.dart';
 import '../../../core/storage/app_database.dart';
 import '../../../core/storage/database_providers.dart';
 import '../../../core/storage/sync_state.dart';
-import '../../auth/data/auth_repository.dart';
 import '../../call_tracking/data/call_feed.dart';
 import '../../device/data/device_repository.dart';
 import '../../recording/domain/recording_matcher.dart';
@@ -21,17 +20,16 @@ import 'sync_repository.dart';
 
 
 
-final syncRepositoryProvider = Provider<SyncRepository>((ref) {
-  const store = SecureSessionStore();
-  final client = ApiClient(sessionStore: store);
-  return SyncRepository(apiClient: client);
-});
+// Both share the one [apiClientProvider]. They used to build an ApiClient
+// each, which meant three independent refresh queues against an endpoint that
+// invalidates the token you present to it.
+final syncRepositoryProvider = Provider<SyncRepository>(
+  (ref) => SyncRepository(apiClient: ref.watch(apiClientProvider)),
+);
 
-final deviceRepositoryProvider = Provider<DeviceRepository>((ref) {
-  const store = SecureSessionStore();
-  final client = ApiClient(sessionStore: store);
-  return DeviceRepository(apiClient: client);
-});
+final deviceRepositoryProvider = Provider<DeviceRepository>(
+  (ref) => DeviceRepository(apiClient: ref.watch(apiClientProvider)),
+);
 
 /// Shared sync counters — stream-backed for instant UI updates.
 final syncCountersProvider = StreamProvider.autoDispose<Map<String, int>>((ref) {
@@ -123,6 +121,23 @@ class NativeSyncStatus {
       };
 }
 
+/// Minutes the handset clock is off the server's, or null when it is fine.
+///
+/// Beyond `policy.max_clock_skew_minutes` the server rejects calls with
+/// `SYNC_POLICY_VIOLATION`, which is permanent — the call is not delayed, it is
+/// gone. That makes this the one piece of status the user must see.
+final clockSkewProvider =
+    NotifierProvider<ClockSkewController, int?>(ClockSkewController.new);
+
+class ClockSkewController extends Notifier<int?> {
+  @override
+  int? build() => null;
+
+  void report(int? minutes) {
+    if (state != minutes) state = minutes;
+  }
+}
+
 enum OutboxFilter { all, pending, failed, synced }
 
 class OutboxFilterController extends Notifier<OutboxFilter> {
@@ -172,8 +187,6 @@ class SyncResultSummary {
 }
 
 class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
-  final _uuid = const Uuid();
-  static const _dnsNamespace = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
 
   @override
   Future<SyncResultSummary?> build() async => null;
@@ -267,6 +280,11 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
     final matcher = ref.read(recordingMatcherProvider);
 
     try {
+      // Cheap and self-limiting: after the first pass no row matches. Runs
+      // before anything is queued so a mis-named duplicate is corrected rather
+      // than uploaded.
+      await dao.repairDivergentWithheldKeys();
+
       bool hasRecordingAccess = false;
       try {
         final access = await bridge.getRecordingAccess();
@@ -363,10 +381,18 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
           if (r.dateMillis == null) continue;
           final date = DateTime.fromMillisecondsSinceEpoch(r.dateMillis!).toUtc();
 
-          final extId = 'android-${r.dateMillis}-${r.number}';
-          final idempotencyKey = _uuid.v5(
-            _dnsNamespace,
-            'zebu:call:$extId:${date.millisecondsSinceEpoch}',
+          // Derived through the shared rules, not inline. Built here, this
+          // interpolated a null `r.number` into the literal text "null" while
+          // Kotlin wrote "Unknown" for the same withheld call — so one phone
+          // call produced two keys, two local rows, and two records on the
+          // server.
+          final extId = CallWireIdentity.externalId(
+            startedAtMillis: r.dateMillis!,
+            rawNumber: r.number,
+          );
+          final idempotencyKey = CallWireIdentity.key(
+            startedAtMillis: r.dateMillis!,
+            rawNumber: r.number,
           );
 
           final existing = await dao.findByIdempotencyKey(idempotencyKey);
@@ -429,7 +455,7 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
             LocalCallsCompanion.insert(
               idempotencyKey: idempotencyKey,
               externalCallId: Value(extId),
-              phoneNumber: r.number ?? 'Unknown',
+              phoneNumber: CallWireIdentity.number(r.number),
               normalizedPhoneNumber: Value(r.number),
               contactName: Value(r.cachedName),
               direction: directionStr,
@@ -437,6 +463,19 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
               startedAt: date,
               durationSeconds: Value(durationSecs),
               hasRecording: Value(matched != null),
+              // Written explicitly so both ingesters describe the same
+              // situation with the same word. Left to drift's default, a Dart
+              // capture landed on `pending` whether or not a recording had been
+              // found — and `expireUnmatchedCalls`, which only ever looks for
+              // `waiting_for_recording`, could not tell that the search for
+              // this call's audio had gone stale.
+              recordingUploadStatus: Value(
+                matched != null
+                    ? RecordingUploadStatus.pending
+                    : (durationSecs > 0
+                        ? RecordingUploadStatus.waitingForRecording
+                        : RecordingUploadStatus.absent),
+              ),
               recordingPath: Value(recordingPath),
               recordingMediaStoreId: Value(matched?.mediaStoreId),
               simSlot: Value(_slotFor(r.phoneAccountId, simSlots)),
@@ -569,6 +608,13 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
         }
       }
 
+      // §5.1 question 4: "read these at runtime. Do not hardcode them."
+      // Handed straight to the native coordinator, which is what enforces the
+      // batch size, the recording ceiling and the format list. Until this
+      // existed the policy was fetched, parsed into a Dart object, and then
+      // ignored by every piece of code that had a limit to apply.
+      await _publishPolicy(status);
+
       // §5.1 question 2, and §4.6: once the handset clock drifts past the
       // policy window the server starts rejecting calls outright, and neither
       // side would otherwise know why.
@@ -602,6 +648,21 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
     }
   }
 
+  /// Hands the server's limits to the native side, which enforces them.
+  ///
+  /// Best-effort: a policy that cannot be delivered leaves the coordinator on
+  /// the guide's documented defaults, which is a worse fit than the server's
+  /// own numbers but is not a reason to abandon the sync.
+  Future<void> _publishPolicy(SyncStatusResponse status) async {
+    final raw = status.rawPolicy;
+    if (raw == null || raw.isEmpty) return;
+    try {
+      await ref.read(nativeBridgeProvider).setSyncPolicy(jsonEncode(raw));
+    } catch (e) {
+      debugPrint('[SYNC] Could not publish sync policy natively: $e');
+    }
+  }
+
   /// Compares the handset clock against the server's, per §4.6.
   ///
   /// Beyond `policy.max_clock_skew_minutes` the server rejects calls as
@@ -621,6 +682,11 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
     } else {
       _clockSkewMinutes = null;
     }
+    // Published so the UI can say so. It previously lived only in this field
+    // and in a `SyncResultSummary` nothing rendered, so the one condition that
+    // makes the server discard calls outright was invisible to the person
+    // holding the phone.
+    ref.read(clockSkewProvider.notifier).report(_clockSkewMinutes);
   }
 
   int? _clockSkewMinutes;

@@ -41,6 +41,17 @@ class CallTrackingService : Service() {
         // Periodic background processing independent of WorkManager
         serviceScope.launch {
             while (isActive) {
+                // The session can vanish while this is running: the user signs
+                // out, or TokenRefresher clears it after the server refuses the
+                // refresh token. Carrying on would keep a foreground
+                // notification up claiming calls are being tracked and sent,
+                // which would no longer be true.
+                if (IngestStore.getAuthToken(applicationContext).isNullOrBlank()) {
+                    Log.i(TAG, "Session gone; standing down.")
+                    stopSelf()
+                    break
+                }
+
                 try {
                     val ingested = NativeCallIngestor.ingest(applicationContext, "periodic_service")
                     if (ingested) {
@@ -49,9 +60,17 @@ class CallTrackingService : Service() {
                 } catch (e: Exception) {
                     Log.e(TAG, "Error in periodic tracking loop: ${e.message}")
                 }
-                // Faster than WorkManager's floor — the whole point of being
-                // here. The periodic jobs remain armed underneath regardless.
-                delay(LOOP_INTERVAL_MILLIS)
+                // Faster than WorkManager's floor -- the whole point of being
+                // here, and for a long time not true: this was 15 minutes, the
+                // exact floor it claims to beat. The service therefore cost a
+                // permanent notification and the Android 15 dataSync quota to
+                // duplicate work the periodic job was already doing.
+                //
+                // The interval now comes from the server's
+                // `recommended_sync_interval_seconds` (300 by default), so the
+                // cadence is the one the backend asks for rather than one
+                // invented here.
+                delay(SyncPolicyStore.load(applicationContext).loopIntervalMillis)
             }
         }
     }
@@ -86,10 +105,10 @@ class CallTrackingService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && notificationManager != null) {
             val channel = NotificationChannel(
                 channelId,
-                "Background Call Tracking",
+                "Call tracking",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Keeps the app running in the background to ensure reliable call tracking and syncing."
+                description = "Shown while call tracking is active."
                 setShowBadge(false)
             }
             notificationManager.createNotificationChannel(channel)
@@ -97,8 +116,8 @@ class CallTrackingService : Service() {
 
         val notification = NotificationCompat.Builder(this, channelId)
             .setSmallIcon(android.R.drawable.stat_sys_download) // Reusing existing system icon
-            .setContentTitle("Zebu Call Tracker")
-            .setContentText("Tracking calls in the background...")
+            .setContentTitle("Call tracking is on")
+            .setContentText("Your calls are being recorded and sent to your company.")
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
             .build()
@@ -139,12 +158,28 @@ class CallTrackingService : Service() {
     companion object {
         private const val TAG = "CallTrackingService"
         private const val NOTIF_ID = 1003
-        private const val LOOP_INTERVAL_MILLIS = 15 * 60 * 1000L
         
         const val ACTION_TRIGGER_NOW = "in.mynt.zebu.TRIGGER_NOW"
         const val EXTRA_REASON = "reason"
 
+        /**
+         * Starts the service, but only for a handset that has a session.
+         *
+         * `MainActivity.onCreate` and `BootReceiver` both call this
+         * unconditionally, so a signed-out phone sitting on the sign-in screen
+         * used to run a foreground service and show a permanent "tracking
+         * calls" notification while tracking nothing -- there is no employee to
+         * attribute a call to, and `SyncCoordinator` skips every run with
+         * SKIPPED_NO_AUTH.
+         *
+         * The guard lives here rather than at each call site so a future caller
+         * cannot reintroduce it.
+         */
         fun start(context: Context) {
+            if (IngestStore.getAuthToken(context).isNullOrBlank()) {
+                Log.d(TAG, "No session; not starting the tracking service.")
+                return
+            }
             val intent = Intent(context, CallTrackingService::class.java)
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -157,7 +192,25 @@ class CallTrackingService : Service() {
             }
         }
         
+        /**
+         * Stands the service down and clears its notification.
+         *
+         * Nothing called this before it existed, so signing out cancelled the
+         * scheduled work and cleared the session but left the service running,
+         * with a permanent notification asserting that calls were being tracked
+         * and sent to the company. For a signed-out handset both halves of that
+         * were false.
+         */
+        fun stop(context: Context) {
+            try {
+                context.stopService(Intent(context, CallTrackingService::class.java))
+            } catch (e: Exception) {
+                Log.w(TAG, "CallTrackingService could not be stopped: ${e.message}")
+            }
+        }
+
         fun triggerImmediate(context: Context, reason: String) {
+            if (IngestStore.getAuthToken(context).isNullOrBlank()) return
             val intent = Intent(context, CallTrackingService::class.java).apply {
                 action = ACTION_TRIGGER_NOW
                 putExtra(EXTRA_REASON, reason)

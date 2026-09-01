@@ -27,7 +27,7 @@ class OutboxQueueScreen extends ConsumerWidget {
         elevation: 0,
         scrolledUnderElevation: 0,
         title: const Text(
-          'Call Metadata Outbox',
+          'Calls waiting to send',
           style: TextStyle(
             fontWeight: FontWeight.w700,
             fontSize: 20,
@@ -103,9 +103,9 @@ class OutboxQueueScreen extends ConsumerWidget {
             padding: const EdgeInsets.fromLTRB(16, 4, 16, 10),
             child: ModernSegmentedControl<OutboxFilter>(
               segments: const {
-                OutboxFilter.pending: 'Pending',
-                OutboxFilter.failed: 'Failed',
-                OutboxFilter.synced: 'Synced',
+                OutboxFilter.pending: 'Waiting',
+                OutboxFilter.failed: 'Problems',
+                OutboxFilter.synced: 'Sent',
                 OutboxFilter.all: 'All',
               },
               selected: filter,
@@ -116,25 +116,25 @@ class OutboxQueueScreen extends ConsumerWidget {
           Expanded(
             child: outboxAsync.when(
               loading: () => const SkeletonList(),
-              error: (e, _) => EmptyState(
-                icon: Icons.error_outline_rounded,
-                title: 'Could not load queue',
-                message: '$e',
-                actionLabel: 'Retry',
-                onAction: () => ref.invalidate(outboxItemsProvider),
+              error: (e, _) => ErrorStateView(
+                error: e,
+                logContext: 'OUTBOX',
+                fallbackTitle: 'Could not load the queue',
+                onRetry: () => ref.invalidate(outboxItemsProvider),
               ),
               data: (items) {
                 if (items.isEmpty) {
                   return EmptyState(
                     icon: Icons.done_all_rounded,
                     title: filter == OutboxFilter.failed
-                        ? 'Zero failed uploads'
+                        ? 'Nothing has failed'
+                        : 'Everything has been sent',
+                    message: filter == OutboxFilter.failed
+                        ? 'Every call on this phone reached the server.'
                         : (filter == OutboxFilter.pending
-                            ? 'All calls synced'
-                            : 'Outbox is clear'),
-                    message: filter == OutboxFilter.pending
-                        ? 'All local call records and audio matches have been uploaded to the intelligence server.'
-                        : 'No records matching the selected queue filter.',
+                            ? 'There are no calls waiting. New ones appear here '
+                                'until they reach the server.'
+                            : 'No calls match this filter.'),
                   );
                 }
 

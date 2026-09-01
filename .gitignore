@@ -54,10 +54,11 @@ android/.gradle/
 # ---------------------------------------------------------------------------
 # Call Tracker: secrets and per-environment config
 # ---------------------------------------------------------------------------
-# Environment files carry per-deployment base URLs; .env.example is the only
-# one that is tracked.
-env/.env.*
-!env/.env.example
+# Environment files carry per-deployment base URLs, consumed by
+# --dart-define-from-file. example.json and the README are the only tracked
+# ones; a real deployment's URL does not belong in the repository.
+env/*.json
+!env/example.json
 
 # Android release signing material.
 android/key.properties

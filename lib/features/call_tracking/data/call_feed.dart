@@ -1,12 +1,12 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:uuid/uuid.dart';
 
 import '../../../core/platform/native_call_bridge.dart';
 import '../../../core/storage/app_database.dart';
 import '../../../core/storage/database_providers.dart';
 import '../../../core/storage/sync_state.dart';
+import '../../../core/network/call_wire_format.dart';
 import '../../recording/domain/recording_matcher.dart';
 import '../domain/call_entry.dart';
 
@@ -153,15 +153,19 @@ class CallFeed extends AsyncNotifier<CallFeedState> {
         : const <String, String>{};
 
     final dao = ref.read(callsDaoProvider);
-    const uuid = Uuid();
-    const dnsNamespace = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
 
     final validRows = rows.where((r) => r.dateMillis != null).toList();
-    final keys = validRows.map((r) {
-      final date = DateTime.fromMillisecondsSinceEpoch(r.dateMillis!).toUtc();
-      final extId = 'android-${r.dateMillis}-${r.number}';
-      return uuid.v5(dnsNamespace, 'zebu:call:$extId:${date.millisecondsSinceEpoch}');
-    }).toList();
+    // Third copy of this derivation, now removed. It has to agree with what the
+    // ingesters wrote or this lookup silently misses: a withheld number is
+    // stored under `android-<millis>-Unknown`, and a hand-rolled key built from
+    // a null `r.number` would look for `-null` and find nothing, leaving the
+    // call with no sync state in the history list.
+    final keys = validRows
+        .map((r) => CallWireIdentity.key(
+              startedAtMillis: r.dateMillis!,
+              rawNumber: r.number,
+            ))
+        .toList();
 
     List<LocalCall> localCalls = const [];
     try {

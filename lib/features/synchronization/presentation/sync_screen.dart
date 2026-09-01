@@ -13,6 +13,7 @@ import '../../call_tracking/domain/call_entry.dart';
 import '../../settings/presentation/settings_screen.dart';
 import '../data/sync_service.dart';
 import 'outbox_queue_screen.dart';
+import 'sync_alert_banner.dart';
 
 class SyncScreen extends ConsumerStatefulWidget {
   const SyncScreen({super.key});
@@ -132,7 +133,7 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
                   children: [
                     Icon(Icons.inventory_2_outlined, size: 18, color: Colors.white),
                     SizedBox(width: 10),
-                    Text('Outbox Queue', style: TextStyle(color: Colors.white)),
+                    Text('Calls waiting to send', style: TextStyle(color: Colors.white)),
                   ],
                 ),
               ),
@@ -152,7 +153,7 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
                   children: [
                     Icon(Icons.help_outline_rounded, size: 18, color: Colors.white),
                     SizedBox(width: 10),
-                    Text('Help & Information', style: TextStyle(color: Colors.white)),
+                    Text('How syncing works', style: TextStyle(color: Colors.white)),
                   ],
                 ),
               ),
@@ -173,6 +174,10 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
           physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.fromLTRB(16, 4, 16, 32),
           children: [
+            // Anything stopping or degrading sync, worst first. Nothing below
+            // is meaningful if one of these is live.
+            const SyncAlertBanner(maxAlerts: 3),
+
             // ── Top User Profile Element ─────────────────────────────────────
             if (session != null) ...[
               AppCard(
@@ -266,7 +271,16 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    'Last successful sync: ${isSyncing ? "In progress" : (uploaded > 0 ? "Just now" : "Pending")}',
+                    // The coordinator's own record, which is the only thing
+                    // that knows what happened while the Flutter engine was
+                    // not running. This line used to read "Just now" whenever
+                    // `uploaded > 0` — a LIFETIME counter — so a handset that
+                    // had not reached the server in days still claimed a sync
+                    // seconds ago, while the correct value sat further down
+                    // this same screen.
+                    isSyncing
+                        ? 'Syncing now…'
+                        : 'Last sync: ${nativeSync?.lastSyncLabel ?? "—"}',
                     style: const TextStyle(
                       fontSize: 12,
                       color: AppTokens.textMuted,
@@ -291,9 +305,9 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
               children: [
                 Expanded(
                   child: _SyncStatTile(
-                    title: 'Uploaded',
+                    title: 'Sent',
                     count: '$uploaded',
-                    subtitle: 'Confirmed by server',
+                    subtitle: 'Confirmed by the server',
                     icon: Icons.check_circle_rounded,
                     color: AppTokens.success,
                   ),
@@ -407,7 +421,7 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
                       ),
                       icon: const Icon(Icons.list_alt_rounded, size: 18, color: Colors.white),
                       label: const Text(
-                        'Outbox',
+                        'Waiting',
                         style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
                       ),
                     ),
@@ -418,7 +432,7 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
             const SizedBox(height: 20),
 
             // ── RECORDING INGESTION STATUS ───────────────────────────────────
-            const SectionLabel('Recording Ingestion Status'),
+            const SectionLabel('Call recordings'),
             const SizedBox(height: 8),
             AppCard(
               padding: EdgeInsets.zero,
@@ -463,8 +477,8 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
                   _BreakdownItem(
                     icon: Icons.phone_missed_outlined,
                     iconColor: AppTokens.textMuted,
-                    title: 'Not Recordable',
-                    subtitle: 'Missed or rejected — no audio can exist',
+                    title: 'No audio possible',
+                    subtitle: 'Missed or rejected calls are never recorded',
                     count: '${stats.recordingsNotApplicable}',
                     countColor: AppTokens.textMuted,
                   ),
@@ -474,7 +488,7 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
             const SizedBox(height: 20),
 
             // ── SYSTEM & NETWORK HEALTH ──────────────────────────────────────
-            const SectionLabel('Connectivity & Health'),
+            const SectionLabel('Status'),
             const SizedBox(height: 8),
             AppCard(
               padding: EdgeInsets.zero,
@@ -482,23 +496,34 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
                 children: [
                   _HealthRow(
                     icon: Icons.wifi_rounded,
-                    label: 'Network Connectivity',
+                    label: 'Internet',
                     value: isConnected ? 'Connected' : 'Offline',
                     valueColor: isConnected ? AppTokens.success : AppTokens.danger,
                   ),
                   const _RowDivider(leftPadding: 44),
                   _HealthRow(
                     icon: Icons.dns_rounded,
-                    label: 'Backend Server',
+                    label: 'Server',
                     // The outcome of the last real upload attempt, not whether
                     // a base URL happens to be compiled in. `hasServer` is a
                     // build constant, so this row previously read "Reachable"
                     // on a handset that had never once reached the server.
+                    // A misconfigured build is not a warning, it is a dead
+                    // app: no request it makes can succeed. Saying which of the
+                    // three ways it is wrong is the difference between a
+                    // diagnosable report and "it doesn't work".
                     value: !AppConfig.hasServer
-                        ? 'Not configured'
+                        ? switch (AppConfig.problem) {
+                            ConfigProblem.missingServerUrl => 'No address set',
+                            ConfigProblem.malformedServerUrl =>
+                              'Invalid address',
+                            ConfigProblem.insecureServerUrl =>
+                              'Insecure address',
+                            null => 'Not configured',
+                          }
                         : (nativeSync?.statusLabel ?? 'Checking…'),
                     valueColor: !AppConfig.hasServer
-                        ? AppTokens.warning
+                        ? AppTokens.danger
                         : (nativeSync == null
                             ? AppTokens.textMuted
                             : (nativeSync.isHealthy
@@ -508,7 +533,7 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
                   const _RowDivider(leftPadding: 44),
                   _HealthRow(
                     icon: Icons.schedule_rounded,
-                    label: 'Last Background Sync',
+                    label: 'Last sent',
                     value: nativeSync?.lastSyncLabel ?? '—',
                     valueColor: nativeSync?.hasRun == true
                         ? AppTokens.textSecondary
@@ -517,7 +542,7 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
                   const _RowDivider(leftPadding: 44),
                   _HealthRow(
                     icon: Icons.inventory_2_outlined,
-                    label: 'Local Outbox Queue',
+                    label: 'Waiting to send',
                     value: '$waiting ${waiting == 1 ? "call" : "calls"} waiting',
                     valueColor: waiting > 0 ? AppTokens.warning : AppTokens.success,
                   ),
@@ -530,7 +555,7 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
             const Padding(
               padding: EdgeInsets.symmetric(horizontal: 4),
               child: Text(
-                'Calls and recordings are saved natively to device storage the moment they complete. The background sync worker drains the outbox automatically as soon as internet connectivity is available.',
+                'Calls and recordings are saved on this phone as soon as they finish, and sent automatically once you have an internet connection. You do not need to keep the app open.',
                 style: TextStyle(
                   color: AppTokens.textMuted,
                   height: 1.45,
@@ -553,11 +578,11 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
           borderRadius: BorderRadius.circular(AppTokens.r16),
           side: const BorderSide(color: AppTokens.borderDefault),
         ),
-        title: const Text('Synchronization Engine', style: TextStyle(color: Colors.white)),
+        title: const Text('How syncing works', style: TextStyle(color: Colors.white)),
         content: const Text(
-          '• Offline-First: All calls and audio matches are stored locally first.\n'
-          '• Background Sync: WorkManager uploads call metadata and audio files automatically in the background.\n'
-          '• Deduplication: Every call has a deterministic idempotency key to prevent duplicates.\n'
+          '• Every call is saved on this phone first, so nothing is lost if you are offline.\n'
+          '• Calls and recordings are sent in the background — you do not need to keep the app open.\n'
+          '• A call is never sent twice, even if syncing is interrupted.\n'
           '• Outbox Queue: Inspect individual pending items, error details, and perform manual retries from the Outbox.',
           style: TextStyle(color: AppTokens.textSecondary, height: 1.5),
         ),

@@ -7,6 +7,7 @@ import '../../core/theme/design_tokens.dart';
 import '../../core/utils/formatters.dart';
 import '../../features/call_tracking/domain/call_entry.dart';
 import '../../features/recording/domain/recording_matcher.dart';
+import '../../core/errors/user_facing_error.dart';
 import '../../features/recording/presentation/recording_player_widget.dart';
 
 /// Convenience accessors on BuildContext.
@@ -692,4 +693,55 @@ class EmptyState extends StatelessWidget {
           ),
         ),
       );
+}
+
+
+/// An [EmptyState] built from a thrown object, with the exception text kept out
+/// of it.
+///
+/// Four screens each rendered `message: '$e'`, so a storage fault reached the
+/// user as `SqliteException(11): database disk image is malformed` and a lost
+/// connection as a `DioException` dump. Those name no cause a reader can act on.
+/// [UserFacingError] does the classification; this puts the result on screen and
+/// sends the original to the log.
+///
+/// "Try again" is omitted when retrying provably cannot help, so the button
+/// never offers something that will not work.
+class ErrorStateView extends StatelessWidget {
+  const ErrorStateView({
+    super.key,
+    required this.error,
+    required this.logContext,
+    required this.onRetry,
+    this.fallbackTitle,
+    this.icon = Icons.error_outline_rounded,
+  });
+
+  final Object error;
+
+  /// Tag for the log line, e.g. `DASHBOARD`.
+  final String logContext;
+
+  final VoidCallback onRetry;
+
+  /// Used only when the classifier produces no title of its own.
+  final String? fallbackTitle;
+
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    final friendly = UserFacingError.from(error);
+    friendly.log(logContext);
+
+    return EmptyState(
+      icon: icon,
+      title: friendly.title.isNotEmpty
+          ? friendly.title
+          : (fallbackTitle ?? 'Something went wrong'),
+      message: friendly.message,
+      actionLabel: friendly.isRetryable ? 'Try again' : null,
+      onAction: friendly.isRetryable ? onRetry : null,
+    );
+  }
 }

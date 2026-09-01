@@ -10,11 +10,9 @@ import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
+import `in`.mynt.zebu_call_tracker.call.CallWireFormat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.nio.ByteBuffer
-import java.security.MessageDigest
-import java.util.UUID
 
 /**
  * Autonomous Native WorkManager Worker for Call Outbox Synchronization.
@@ -98,28 +96,12 @@ class CallSyncWorker(
         private const val NOTIF_ID = 1002
 
         /**
-         * Generates a standard RFC 4122 UUID v5 matching Dart's Uuid().v5(Uuid.NAMESPACE_DNS, ...)
+         * Retained as the name older call sites use. The implementation moved
+         * to [CallWireFormat.Identity], which is the mirror of Dart's
+         * `CallWireIdentity` — a call's identity belongs to the wire format,
+         * not to one of the several things that can trigger a sync.
          */
-        fun generateDeterministicIdempotencyKey(extId: String, dateMillis: Long): String {
-            val name = "zebu:call:$extId:$dateMillis"
-            val namespaceUuid = UUID.fromString("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
-            val bb = ByteBuffer.allocate(16)
-            bb.putLong(namespaceUuid.mostSignificantBits)
-            bb.putLong(namespaceUuid.leastSignificantBits)
-            val nsBytes = bb.array()
-            val nameBytes = name.toByteArray(Charsets.UTF_8)
-
-            val md = MessageDigest.getInstance("SHA-1")
-            md.update(nsBytes)
-            val hash = md.digest(nameBytes)
-
-            // Set version 5 and RFC 4122 variant
-            hash[6] = ((hash[6].toInt() and 0x0f) or 0x50).toByte()
-            hash[8] = ((hash[8].toInt() and 0x3f) or 0x80).toByte()
-
-            val msb = ByteBuffer.wrap(hash, 0, 8).long
-            val lsb = ByteBuffer.wrap(hash, 8, 8).long
-            return UUID(msb, lsb).toString()
-        }
+        fun generateDeterministicIdempotencyKey(extId: String, dateMillis: Long): String =
+            CallWireFormat.Identity.keyFor(extId, dateMillis)
     }
 }

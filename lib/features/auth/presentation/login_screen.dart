@@ -3,6 +3,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/config/app_config.dart';
+import '../../../core/config/app_version.dart';
+import '../../../core/network/api_client.dart';
+import '../../../core/network/api_client_provider.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../shared/widgets/brand.dart';
 import '../../../shared/widgets/loaders.dart';
@@ -80,6 +83,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       _busy = true;
       _failure = null;
     });
+    // The banner has done its job once the user acts on it.
+    ref.read(sessionRevocationProvider.notifier).acknowledge();
 
     try {
       final deviceUuid = await const DeviceUuidStore().getOrCreateUuid();
@@ -187,6 +192,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final revoked = ref.watch(sessionRevocationProvider);
+    final configProblem = AppConfig.problem;
 
     return GestureDetector(
       onTap: () => FocusScope.of(context).unfocus(),
@@ -316,6 +323,20 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                             ),
                           ),
                           const SizedBox(height: 20),
+
+                          // Why the user is looking at this screen again after
+                          // having already registered. Without it, a session
+                          // the server revoked simply dumped them back at an
+                          // empty form with no explanation.
+                          if (configProblem != null) ...[
+                            const _ConfigProblemBanner(),
+                            const SizedBox(height: 16),
+                          ],
+
+                          if (revoked != null) ...[
+                            _RevokedBanner(reason: revoked),
+                            const SizedBox(height: 16),
+                          ],
 
                           if (_failure != null) ...[
                             _ErrorBanner(failure: _failure!),
@@ -520,7 +541,11 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                           LoadingFilledButton(
                             label: 'Register & Activate Device',
                             loading: _busy,
-                            onPressed: _submit,
+                            // A build with no reachable server cannot register,
+                            // however correct the details are. Letting the user
+                            // fill in nine fields and press this only to watch
+                            // it fail is worse than saying so up front.
+                            onPressed: configProblem == null ? _submit : null,
                           ),
                         ],
                       ),
@@ -533,7 +558,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
                   Center(
                     child: Text(
-                      AppConfig.buildLabel,
+                      AppConfig.buildLabel(AppVersion.name),
                       style: context.text.bodySmall?.copyWith(
                         color: context.palette.muted,
                         fontSize: 12,
@@ -699,4 +724,98 @@ class _DeviceNotice extends StatelessWidget {
       ],
     ),
   );
+}
+
+
+/// Explains a sign-out the user did not ask for.
+class _RevokedBanner extends StatelessWidget {
+  const _RevokedBanner({required this.reason});
+
+  final SessionRevokedReason reason;
+
+  @override
+  Widget build(BuildContext context) {
+    final message = switch (reason) {
+      SessionRevokedReason.invalidToken =>
+        'Your session expired and could not be renewed. '
+            'Register this device again to resume call tracking.',
+      SessionRevokedReason.noSession =>
+        'This device is no longer registered. '
+            'Enter your details again to reconnect it.',
+    };
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.orange.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.orange.withValues(alpha: 0.45)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.lock_reset_rounded,
+              size: 20, color: Colors.orange),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              message,
+              style: context.text.bodySmall?.copyWith(height: 1.45),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+
+/// Says plainly that the app itself was built wrong.
+///
+/// This is not a user error and there is no user action that fixes it, so it
+/// names the one thing that helps: get a correctly built app. Previously such a
+/// build looked completely normal until the first request failed.
+class _ConfigProblemBanner extends StatelessWidget {
+  const _ConfigProblemBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    final message = AppConfig.problemMessage;
+    if (message == null) return const SizedBox.shrink();
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.red.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.red.withValues(alpha: 0.45)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.report_gmailerrorred_rounded,
+              size: 20, color: Colors.red),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'This app cannot connect to a server',
+                  style: context.text.bodyMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  message,
+                  style: context.text.bodySmall?.copyWith(height: 1.45),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }

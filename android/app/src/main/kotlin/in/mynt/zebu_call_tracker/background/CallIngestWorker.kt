@@ -10,14 +10,8 @@ import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
-import `in`.mynt.zebu_call_tracker.call.CallLogReader
-import `in`.mynt.zebu_call_tracker.permissions.PermissionInspector
-import `in`.mynt.zebu_call_tracker.recording.NativeCallForMatching
-import `in`.mynt.zebu_call_tracker.recording.NativeRecordingMatcher
-import `in`.mynt.zebu_call_tracker.recording.RecordingScanner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlin.math.max
 
 /**
  * Captures new calls and the recordings that existed alongside them, without
@@ -92,13 +86,7 @@ class CallIngestWorker(
         const val KEY_REASON = "reason"
         const val REASON_UNKNOWN = "unknown"
 
-        const val STATUS_OK = "ok"
-        const val STATUS_BLOCKED = "blocked"
-        const val STATUS_FAILED = "failed"
-
         private const val NOTIF_ID = 1001
-        private const val CALL_LIMIT = 200
-        private const val RECORDING_LIMIT = 300
         private const val MAX_ATTEMPTS = 3
     }
 }

@@ -51,12 +51,12 @@ class _PermissionScreenState extends ConsumerState<PermissionScreen>
         top: false,
         child: snapshot.when(
           loading: () => const AskSkeletonList(),
-          error: (e, _) => EmptyState(
-            icon: Icons.error_outline_rounded,
-            title: 'Could not read permissions',
-            message: '$e',
-            actionLabel: 'Try again',
-            onAction: refreshPermissions,
+          error: (e, _) => ErrorStateView(
+            error: e,
+            logContext: 'PERMISSIONS',
+            fallbackTitle: 'Could not read permissions',
+            icon: Icons.lock_outline_rounded,
+            onRetry: refreshPermissions,
           ),
           data: (perms) {
             final asks = permissionAsks(perms, background: background);

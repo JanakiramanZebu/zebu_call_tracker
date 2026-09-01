@@ -13,7 +13,15 @@ import 'ask_card.dart';
 import 'permission_flow.dart';
 
 class PermissionOnboardingScreen extends ConsumerStatefulWidget {
-  const PermissionOnboardingScreen({super.key});
+  const PermissionOnboardingScreen({super.key, this.recovery = false});
+
+  /// True when the walkthrough is being shown again because an essential
+  /// permission was revoked after setup, rather than for first-run setup.
+  ///
+  /// Only the wording changes. Telling a user who has been using the app for
+  /// weeks to "set up call tracking" reads as though their data is gone, and
+  /// gives no hint that they are here because something was switched off.
+  final bool recovery;
 
   @override
   ConsumerState<PermissionOnboardingScreen> createState() =>
@@ -39,25 +47,25 @@ class _PermissionOnboardingScreenState
       backgroundColor: AppTokens.bgPrimary,
       body: SafeArea(
         child: snapshot.when(
-          loading: () => const Column(
+          loading: () => Column(
             children: [
-              _Header(),
+              _Header(recovery: widget.recovery),
               Expanded(child: AskSkeletonList()),
             ],
           ),
-          error: (e, _) => EmptyState(
-            icon: Icons.error_outline_rounded,
-            title: 'Could not read permissions',
-            message: '$e',
-            actionLabel: 'Try again',
-            onAction: refreshPermissions,
+          error: (e, _) => ErrorStateView(
+            error: e,
+            logContext: 'ONBOARDING',
+            fallbackTitle: 'Could not read permissions',
+            icon: Icons.lock_outline_rounded,
+            onRetry: refreshPermissions,
           ),
           data: (perms) {
             final asks = permissionAsks(perms, background: background);
 
             return Column(
               children: [
-                const _Header(),
+                _Header(recovery: widget.recovery),
                 Expanded(
                   child: ListView(
                     padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
@@ -93,7 +101,13 @@ class _PermissionOnboardingScreenState
                 _Footer(
                   asks: asks,
                   finishing: _finishing,
+                  recovery: widget.recovery,
                   onContinue: _finish,
+                  onSkip: widget.recovery
+                      ? () => ref
+                          .read(permissionRecoveryDismissedProvider.notifier)
+                          .dismiss()
+                      : null,
                 ),
               ],
             );
@@ -105,29 +119,40 @@ class _PermissionOnboardingScreenState
 }
 
 class _Header extends StatelessWidget {
-  const _Header();
+  const _Header({this.recovery = false});
+
+  final bool recovery;
 
   @override
-  Widget build(BuildContext context) => const Padding(
-        padding: EdgeInsets.fromLTRB(20, 20, 20, 16),
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            ZebuAppMark(size: 48),
-            SizedBox(height: 16),
+            const ZebuAppMark(size: 48),
+            const SizedBox(height: 16),
             Text(
-              'Set up call tracking',
-              style: TextStyle(
+              recovery ? 'Call tracking has stopped' : 'Set up call tracking',
+              style: const TextStyle(
                 fontWeight: FontWeight.w800,
                 fontSize: 24,
                 color: Colors.white,
                 letterSpacing: -0.5,
               ),
             ),
-            SizedBox(height: 4),
+            const SizedBox(height: 4),
             Text(
-              'Zebu Call Tracker requires system permissions to log calls, upload recordings, and sync data in the background.',
-              style: TextStyle(
+              recovery
+                  // Says what is true and what is not: capture has stopped, but
+                  // nothing already saved has been lost. A user who thinks
+                  // their history is gone reacts very differently.
+                  ? 'Permission to read the call log was turned off, so no new '
+                      'calls are being recorded. Calls already saved on this '
+                      'phone are safe and will still be sent.'
+                  : 'Zebu Call Tracker requires system permissions to log '
+                      'calls, upload recordings, and sync data in the '
+                      'background.',
+              style: const TextStyle(
                 color: AppTokens.textMuted,
                 fontSize: 13,
                 height: 1.45,
@@ -143,11 +168,18 @@ class _Footer extends StatelessWidget {
     required this.asks,
     required this.finishing,
     required this.onContinue,
+    this.recovery = false,
+    this.onSkip,
   });
 
   final List<PermissionAsk> asks;
   final bool finishing;
   final VoidCallback onContinue;
+  final bool recovery;
+
+  /// Recovery only: lets the user into the app without the permission. Null
+  /// during first-run setup, where there is nothing to go back to.
+  final VoidCallback? onSkip;
 
   @override
   Widget build(BuildContext context) => Container(
@@ -177,10 +209,24 @@ class _Footer extends StatelessWidget {
                     'not granted. You can add them any time from Settings.',
               ),
             LoadingFilledButton(
-              label: asks.allGranted ? 'Start tracking' : 'Continue',
+              label: recovery
+                  ? 'Resume call tracking'
+                  : (asks.allGranted ? 'Start tracking' : 'Continue'),
               loading: finishing,
               onPressed: asks.canProceed ? onContinue : null,
             ),
+            if (onSkip != null && !asks.canProceed)
+              TextButton(
+                onPressed: onSkip,
+                child: const Text(
+                  'Continue without call tracking',
+                  style: TextStyle(
+                    color: AppTokens.textMuted,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
           ],
         ),
       );

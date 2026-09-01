@@ -307,13 +307,13 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
           AppTokens.callRejected,
         ),
       PopupFilterCategory.neverAttended => (
-          'Never Attended',
+          'Incoming Not Answered',
           'Calls that disconnected before connection',
           Icons.phone_paused_rounded,
           AppTokens.callNeverAttended,
         ),
       PopupFilterCategory.notPickup => (
-          'Not Pickup by Client',
+          'Outgoing Not Answered',
           'Outgoing calls where the client did not answer',
           Icons.call_end_rounded,
           AppTokens.textMuted,
@@ -455,7 +455,7 @@ class _CardAnalyticalPopupState extends ConsumerState<CardAnalyticalPopup> {
             mainAxisAlignment: MainAxisAlignment.spaceAround,
             children: [
               _MetricStat(
-                label: 'Never Attended',
+                label: 'Incoming Not Answered',
                 value: '${stats.neverAttended}',
                 color: AppTokens.callNeverAttended,
               ),

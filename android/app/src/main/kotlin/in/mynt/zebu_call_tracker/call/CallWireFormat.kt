@@ -1,5 +1,9 @@
 package `in`.mynt.zebu_call_tracker.call
 
+import java.nio.ByteBuffer
+import java.security.MessageDigest
+import java.util.UUID
+
 /**
  * The `direction` and `status` vocabulary the server accepts, and the only
  * sanctioned way to derive them from an Android call-log row.
@@ -107,5 +111,81 @@ object CallWireFormat {
             Direction.UNKNOWN,
             if (connected) Status.ENDED else Status.UNKNOWN,
         )
+    }
+
+    /**
+     * How a call's identity is derived. **Mirror of `CallWireIdentity` in
+     * `lib/core/network/call_wire_format.dart`.**
+     *
+     * Two independent ingesters write the same outbox table: [
+     * in.mynt.zebu_call_tracker.background.NativeCallIngestor] here and
+     * `ingestNativeCallLogs` in Dart. They may disagree about when they run;
+     * they must not disagree about what a call is *called*, because the
+     * idempotency key is the only thing stopping the server storing the same
+     * conversation twice.
+     *
+     * They did disagree. A withheld number arrives as null: this side
+     * substituted "Unknown", Dart interpolated the null and produced the
+     * literal text "null". Two external ids, two v5 UUIDs, two rows, and two
+     * separate call records on the server for one phone call.
+     */
+    object Identity {
+
+        /** Fixed forever: changing it renames every call ever queued. */
+        private val DNS_NAMESPACE: UUID =
+            UUID.fromString("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+
+        /** Placeholder for a number the call log withheld. */
+        const val WITHHELD_NUMBER = "Unknown"
+
+        /**
+         * The number as it goes into the external id, the key and the row.
+         *
+         * Only null is folded. An empty string is left alone deliberately:
+         * both sides already produced the same id for it, and folding it would
+         * rename rows that are not broken.
+         */
+        fun number(raw: String?): String = raw ?: WITHHELD_NUMBER
+
+        /** Stable per-call id from the call log's own timestamp and number. */
+        fun externalId(startedAtMillis: Long, rawNumber: String?): String =
+            "android-$startedAtMillis-${number(rawNumber)}"
+
+        /**
+         * The name hashed into the v5 UUID. Must match Dart byte-for-byte.
+         */
+        fun keyName(externalCallId: String, startedAtMillis: Long): String =
+            "zebu:call:$externalCallId:$startedAtMillis"
+
+        /** The idempotency key for a call-log row. */
+        fun key(startedAtMillis: Long, rawNumber: String?): String =
+            keyFor(externalId(startedAtMillis, rawNumber), startedAtMillis)
+
+        /**
+         * RFC 4122 v5 over [DNS_NAMESPACE], matching Dart's
+         * `Uuid().v5(namespace, name)`.
+         *
+         * Lived on `CallSyncWorker` until now, which is a strange home for the
+         * function that decides a call's identity — it is a property of the
+         * wire format, not of one of the four things that can trigger a sync.
+         */
+        fun keyFor(externalCallId: String, startedAtMillis: Long): String {
+            val name = keyName(externalCallId, startedAtMillis)
+            val bb = ByteBuffer.allocate(16)
+            bb.putLong(DNS_NAMESPACE.mostSignificantBits)
+            bb.putLong(DNS_NAMESPACE.leastSignificantBits)
+
+            val md = MessageDigest.getInstance("SHA-1")
+            md.update(bb.array())
+            val hash = md.digest(name.toByteArray(Charsets.UTF_8))
+
+            hash[6] = ((hash[6].toInt() and 0x0f) or 0x50).toByte()
+            hash[8] = ((hash[8].toInt() and 0x3f) or 0x80).toByte()
+
+            return UUID(
+                ByteBuffer.wrap(hash, 0, 8).long,
+                ByteBuffer.wrap(hash, 8, 8).long,
+            ).toString()
+        }
     }
 }

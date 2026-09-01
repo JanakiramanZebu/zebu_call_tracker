@@ -124,6 +124,34 @@ abstract interface class NativeCallBridge {
   /// Clears native auth credentials on sign out.
   Future<void> clearAuthSession();
 
+  /// Exchanges the stored refresh token for a new pair.
+  ///
+  /// Dart does not call `POST /auth/refresh` itself on Android. The native
+  /// coordinator has to be able to refresh with no Flutter engine attached, so
+  /// it owns the exchange; routing Dart's refreshes through the same gate is
+  /// what stops the two from racing.
+  ///
+  /// [staleToken] is the access token the caller held when it received a 401.
+  /// When another caller has already refreshed past it, the current token comes
+  /// straight back and no request is made.
+  Future<TokenRefreshResult> refreshAuthTokens({
+    String? staleToken,
+    String? apiBaseUrl,
+  });
+
+  /// Hands the server's published limits to the native coordinator.
+  ///
+  /// §5.1 says to read `policy` at runtime rather than hardcode it: an
+  /// administrator can change the batch size, the recording ceiling and the
+  /// allowed formats. Dart does the fetching; the coordinator does the work,
+  /// so the values have to cross the channel.
+  Future<bool> setSyncPolicy(String policyJson);
+
+  /// Whether the user opted in to sending recordings over mobile data.
+  Future<bool> getRecordingsOnMeteredNetworks();
+
+  Future<void> setRecordingsOnMeteredNetworks(bool allowed);
+
   /// Reads last native sync attempt status and timestamps.
   Future<Map<String, Object?>> getNativeSyncStatus();
 
@@ -382,7 +410,7 @@ class MethodChannelNativeCallBridge implements NativeCallBridge {
   }) async {
     await _invoke<void>('setAuthSession', {
       'token': token,
-      if (refreshToken != null) 'refreshToken': refreshToken,
+      'refreshToken': ?refreshToken,
       'apiBaseUrl': apiBaseUrl,
       'deviceUuid': deviceUuid,
     });
@@ -391,6 +419,33 @@ class MethodChannelNativeCallBridge implements NativeCallBridge {
   @override
   Future<void> clearAuthSession() async {
     await _method.invokeMethod<void>('clearAuthSession');
+  }
+
+  @override
+  Future<TokenRefreshResult> refreshAuthTokens({
+    String? staleToken,
+    String? apiBaseUrl,
+  }) async {
+    final raw = await _invoke<Map<Object?, Object?>>('refreshAuthTokens', {
+      'staleToken': ?staleToken,
+      'apiBaseUrl': ?apiBaseUrl,
+    });
+    return TokenRefreshResult.fromPlatform(raw);
+  }
+
+  @override
+  Future<bool> setSyncPolicy(String policyJson) async {
+    return await _invoke<bool>('setSyncPolicy', {'policyJson': policyJson});
+  }
+
+  @override
+  Future<bool> getRecordingsOnMeteredNetworks() async {
+    return await _invoke<bool>('getRecordingsOnMeteredNetworks');
+  }
+
+  @override
+  Future<void> setRecordingsOnMeteredNetworks(bool allowed) async {
+    await _invoke<void>('setRecordingsOnMeteredNetworks', {'allowed': allowed});
   }
 
   @override
@@ -460,6 +515,86 @@ RecordingCandidate _candidateFromPlatform(Map<Object?, Object?> m) =>
 // Platform DTOs. Deliberately dumb: normalisation, E.164 formatting and the
 // idempotency key all belong to the domain layer, not here.
 // ---------------------------------------------------------------------------
+
+/// Why a token refresh produced nothing.
+///
+/// The distinction between [transient] and [invalid] is the whole point of the
+/// type. Treating a timeout as proof the session is dead is what used to sign
+/// users out whenever they walked through a tunnel.
+enum TokenRefreshFailure {
+  /// The server refused the refresh token. Terminal — sign in again.
+  invalid,
+
+  /// Timeout, 5xx, no connectivity. Keep the session; try again later.
+  transient,
+
+  /// Nothing to refresh with: signed out, or never signed in.
+  noSession,
+
+  /// The platform channel is unavailable — not Android, or no engine.
+  unsupported,
+}
+
+/// Outcome of [NativeCallBridge.refreshAuthTokens].
+class TokenRefreshResult {
+  const TokenRefreshResult({
+    this.accessToken,
+    this.refreshToken,
+    this.accessTokenExpiresAt,
+    this.refreshTokenExpiresAt,
+    this.failure,
+  });
+
+  final String? accessToken;
+
+  /// Null when the server returned no replacement, in which case the stored
+  /// one is still current.
+  final String? refreshToken;
+
+  /// Carried through so the Dart session does not keep an expiry belonging to
+  /// the token it just replaced.
+  final DateTime? accessTokenExpiresAt;
+  final DateTime? refreshTokenExpiresAt;
+
+  final TokenRefreshFailure? failure;
+
+  bool get isSuccess => accessToken != null && accessToken!.isNotEmpty;
+
+  /// True only when the session is genuinely unusable. A [failure] of
+  /// [TokenRefreshFailure.transient] must NOT clear the session.
+  bool get isTerminal =>
+      failure == TokenRefreshFailure.invalid ||
+      failure == TokenRefreshFailure.noSession;
+
+  const TokenRefreshResult.failed(TokenRefreshFailure reason)
+      : accessToken = null,
+        refreshToken = null,
+        accessTokenExpiresAt = null,
+        refreshTokenExpiresAt = null,
+        failure = reason;
+
+  factory TokenRefreshResult.fromPlatform(Map<Object?, Object?> m) {
+    final ok = m['ok'] as bool? ?? false;
+    if (ok) {
+      return TokenRefreshResult(
+        accessToken: m['accessToken'] as String?,
+        refreshToken: m['refreshToken'] as String?,
+        accessTokenExpiresAt: _parseUtc(m['accessTokenExpiresAt'] as String?),
+        refreshTokenExpiresAt: _parseUtc(m['refreshTokenExpiresAt'] as String?),
+      );
+    }
+    return TokenRefreshResult(
+      failure: switch (m['failure'] as String?) {
+        'INVALID' => TokenRefreshFailure.invalid,
+        'NO_SESSION' => TokenRefreshFailure.noSession,
+        _ => TokenRefreshFailure.transient,
+      },
+    );
+  }
+
+  static DateTime? _parseUtc(String? raw) =>
+      raw == null ? null : DateTime.tryParse(raw)?.toUtc();
+}
 
 enum CallDirection {
   incoming,

@@ -2,6 +2,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/config/app_config.dart';
+import '../../../core/config/app_version.dart';
+import '../../../core/network/api_client_provider.dart';
 import '../../background/data/background_service.dart';
 import '../../call_tracking/data/call_feed.dart';
 import '../../synchronization/data/sync_service.dart';
@@ -9,7 +11,7 @@ import '../domain/session.dart';
 import 'auth_repository.dart';
 
 final authRepositoryProvider = Provider<AuthRepository>(
-  (ref) => buildAuthRepository(),
+  (ref) => buildAuthRepository(apiClient: ref.watch(apiClientProvider)),
 );
 
 class AuthController extends AsyncNotifier<Session?> {
@@ -29,62 +31,6 @@ class AuthController extends AsyncNotifier<Session?> {
     }
     return session;
   }
-
-  Future<Session> signIn({
-    required String clientId,
-    required String mobileNumber,
-    required String deviceId,
-  }) async {
-    final repo = ref.read(authRepositoryProvider);
-
-    Map<String, Object?> device;
-    try {
-      device = await ref.read(deviceInfoProvider.future);
-    } on Object {
-      device = const {};
-    }
-
-    final session = await repo.signIn(
-      clientId: clientId,
-      mobileNumber: mobileNumber,
-      deviceId: deviceId,
-      device: device,
-    );
-
-    if (!session.deviceRegistered) {
-      try {
-        final deviceRepo = ref.read(deviceRepositoryProvider);
-        await deviceRepo.registerDevice(deviceInfo: device);
-      } catch (_) {
-        // Device registration attempt failed silently; will retry on sync
-      }
-    }
-
-    state = AsyncData(session);
-
-    // Synchronize native background worker credentials
-    try {
-      final deviceUuid = await ref.read(deviceRepositoryProvider).getDeviceUuid();
-      await ref.read(nativeBridgeProvider).setAuthSession(
-        token: session.token,
-        refreshToken: session.refreshToken,
-        apiBaseUrl: AppConfig.apiBaseUrl,
-        deviceUuid: deviceUuid,
-      );
-    } catch (_) {}
-
-    // Initial sync trigger in background after sign-in
-    Future.microtask(() async {
-      try {
-        await ref.read(syncServiceProvider.notifier).triggerSync();
-      } catch (_) {
-        // Sync trigger failed silently
-      }
-    });
-
-    return session;
-  }
-
   Future<Session> signInWithPairingWord({
     required String pairingWord,
     required String employeeCode,
@@ -120,7 +66,7 @@ class AuthController extends AsyncNotifier<Session?> {
       manufacturer: device['manufacturer'] as String? ?? 'Generic',
       model: device['model'] as String? ?? 'Unknown',
       osVersion: device['version'] as String? ?? '14',
-      appVersion: '1.4.2',
+      appVersion: AppVersion.name,
       mobileUniqueId: mobileUniqueId,
     );
 
@@ -190,3 +136,32 @@ class OnboardingController extends AsyncNotifier<bool> {
 final onboardingProvider = AsyncNotifierProvider<OnboardingController, bool>(
   OnboardingController.new,
 );
+
+/// Set when the user chooses to carry on without call-log access.
+///
+/// The recovery walkthrough is a hard gate: nothing the app exists to do works
+/// without this permission. But a hard gate with no way past it traps anyone who
+/// genuinely cannot grant it -- a managed handset, a work profile restriction --
+/// and takes away the parts that DO still work: the outbox keeps draining
+/// already-captured calls, and they can still reach Settings and sign out.
+///
+/// Deliberately NOT persisted. It lasts for this launch only, so the next cold
+/// start puts the problem back in front of them, and the critical alert banner
+/// says so on every screen in the meantime.
+final permissionRecoveryDismissedProvider =
+    NotifierProvider<PermissionRecoveryDismissed, bool>(
+  PermissionRecoveryDismissed.new,
+);
+
+class PermissionRecoveryDismissed extends Notifier<bool> {
+  @override
+  bool build() => false;
+
+  void dismiss() => state = true;
+
+  /// Called once access is back, so a later revocation gates again rather than
+  /// inheriting a decision the user made about a different situation.
+  void reset() {
+    if (state) state = false;
+  }
+}

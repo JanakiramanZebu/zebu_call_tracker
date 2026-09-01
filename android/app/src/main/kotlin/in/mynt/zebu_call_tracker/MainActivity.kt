@@ -21,7 +21,10 @@ class MainActivity : FlutterActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        // Start persistent foreground tracking service to keep app alive
+        // Starts only when a session exists -- CallTrackingService.start
+        // enforces that itself, so opening the app while signed out no longer
+        // raises a foreground service and a "tracking calls" notification for a
+        // phone that is tracking nothing.
         CallTrackingService.start(applicationContext)
 
         // Re-arm on every launch.

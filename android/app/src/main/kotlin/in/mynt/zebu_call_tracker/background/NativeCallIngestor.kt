@@ -30,6 +30,21 @@ object NativeCallIngestor {
      * reads the system call log directly, so they remain visible in the app —
      * they are simply never queued for an upload the server would refuse.
      */
+    /**
+     * How long after a call ends the app keeps looking for its recording.
+     *
+     * One constant for both halves of the search. They were 600s for "keep
+     * looking" and 300s for "give up", so for five minutes a call was declared
+     * `absent` while still being offered to the matcher — and a recording an
+     * OEM dialer wrote late could be attached to a call that had already been
+     * written off.
+     *
+     * Ten minutes is generous for a dialer that normally writes its file within
+     * seconds of the call-log row, and bounded enough that a call without audio
+     * stops being reconsidered on every pass.
+     */
+    private const val RECORDING_DISCOVERY_WINDOW_SECONDS = 600L
+
     private const val BACKFILL_DAYS = 30L
     private const val BACKFILL_PAGES = 12
 
@@ -130,7 +145,10 @@ object NativeCallIngestor {
                 if (!isFirstRun) {
                     // 3. Retroactive matching for existing unlinked calls in SQLite
                     if (candidates.isNotEmpty()) {
-                        val unlinkedCalls = NativeCallOutboxDao.getCallsNeedingRecordingMatch(context, maxAgeSeconds = 600L)
+                        val unlinkedCalls = NativeCallOutboxDao.getCallsNeedingRecordingMatch(
+                            context,
+                            maxAgeSeconds = RECORDING_DISCOVERY_WINDOW_SECONDS,
+                        )
                         for (unlinked in unlinkedCalls) {
                             val dateMillis = (unlinked["startedAtMillis"] as? Number)?.toLong() ?: continue
                             val duration = (unlinked["durationSeconds"] as? Number)?.toInt() ?: 0
@@ -162,8 +180,11 @@ object NativeCallIngestor {
                         }
                     }
 
-                    // 4. Expire unlinked calls that passed the 5-minute discovery window
-                    NativeCallOutboxDao.expireUnmatchedCalls(context, maxAgeSeconds = 300L)
+                    // 4. Give up on calls whose discovery window has closed.
+                    NativeCallOutboxDao.expireUnmatchedCalls(
+                        context,
+                        maxAgeSeconds = RECORDING_DISCOVERY_WINDOW_SECONDS,
+                    )
 
                     // 5. Retain snapshot in IngestStore for Dart recording matcher compatibility
                     IngestStore.append(

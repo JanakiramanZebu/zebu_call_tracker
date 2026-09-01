@@ -7,6 +7,7 @@ import '../../../shared/widgets/charts.dart';
 import '../../../shared/widgets/loaders.dart';
 import '../../../shared/widgets/ui_kit.dart';
 import '../../permissions/presentation/permission_screen.dart';
+import '../../synchronization/presentation/sync_alert_banner.dart';
 import '../../settings/presentation/settings_screen.dart';
 import '../data/call_feed.dart';
 import '../domain/call_entry.dart';
@@ -114,12 +115,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         onRefresh: _refreshAnalytics,
         child: feed.when(
           loading: () => const DashboardSkeleton(),
-          error: (e, _) => EmptyState(
-            icon: Icons.error_outline_rounded,
-            title: 'Could not load analytics',
-            message: '$e',
-            actionLabel: 'Try again',
-            onAction: _refreshAnalytics,
+          error: (e, _) => ErrorStateView(
+            error: e,
+            logContext: 'DASHBOARD',
+            fallbackTitle: 'Could not load analytics',
+            onRetry: _refreshAnalytics,
           ),
           data: (state) {
             if (state.blocked) {
@@ -149,6 +149,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             return ListView(
               padding: const EdgeInsets.fromLTRB(16, 4, 16, 32),
               children: [
+                // Anything stopping sync, above the numbers. Analytics that
+                // look healthy sitting on top of a revoked device is exactly
+                // the reassurance nobody should be given.
+                const SyncAlertBanner(),
+
                 // ── Filter Controls Row ──────────────────────────────────────
                 SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
@@ -377,7 +382,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
           children: [
             Expanded(
               child: MetricTile(
-                title: 'Never Attended',
+                title: 'Incoming Not Answered',
                 count: '${stats.neverAttended}',
                 icon: Icons.phone_paused_rounded,
                 color: AppTokens.callNeverAttended,
@@ -393,7 +398,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             const SizedBox(width: 10),
             Expanded(
               child: MetricTile(
-                title: 'Not Pickup by Client',
+                title: 'Outgoing Not Answered',
                 count: '${stats.notPickupByClient}',
                 icon: Icons.call_end_rounded,
                 color: AppTokens.textMuted,
@@ -630,7 +635,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Text(
-                'Recording Ingestion Status',
+                'Call recordings',
                 style: TextStyle(
                   fontSize: 15,
                   fontWeight: FontWeight.w700,

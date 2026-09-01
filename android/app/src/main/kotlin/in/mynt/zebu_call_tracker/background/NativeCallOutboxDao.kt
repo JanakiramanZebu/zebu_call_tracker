@@ -281,6 +281,106 @@ object NativeCallOutboxDao {
     }
 
     /**
+     * Claims up to [limit] rows that still owe the server their METADATA.
+     *
+     * The batch counterpart to [claimNextWaitingCall]. `POST /sync/calls` takes
+     * an array and the guide recommends fifty per request (§5.5); the
+     * coordinator was sending one, so a backlog of five hundred calls meant
+     * five hundred round trips, five hundred sets of headers, and five hundred
+     * radio wake-ups to move a few kilobytes.
+     *
+     * Deliberately narrower than the single-row claim: it takes only rows with
+     * no `server_call_id`, because a row that already has one owes audio, not
+     * metadata, and audio uploads stay strictly one at a time (§6.5). Those are
+     * left for the per-row loop.
+     *
+     * All claimed rows move to UPLOADING inside one transaction, so a second
+     * runner cannot take the same work and a crash leaves them recoverable by
+     * [recoverStuckUploadingCalls].
+     */
+    fun claimMetadataBatch(context: Context, limit: Int): List<CallRecord> =
+        synchronized(dbLock) {
+            val db = getWritableDb(context) ?: return emptyList()
+            if (limit <= 0) return emptyList()
+
+            val claimed = mutableListOf<CallRecord>()
+            val nowSec = System.currentTimeMillis() / 1000L
+
+            db.beginTransaction()
+            try {
+                val query = """
+                    SELECT local_id, idempotency_key, external_call_id, server_call_id, phone_number,
+                           contact_name, direction, status, started_at, duration_seconds,
+                           has_recording, recording_path, recording_media_store_id, recording_checksum,
+                           recording_upload_status, sim_slot, attempt_count, sync_state
+                    FROM $TABLE_LOCAL_CALLS
+                    WHERE server_call_id IS NULL
+                      AND (sync_state = '${SyncStates.WAITING}'
+                           OR (sync_state = '${SyncStates.RETRY_PENDING}'
+                               AND (next_attempt_at IS NULL OR next_attempt_at <= ?)))
+                    ORDER BY started_at DESC
+                    LIMIT ?
+                """.trimIndent()
+
+                db.rawQuery(query, arrayOf(nowSec.toString(), limit.toString())).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        claimed += cursor.toCallRecord()
+                    }
+                }
+
+                for (record in claimed) {
+                    val cv = ContentValues().apply { put("sync_state", SyncStates.UPLOADING) }
+                    db.update(
+                        TABLE_LOCAL_CALLS,
+                        cv,
+                        "local_id = ?",
+                        arrayOf(record.localId.toString()),
+                    )
+                }
+                db.setTransactionSuccessful()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error claiming metadata batch: ${e.message}")
+                claimed.clear()
+            } finally {
+                db.endTransaction()
+            }
+            return claimed
+        }
+
+    /**
+     * Reads one row of the column list shared by both claim queries.
+     *
+     * Extracted so the batch and single-row claims cannot drift apart in what
+     * they read or how they interpret it — the seconds/millis fix-up below in
+     * particular is easy to get right once and wrong twice.
+     */
+    private fun android.database.Cursor.toCallRecord(): CallRecord {
+        val rawStartedAt = getLong(8)
+        return CallRecord(
+            localId = getLong(0),
+            idempotencyKey = getString(1),
+            externalCallId = if (isNull(2)) null else getString(2),
+            serverCallId = if (isNull(3)) null else getString(3),
+            phoneNumber = getString(4) ?: "Unknown",
+            contactName = if (isNull(5)) null else getString(5),
+            direction = getString(6) ?: "incoming",
+            status = getString(7) ?: CallWireFormat.Status.ENDED,
+            startedAtMillis =
+                if (rawStartedAt < 10000000000L) rawStartedAt * 1000L else rawStartedAt,
+            durationSeconds = getInt(9),
+            hasRecording = getInt(10) == 1,
+            recordingPath = if (isNull(11)) null else getString(11),
+            recordingMediaStoreId = if (isNull(12)) null else getLong(12),
+            recordingChecksum = if (isNull(13)) null else getString(13),
+            recordingUploadStatus =
+                if (isNull(14)) RecordingStates.PENDING else getString(14),
+            simSlot = if (isNull(15)) 1 else getInt(15),
+            attemptCount = getInt(16),
+            syncState = SyncStates.UPLOADING,
+        )
+    }
+
+    /**
      * Atomically selects and claims the next pending record for upload.
      * Sets its state to `UPLOADING` in a single transaction.
      */
@@ -388,6 +488,41 @@ object NativeCallOutboxDao {
     }
 
     /**
+     * Holds a recording back without disturbing the call's own state.
+     *
+     * Used when audio is waiting for an unmetered network. [markRetryPending]
+     * would be wrong here: it moves the row out of UPLOADED, and the sync
+     * counters read UPLOADED as "sent" — so a call the server already has would
+     * be reported to the user as still waiting, for as long as the deferral
+     * lasted. The call IS synced; only its audio is not.
+     *
+     * Leaves `recording_upload_status` on `pending` so the claim query's
+     * recording clause still matches once `next_attempt_at` passes.
+     */
+    fun deferRecordingUpload(
+        context: Context,
+        idempotencyKey: String,
+        delaySeconds: Long,
+    ): Boolean = synchronized(dbLock) {
+        val db = getWritableDb(context) ?: return false
+        return try {
+            val cv = ContentValues().apply {
+                put("sync_state", SyncStates.UPLOADED)
+                put("next_attempt_at", (System.currentTimeMillis() / 1000L) + delaySeconds)
+            }
+            db.update(
+                TABLE_LOCAL_CALLS,
+                cv,
+                "idempotency_key = ?",
+                arrayOf(idempotencyKey),
+            ) > 0
+        } catch (e: Exception) {
+            Log.e(TAG, "Error deferring recording upload: ${e.message}")
+            false
+        }
+    }
+
+    /**
      * Persists server call ID when metadata upload succeeds.
      */
     fun markServerCallId(context: Context, idempotencyKey: String, serverCallId: String, revision: Int): Boolean = synchronized(dbLock) {
@@ -425,12 +560,25 @@ object NativeCallOutboxDao {
     /**
      * Marks recording upload failure specifically.
      */
+    /**
+     * Codes that mean the stored digest no longer describes the file.
+     *
+     * Clearing it forces the next attempt to hash the bytes again. Without
+     * this the coordinator reuses the same stale checksum on every retry and
+     * the server refuses the upload identically each time — a retryable error
+     * that can never actually succeed, which is the worst of both states.
+     */
+    private val CHECKSUM_STALE_CODES = setOf("CHECKSUM_MISMATCH", "FILE_SIZE_MISMATCH")
+
     fun markRecordingFailed(context: Context, idempotencyKey: String, errorCode: String): Boolean = synchronized(dbLock) {
         val db = getWritableDb(context) ?: return false
         return try {
             val cv = ContentValues().apply {
                 put("recording_upload_status", RecordingStates.FAILED)
                 put("last_error_code", errorCode)
+                if (errorCode in CHECKSUM_STALE_CODES) {
+                    putNull("recording_checksum")
+                }
             }
             val rows = db.update(TABLE_LOCAL_CALLS, cv, "idempotency_key = ?", arrayOf(idempotencyKey))
             rows > 0
@@ -555,12 +703,12 @@ object NativeCallOutboxDao {
         try {
             for (c in calls) {
                 val dateMillis = (c["dateMillis"] as? Number)?.toLong() ?: System.currentTimeMillis()
-                val number = (c["number"] as? String) ?: "Unknown"
+                val number = CallWireFormat.Identity.number(c["number"] as? String)
                 val rawType = (c["type"] as? String)?.lowercase() ?: "unknown"
                 val duration = (c["durationSeconds"] as? Number)?.toInt() ?: 0
                 val contactName = c["cachedName"] as? String
-                val extId = "android-$dateMillis-$number"
-                val idempotencyKey = CallSyncWorker.generateDeterministicIdempotencyKey(extId, dateMillis)
+                val extId = CallWireFormat.Identity.externalId(dateMillis, number)
+                val idempotencyKey = CallWireFormat.Identity.keyFor(extId, dateMillis)
 
                 // Stored in the server's vocabulary, so the row is upload-ready
                 // as written and the local value cannot drift from the wire one.
