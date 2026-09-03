@@ -68,6 +68,12 @@ class RecordingCandidate {
 
   double get durationSeconds => durationMillis / 1000.0;
 
+  /// How long the dialer held the file open. For an intact file this
+  /// reproduces [durationSeconds], which is why disagreement is evidence the
+  /// file is truncated or still being written.
+  int get lifetimeSeconds =>
+      dateModifiedEpochSeconds - dateAddedEpochSeconds;
+
   static String _staticNormalize(String name) {
     return name.replaceAll(RegExp(r'[^0-9]'), '');
   }
@@ -80,6 +86,7 @@ class CallForMatching {
     required this.durationSeconds,
     this.normalizedNumber,
     this.contactName,
+    this.answeredAtEpochMillis,
     String? cachedNumberTail,
     String? cachedLowerContactName,
   })  : _cachedNumberTail = cachedNumberTail ?? _extractTail(normalizedNumber),
@@ -98,10 +105,22 @@ class CallForMatching {
   final String? normalizedNumber;
   final String? contactName;
 
+  /// When the call was actually picked up, if the device could say.
+  ///
+  /// This is the anchor that turns matching from a duration coincidence into a
+  /// statement about the same instant: an OEM dialer opens its file when the
+  /// call connects, so [RecordingCandidate.dateAddedEpochSeconds] and this
+  /// value describe one event and should agree to within a second or two. Null
+  /// falls back to the original heuristic scoring.
+  final int? answeredAtEpochMillis;
+
   final String _cachedNumberTail;
   final String _cachedLowerContactName;
 
   int get startedAtEpochSeconds => startedAtEpochMillis ~/ 1000;
+
+  int? get answeredAtEpochSeconds =>
+      answeredAtEpochMillis == null ? null : answeredAtEpochMillis! ~/ 1000;
   String get cachedNumberTail => _cachedNumberTail;
   String get cachedLowerContactName => _cachedLowerContactName;
 
@@ -122,11 +141,18 @@ class MatchSignals {
     required this.durationDeltaSeconds,
     required this.ringGapSeconds,
     required this.identityMatched,
+    required this.lifetimeDeltaSeconds,
+    this.anchorScore,
+    this.anchorDeltaSeconds,
   });
 
   final double durationScore;
   final double timingScore;
   final double identityScore;
+
+  /// How closely the file opened to the known answer instant. Null when no
+  /// answer time was available and the heuristic path was taken.
+  final double? anchorScore;
 
   /// |recording duration − call duration|, in seconds.
   final double durationDeltaSeconds;
@@ -134,12 +160,22 @@ class MatchSignals {
   /// recording start − call start. Should be a plausible ring time.
   final int ringGapSeconds;
 
+  /// |recording start − call answer|, in seconds. Null on the heuristic path.
+  final int? anchorDeltaSeconds;
+
+  /// |file lifetime − audio duration|. Large means truncated or still writing.
+  final double lifetimeDeltaSeconds;
+
   final bool identityMatched;
+
+  /// True when an answer time was known and the file lines up with it.
+  bool get isAnchored => anchorScore != null && anchorScore! > 0;
 
   @override
   String toString() =>
       'dur=${durationDeltaSeconds.toStringAsFixed(1)}s '
       'ring=${ringGapSeconds}s '
+      '${anchorDeltaSeconds == null ? '' : 'anchor=${anchorDeltaSeconds}s '}'
       'id=$identityMatched';
 }
 
@@ -151,6 +187,7 @@ class RecordingMatch {
     this.signals,
     this.runnerUpConfidence = 0,
     this.reason = '',
+    this.rankedCandidates = const [],
   });
 
   final RecordingMatchStatus status;
@@ -160,7 +197,27 @@ class RecordingMatch {
   final double runnerUpConfidence;
   final String reason;
 
+  /// Every candidate that survived the hard gates, best first.
+  ///
+  /// The review UI needs more than the winner to offer a choice. This used to
+  /// be computed and thrown away, which is why "Review required" could be shown
+  /// with nothing to review.
+  final List<RankedCandidate> rankedCandidates;
+
   bool get isAssociable => status == RecordingMatchStatus.matched;
+}
+
+/// A scored candidate, for the ambiguity UI and the audit trail.
+class RankedCandidate {
+  const RankedCandidate({
+    required this.candidate,
+    required this.confidence,
+    required this.signals,
+  });
+
+  final RecordingCandidate candidate;
+  final double confidence;
+  final MatchSignals signals;
 }
 
 /// Confidence-based association between an existing device recording and a
@@ -194,6 +251,9 @@ class RecordingMatcher {
     this.matchThreshold = 0.70,
     this.ambiguityMargin = 0.15,
     this.plausibilityFloor = 0.40,
+    this.anchorToleranceSeconds = 2.0,
+    this.maxAnchorDeltaSeconds = 10,
+    this.maxLifetimeDeltaSeconds = 15.0,
   });
 
   /// Beyond this delta the duration score decays to zero.
@@ -221,12 +281,37 @@ class RecordingMatcher {
   /// Below this a candidate is not worth a human's attention either.
   final double plausibilityFloor;
 
-  // Weights. Duration dominates because it is the signal that held to within
-  // ~1s across every observed pair; identity is weakest because a contact
-  // rename or a withheld number wipes it out entirely.
+  /// How far a recording's start may sit from a known answer time before the
+  /// anchor scores zero. Both are whole seconds from different providers, so
+  /// one second of slack is rounding and two is generous.
+  final double anchorToleranceSeconds;
+
+  /// Beyond this the candidate is rejected outright when an answer time is
+  /// known. A dialer does not open its file ten seconds away from the moment
+  /// the call connected; something that does belongs to a different call.
+  final int maxAnchorDeltaSeconds;
+
+  /// How far a file's open-to-close lifetime may differ from the audio it
+  /// contains before it is treated as truncated or still being written.
+  final double maxLifetimeDeltaSeconds;
+
+  // Heuristic weights: no answer time available. Duration dominates because it
+  // is the signal that held to within ~1s across every observed pair; identity
+  // is weakest because a contact rename or a withheld number wipes it out
+  // entirely.
   static const _wDuration = 0.45;
   static const _wTiming = 0.35;
   static const _wIdentity = 0.20;
+
+  // Anchored weights: an answer time IS available. The anchor takes half the
+  // weight because it is the only signal that identifies a SPECIFIC call rather
+  // than a plausible one — it is what separates two back-to-back calls of
+  // similar length to the same person, which is precisely the case the
+  // heuristic path has to declare ambiguous.
+  static const _waAnchor = 0.50;
+  static const _waDuration = 0.25;
+  static const _waTiming = 0.10;
+  static const _waIdentity = 0.15;
 
   RecordingMatch match(
     CallForMatching call,
@@ -264,14 +349,32 @@ class RecordingMatcher {
 
       final signals = _score(call, candidate);
       if (signals == null) continue; // hard-gated out
-      final score =
-          _wDuration * signals.durationScore +
-          _wTiming * signals.timingScore +
-          _wIdentity * signals.identityScore;
-      scored.add((c: candidate, score: score, s: signals));
+      scored.add((c: candidate, score: _weigh(signals), s: signals));
     }
 
     if (scored.isEmpty) {
+      // The anchor gate is strict by design, and it assumes the dialer stamps
+      // dateAdded when it OPENS the file. That holds on the devices this was
+      // derived from, but the convention is the OEM's to choose and some stamp
+      // it at close instead — on such a handset every candidate would sit a
+      // whole call-length away from the answer instant and be rejected, which
+      // is worse than the heuristic this replaced.
+      //
+      // So when the anchor eliminates EVERYTHING, it is treated as evidence
+      // about the device rather than about the recordings, and the call is
+      // rescored without it. The heuristic path is the floor; anchoring can
+      // only improve on it, never lose to it.
+      if (call.answeredAtEpochMillis != null) {
+        return match(
+          CallForMatching(
+            startedAtEpochMillis: call.startedAtEpochMillis,
+            durationSeconds: call.durationSeconds,
+            normalizedNumber: call.normalizedNumber,
+            contactName: call.contactName,
+          ),
+          candidates,
+        );
+      }
       return RecordingMatch(
         status: RecordingMatchStatus.unmatched,
         confidence: 0,
@@ -284,12 +387,22 @@ class RecordingMatcher {
     scored.sort((a, b) => b.score.compareTo(a.score));
     final best = scored.first;
     final runnerUp = scored.length > 1 ? scored[1].score : 0.0;
+    final ranked = scored
+        .map(
+          (e) => RankedCandidate(
+            candidate: e.c,
+            confidence: e.score,
+            signals: e.s,
+          ),
+        )
+        .toList(growable: false);
 
     if (best.score < plausibilityFloor) {
       return RecordingMatch(
         status: RecordingMatchStatus.unmatched,
         confidence: best.score,
         runnerUpConfidence: runnerUp,
+        rankedCandidates: ranked,
         reason: 'Best candidate scored below the plausibility floor.',
       );
     }
@@ -305,6 +418,7 @@ class RecordingMatcher {
         candidate: best.c,
         signals: best.s,
         runnerUpConfidence: runnerUp,
+        rankedCandidates: ranked,
         reason: best.score < matchThreshold
             ? 'Best candidate did not reach the confidence threshold.'
             : 'A second candidate scored too close to the best one.',
@@ -317,8 +431,25 @@ class RecordingMatcher {
       candidate: best.c,
       signals: best.s,
       runnerUpConfidence: runnerUp,
-      reason: 'Duration and timing both consistent.',
+      rankedCandidates: ranked,
+      reason: best.s.isAnchored
+          ? 'Recording opened at the moment the call was answered.'
+          : 'Duration and timing both consistent.',
     );
+  }
+
+  /// Applies whichever weight set the available signals justify.
+  double _weigh(MatchSignals s) {
+    final anchor = s.anchorScore;
+    if (anchor != null) {
+      return _waAnchor * anchor +
+          _waDuration * s.durationScore +
+          _waTiming * s.timingScore +
+          _waIdentity * s.identityScore;
+    }
+    return _wDuration * s.durationScore +
+        _wTiming * s.timingScore +
+        _wIdentity * s.identityScore;
   }
 
   /// Returns null when the candidate is ruled out outright.
@@ -332,6 +463,31 @@ class RecordingMatcher {
     final ringGap =
         candidate.dateAddedEpochSeconds - call.startedAtEpochSeconds;
     if (ringGap < minRingGapSeconds || ringGap > maxRingGapSeconds) return null;
+
+    // A file whose open-to-close lifetime does not reproduce its own audio
+    // duration is truncated, still being written, or was copied here by
+    // something other than the dialer. Any of those makes it the wrong file to
+    // attach, and it previously scored like a perfect match.
+    final lifetimeDelta =
+        (candidate.lifetimeSeconds - candidate.durationSeconds).abs();
+    if (candidate.lifetimeSeconds > 0 &&
+        lifetimeDelta > maxLifetimeDeltaSeconds) {
+      return null;
+    }
+
+    // Hard anchor gate. When the answer instant is known, a file that did not
+    // open at that instant belongs to another call, however well its duration
+    // happens to line up.
+    int? anchorDelta;
+    double? anchorScore;
+    final answeredAtSeconds = call.answeredAtEpochSeconds;
+    if (answeredAtSeconds != null) {
+      final delta =
+          (candidate.dateAddedEpochSeconds - answeredAtSeconds).abs();
+      if (delta > maxAnchorDeltaSeconds) return null;
+      anchorDelta = delta;
+      anchorScore = math.max(0.0, 1.0 - (delta / anchorToleranceSeconds));
+    }
 
     // Linear decay to zero at the tolerance edge.
     final durationScore = math.max(
@@ -363,8 +519,11 @@ class RecordingMatcher {
       // and unsaved contacts legitimately produce no overlap. Score it neutral
       // rather than zero so it can lift a match but never sink one.
       identityScore: identityMatched ? 1.0 : 0.5,
+      anchorScore: anchorScore,
       durationDeltaSeconds: durationDelta,
       ringGapSeconds: ringGap,
+      anchorDeltaSeconds: anchorDelta,
+      lifetimeDeltaSeconds: lifetimeDelta.toDouble(),
       identityMatched: identityMatched,
     );
   }

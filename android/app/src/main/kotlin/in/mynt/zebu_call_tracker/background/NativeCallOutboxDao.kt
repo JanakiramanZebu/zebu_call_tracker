@@ -22,6 +22,14 @@ data class CallRecord(
     val direction: String,
     val status: String,
     val startedAtMillis: Long,
+    /**
+     * When the call was actually picked up, or null when nothing on the device
+     * could say. Never inferred from [startedAtMillis] — see
+     * [in.mynt.zebu_call_tracker.background.NativeCallIngestor].
+     */
+    val answeredAtMillis: Long?,
+    /** True end of the call. Null means the uploader must estimate it. */
+    val endedAtMillis: Long?,
     val durationSeconds: Int,
     val hasRecording: Boolean,
     val recordingPath: String?,
@@ -29,6 +37,12 @@ data class CallRecord(
     val recordingChecksum: String?,
     val recordingUploadStatus: String,
     val simSlot: Int,
+    /**
+     * Call-log and recording facts with no column of their own, as a JSON
+     * object, forwarded verbatim to the server's `metadata` bag. Null when the
+     * row predates the field.
+     */
+    val metadataJson: String?,
     val attemptCount: Int,
     val syncState: String,
 )
@@ -78,6 +92,7 @@ class ZebuDatabaseHelper private constructor(context: Context, dbPath: String) :
                 recording_checksum TEXT,
                 recording_upload_status TEXT NOT NULL DEFAULT '${RecordingStates.PENDING}',
                 sim_slot INTEGER DEFAULT 1,
+                metadata_json TEXT,
                 client_created_at INTEGER NOT NULL,
                 sync_state TEXT NOT NULL DEFAULT '${SyncStates.WAITING}',
                 attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -94,6 +109,33 @@ class ZebuDatabaseHelper private constructor(context: Context, dbPath: String) :
 
     override fun onOpen(db: SQLiteDatabase) {
         super.onOpen(db)
+
+        // Additive columns, applied here rather than through onUpgrade.
+        //
+        // DATABASE_VERSION cannot move on its own: drift opens this same file
+        // and SQLiteOpenHelper throws outright when it meets a database newer
+        // than itself, so a one-sided bump takes background sync down silently
+        // on the next call. Both owners would have to ship in lockstep, and a
+        // user on a mixed build would be broken in between.
+        //
+        // `ALTER TABLE ... ADD COLUMN` guarded by a column check is the same
+        // trick the state normalisation below already uses for the same
+        // reason: idempotent, order-independent, and correct whichever side
+        // opens the file first. New columns must be nullable, which they are.
+        // Caught per column, not around the loop: one column failing must not
+        // skip the ones after it, and "duplicate column name" is an expected
+        // outcome whenever the other owner won the race to add it.
+        for ((column, ddl) in ADDITIVE_COLUMNS) {
+            try {
+                if (!hasColumn(db, TABLE_LOCAL_CALLS, column)) {
+                    db.execSQL("ALTER TABLE $TABLE_LOCAL_CALLS ADD COLUMN $ddl")
+                    Log.i(TAG, "Added column $column to $TABLE_LOCAL_CALLS")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not add column $column: ${e.message}")
+            }
+        }
+
         // Fold rows still carrying the pre-unification lowercase state names
         // onto the shared vocabulary. Mirrors drift's `beforeOpen`; whichever
         // side opens the file first does the work, and running it twice is a
@@ -116,6 +158,48 @@ class ZebuDatabaseHelper private constructor(context: Context, dbPath: String) :
 
     companion object {
         private const val TAG = "ZebuDatabaseHelper"
+
+        private const val TABLE_LOCAL_CALLS = "local_calls"
+
+        /**
+         * Columns added after the original schema, as `name to DDL`.
+         *
+         * Applied in [onOpen] against a live database, so every one must be
+         * nullable or carry a default — SQLite cannot add a NOT NULL column
+         * without one, and rows written by an older build have no value for it.
+         *
+         * Keep in step with drift's `_additiveColumns` in
+         * `lib/core/storage/app_database.dart`. Either owner may create the
+         * column; both must tolerate finding it already there.
+         */
+        private val ADDITIVE_COLUMNS = listOf(
+            "metadata_json" to "metadata_json TEXT",
+        )
+
+        /** True when [table] already has [column]. */
+        private fun hasColumn(db: SQLiteDatabase, table: String, column: String): Boolean =
+            try {
+                db.rawQuery("PRAGMA table_info($table)", null).use { cursor ->
+                    val nameIndex = cursor.getColumnIndex("name")
+                    if (nameIndex < 0) return false
+                    while (cursor.moveToNext()) {
+                        if (cursor.getString(nameIndex) == column) return true
+                    }
+                    false
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not inspect $table: ${e.message}")
+                // Report "absent" and let the ALTER be attempted.
+                //
+                // The opposite default looks safer and is not: claiming the
+                // column exists skips the ALTER, and then every claim query —
+                // which names `metadata_json` explicitly — fails, is swallowed
+                // by its own catch, and returns an empty list. Sync would stop
+                // dead and silently. Attempting the ALTER can only fail with
+                // "duplicate column name", which the caller already catches and
+                // which means the column was there all along.
+                false
+            }
 
         /**
          * **Locked to drift's `AppDatabase.schemaVersion`.**
@@ -312,7 +396,8 @@ object NativeCallOutboxDao {
                     SELECT local_id, idempotency_key, external_call_id, server_call_id, phone_number,
                            contact_name, direction, status, started_at, duration_seconds,
                            has_recording, recording_path, recording_media_store_id, recording_checksum,
-                           recording_upload_status, sim_slot, attempt_count, sync_state
+                           recording_upload_status, sim_slot, attempt_count, sync_state,
+                           answered_at, ended_at, metadata_json
                     FROM $TABLE_LOCAL_CALLS
                     WHERE server_call_id IS NULL
                       AND (sync_state = '${SyncStates.WAITING}'
@@ -348,15 +433,29 @@ object NativeCallOutboxDao {
         }
 
     /**
+     * Epoch SECONDS as stored, widened to millis.
+     *
+     * Timestamps go into this table in seconds, but rows written by earlier
+     * builds — and by drift, which stores millis — can carry either. Anything
+     * below the year-2286 boundary in millis is unambiguously a seconds value.
+     */
+    private fun toMillis(raw: Long): Long =
+        if (raw < 10000000000L) raw * 1000L else raw
+
+    /**
      * Reads one row of the column list shared by both claim queries.
      *
      * Extracted so the batch and single-row claims cannot drift apart in what
-     * they read or how they interpret it — the seconds/millis fix-up below in
-     * particular is easy to get right once and wrong twice.
+     * they read or how they interpret it — the seconds/millis fix-up above in
+     * particular is easy to get right once and wrong twice. Both claims now go
+     * through it; the single-row claim used to repeat the whole mapping inline,
+     * which is exactly the drift this was extracted to prevent.
      */
     private fun android.database.Cursor.toCallRecord(): CallRecord {
-        val rawStartedAt = getLong(8)
         return CallRecord(
+            answeredAtMillis = if (isNull(18)) null else toMillis(getLong(18)),
+            endedAtMillis = if (isNull(19)) null else toMillis(getLong(19)),
+            metadataJson = if (isNull(20)) null else getString(20),
             localId = getLong(0),
             idempotencyKey = getString(1),
             externalCallId = if (isNull(2)) null else getString(2),
@@ -365,8 +464,7 @@ object NativeCallOutboxDao {
             contactName = if (isNull(5)) null else getString(5),
             direction = getString(6) ?: "incoming",
             status = getString(7) ?: CallWireFormat.Status.ENDED,
-            startedAtMillis =
-                if (rawStartedAt < 10000000000L) rawStartedAt * 1000L else rawStartedAt,
+            startedAtMillis = toMillis(getLong(8)),
             durationSeconds = getInt(9),
             hasRecording = getInt(10) == 1,
             recordingPath = if (isNull(11)) null else getString(11),
@@ -414,7 +512,8 @@ object NativeCallOutboxDao {
                 SELECT local_id, idempotency_key, external_call_id, server_call_id, phone_number,
                        contact_name, direction, status, started_at, duration_seconds,
                        has_recording, recording_path, recording_media_store_id, recording_checksum,
-                       recording_upload_status, sim_slot, attempt_count, sync_state
+                       recording_upload_status, sim_slot, attempt_count, sync_state,
+                       answered_at, ended_at, metadata_json
                 FROM $TABLE_LOCAL_CALLS
                 WHERE sync_state = '${SyncStates.WAITING}'
                    OR (sync_state = '${SyncStates.RETRY_PENDING}'
@@ -430,52 +529,22 @@ object NativeCallOutboxDao {
 
             val cursor = db.rawQuery(query, arrayOf(nowSec.toString(), nowSec.toString()))
             if (cursor.moveToFirst()) {
-                val localId = cursor.getLong(0)
-                val idempotencyKey = cursor.getString(1)
-                val externalCallId = if (cursor.isNull(2)) null else cursor.getString(2)
-                val serverCallId = if (cursor.isNull(3)) null else cursor.getString(3)
-                val phoneNumber = cursor.getString(4) ?: "Unknown"
-                val contactName = if (cursor.isNull(5)) null else cursor.getString(5)
-                val direction = cursor.getString(6) ?: "incoming"
-                val status = cursor.getString(7) ?: CallWireFormat.Status.ENDED
-                
-                val rawStartedAt = cursor.getLong(8)
-                val startedAtMillis = if (rawStartedAt < 10000000000L) rawStartedAt * 1000L else rawStartedAt
-                
-                val durationSec = cursor.getInt(9)
-                val hasRecording = cursor.getInt(10) == 1
-                val recordingPath = if (cursor.isNull(11)) null else cursor.getString(11)
-                val recordingMediaStoreId = if (cursor.isNull(12)) null else cursor.getLong(12)
-                val recordingChecksum = if (cursor.isNull(13)) null else cursor.getString(13)
-                val recordingUploadStatus = if (cursor.isNull(14)) RecordingStates.PENDING else cursor.getString(14)
-                val simSlot = if (cursor.isNull(15)) 1 else cursor.getInt(15)
-                val attemptCount = cursor.getInt(16)
+                // Same mapper as the batch claim. This block used to repeat the
+                // whole mapping by hand against the same column list, so every
+                // field added to one claim had to be remembered in the other.
+                val claimedRecord = cursor.toCallRecord()
 
                 val cv = ContentValues().apply {
                     put("sync_state", SyncStates.UPLOADING)
                 }
-                db.update(TABLE_LOCAL_CALLS, cv, "local_id = ?", arrayOf(localId.toString()))
-
-                record = CallRecord(
-                    localId = localId,
-                    idempotencyKey = idempotencyKey,
-                    externalCallId = externalCallId,
-                    serverCallId = serverCallId,
-                    phoneNumber = phoneNumber,
-                    contactName = contactName,
-                    direction = direction,
-                    status = status,
-                    startedAtMillis = startedAtMillis,
-                    durationSeconds = durationSec,
-                    hasRecording = hasRecording,
-                    recordingPath = recordingPath,
-                    recordingMediaStoreId = recordingMediaStoreId,
-                    recordingChecksum = recordingChecksum,
-                    recordingUploadStatus = recordingUploadStatus,
-                    simSlot = simSlot,
-                    attemptCount = attemptCount,
-                    syncState = SyncStates.UPLOADING,
+                db.update(
+                    TABLE_LOCAL_CALLS,
+                    cv,
+                    "local_id = ?",
+                    arrayOf(claimedRecord.localId.toString()),
                 )
+
+                record = claimedRecord
             }
             cursor.close()
             db.setTransactionSuccessful()
@@ -684,6 +753,13 @@ object NativeCallOutboxDao {
 
     /**
      * Inserts captured calls directly into SQLite outbox with matched recording info.
+     *
+     * [recordingMatches] is keyed by the call's `dateMillis` and carries
+     * whatever the ingester worked out that the call-log row itself does not
+     * hold: the matched recording, the real `answered_at`/`ended_at`, a
+     * resolved contact name, and the JSON metadata bag. All of it optional —
+     * a key that is absent simply leaves the column null, which is what an
+     * unknowable value must look like.
      */
     fun insertCapturedCalls(
         context: Context,
@@ -706,7 +782,12 @@ object NativeCallOutboxDao {
                 val number = CallWireFormat.Identity.number(c["number"] as? String)
                 val rawType = (c["type"] as? String)?.lowercase() ?: "unknown"
                 val duration = (c["durationSeconds"] as? Number)?.toInt() ?: 0
-                val contactName = c["cachedName"] as? String
+                val matchInfo = recordingMatches[dateMillis]
+                // CACHED_NAME is null for anyone saved to Contacts AFTER the
+                // call, so the ingester's PhoneLookup result wins when the log
+                // has nothing.
+                val contactName = (c["cachedName"] as? String)?.takeIf { it.isNotBlank() }
+                    ?: (matchInfo?.get("contactName") as? String)?.takeIf { it.isNotBlank() }
                 val extId = CallWireFormat.Identity.externalId(dateMillis, number)
                 val idempotencyKey = CallWireFormat.Identity.keyFor(extId, dateMillis)
 
@@ -716,8 +797,7 @@ object NativeCallOutboxDao {
                 val direction = outcome.direction
                 val statusStr = outcome.status
 
-                val matchInfo = recordingMatches[dateMillis]
-                val hasRec = matchInfo != null
+                val hasRec = matchInfo?.get("mediaStoreId") != null
                 val recPath = matchInfo?.get("recordingPath") as? String
                 val mediaStoreId = (matchInfo?.get("mediaStoreId") as? Number)?.toLong()
                 val checksum = matchInfo?.get("checksum") as? String
@@ -735,6 +815,20 @@ object NativeCallOutboxDao {
                     put("direction", direction)
                     put("status", statusStr)
                     put("started_at", dateMillis / 1000L)
+                    // Both null unless something on the device could actually
+                    // say. `started_at + duration` is NOT an acceptable stand-in
+                    // for ended_at: started_at is when the phone began ringing
+                    // and duration counts connected time only, so the two
+                    // differ by the entire ring. The server recomputes
+                    // duration_seconds from this pair when both are present,
+                    // which makes a confident wrong answer worse than none.
+                    val answeredAtMillis = (matchInfo?.get("answeredAtMillis") as? Number)?.toLong()
+                    val endedAtMillis = (matchInfo?.get("endedAtMillis") as? Number)?.toLong()
+                    if (answeredAtMillis != null) put("answered_at", answeredAtMillis / 1000L)
+                    if (endedAtMillis != null) put("ended_at", endedAtMillis / 1000L)
+                    (matchInfo?.get("metadataJson") as? String)?.let {
+                        put("metadata_json", it)
+                    }
                     put("duration_seconds", duration)
                     put("has_recording", if (hasRec) 1 else 0)
                     if (recPath != null) put("recording_path", recPath)
@@ -787,7 +881,8 @@ object NativeCallOutboxDao {
 
         try {
             val query = """
-                SELECT local_id, idempotency_key, phone_number, contact_name, started_at, duration_seconds
+                SELECT local_id, idempotency_key, phone_number, contact_name, started_at,
+                       duration_seconds, direction, answered_at, metadata_json
                 FROM $TABLE_LOCAL_CALLS
                 WHERE duration_seconds > 0
                   AND (has_recording = 0
@@ -810,6 +905,13 @@ object NativeCallOutboxDao {
                         "contactName" to if (cursor.isNull(3)) null else cursor.getString(3),
                         "startedAtMillis" to startedAtMillis,
                         "durationSeconds" to cursor.getInt(5),
+                        "direction" to (if (cursor.isNull(6)) "unknown" else cursor.getString(6)),
+                        // Present means something better than the recording's
+                        // DATE_ADDED already answered this question.
+                        "answeredAtMillis" to
+                            (if (cursor.isNull(7)) null else toMillis(cursor.getLong(7))),
+                        "metadataJson" to
+                            (if (cursor.isNull(8)) null else cursor.getString(8)),
                     )
                 )
             }
@@ -829,6 +931,9 @@ object NativeCallOutboxDao {
         recordingPath: String,
         mediaStoreId: Long,
         checksum: String?,
+        answeredAtMillis: Long? = null,
+        endedAtMillis: Long? = null,
+        metadataJson: String? = null,
     ): Boolean = synchronized(dbLock) {
         val db = getWritableDb(context) ?: return false
         return try {
@@ -838,6 +943,31 @@ object NativeCallOutboxDao {
                 put("recording_media_store_id", mediaStoreId)
                 if (checksum != null) put("recording_checksum", checksum)
                 put("recording_upload_status", RecordingStates.PENDING)
+                if (metadataJson != null) put("metadata_json", metadataJson)
+            }
+
+            // Finding the audio is also how a retroactively matched call learns
+            // when it was answered: the recording's DATE_ADDED is the pickup and
+            // DATE_MODIFIED is the hangup.
+            //
+            // Written through a guarded UPDATE rather than in the ContentValues
+            // above, because these two must only fill a gap. A journal-derived
+            // answer time comes from the telephony broadcast itself and is the
+            // better of the two; folding it into `cv` would let a later
+            // recording match silently overwrite the more accurate value.
+            if (answeredAtMillis != null) {
+                db.execSQL(
+                    "UPDATE $TABLE_LOCAL_CALLS SET answered_at = ? " +
+                        "WHERE idempotency_key = ? AND answered_at IS NULL",
+                    arrayOf(answeredAtMillis / 1000L, idempotencyKey),
+                )
+            }
+            if (endedAtMillis != null) {
+                db.execSQL(
+                    "UPDATE $TABLE_LOCAL_CALLS SET ended_at = ? " +
+                        "WHERE idempotency_key = ? AND ended_at IS NULL",
+                    arrayOf(endedAtMillis / 1000L, idempotencyKey),
+                )
             }
             // A row already UPLOADED keeps that state: the server has the
             // metadata and the claim query picks it up on the recording clause.
@@ -883,6 +1013,35 @@ object NativeCallOutboxDao {
         } catch (e: Exception) {
             Log.e(TAG, "Error expiring unmatched calls: ${e.message}")
             0
+        }
+    }
+
+    /**
+     * True when the outbox holds no calls at all.
+     *
+     * Used to catch a cursor that is lying. The ingest cursor says "everything
+     * up to here is captured", but it lives in SharedPreferences while the rows
+     * live in SQLite, and the two can part company: the database is wiped and
+     * rebuilt empty by the corruption repair in `AppDatabase`, or cleared by
+     * hand, while the cursor survives untouched. The ingester then believes it
+     * is caught up, never re-reads the call log, and the app shows an empty
+     * dashboard for ever — with nothing broken enough to notice.
+     *
+     * An empty table with a non-zero cursor is that contradiction, and the call
+     * log is the durable source that can settle it.
+     *
+     * Returns false on error: refusing to claim emptiness we could not verify
+     * avoids triggering a needless full backfill.
+     */
+    fun isEmpty(context: Context): Boolean = synchronized(dbLock) {
+        val db = getReadableDb(context) ?: return false
+        return try {
+            db.rawQuery("SELECT EXISTS(SELECT 1 FROM $TABLE_LOCAL_CALLS)", null).use { c ->
+                if (c.moveToFirst()) c.getInt(0) == 0 else false
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not test emptiness: ${e.message}")
+            false
         }
     }
 

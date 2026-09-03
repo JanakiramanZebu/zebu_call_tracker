@@ -281,13 +281,13 @@ class _ActionRow extends ConsumerWidget {
   }
 }
 
-class _RecordingCard extends StatelessWidget {
+class _RecordingCard extends ConsumerWidget {
   const _RecordingCard({required this.entry});
 
   final CallEntry entry;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final style = recordingStyle(context, entry.match.status);
     final rec = entry.match.candidate;
 
@@ -386,7 +386,8 @@ class _RecordingCard extends StatelessWidget {
                 Expanded(
                   child: Text(
                     ambiguous
-                        ? 'Multiple audio files match this call timing. Review required.'
+                        ? 'More than one recording fits this call. Pick the right '
+                            'one below — nothing is uploaded until you do.'
                         : 'Matched by native audio ingestion engine (${(entry.match.confidence * 100).toStringAsFixed(1)}% match confidence).',
                     style: const TextStyle(
                       color: AppTokens.textMuted,
@@ -398,8 +399,120 @@ class _RecordingCard extends StatelessWidget {
               ],
             ),
           ),
+          if (ambiguous) _CandidatePicker(entry: entry),
         ],
       ),
+    );
+  }
+}
+
+/// The choice behind "Review required".
+///
+/// The matcher already ranks every candidate that survived its hard gates and
+/// records why each scored as it did; all of that used to be computed and
+/// dropped, leaving a warning badge with nothing behind it. This shows the
+/// shortlist and lets a person settle it.
+class _CandidatePicker extends ConsumerStatefulWidget {
+  const _CandidatePicker({required this.entry});
+
+  final CallEntry entry;
+
+  @override
+  ConsumerState<_CandidatePicker> createState() => _CandidatePickerState();
+}
+
+class _CandidatePickerState extends ConsumerState<_CandidatePicker> {
+  bool _busy = false;
+
+  Future<void> _choose(RecordingCandidate candidate) async {
+    final startedAt = widget.entry.row.dateMillis;
+    if (startedAt == null || _busy) return;
+
+    setState(() => _busy = true);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await ref.read(callFeedProvider.notifier).confirmRecording(
+            startedAtMillis: startedAt,
+            rawNumber: widget.entry.row.number,
+            candidate: candidate,
+          );
+      if (!mounted) return;
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('Recording attached and queued for upload'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      if (mounted) Navigator.of(context).maybePop();
+    } catch (error) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Could not attach that recording: $error'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ranked = widget.entry.match.rankedCandidates;
+    if (ranked.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Divider(height: 1, color: AppTokens.borderSubtle),
+        for (final option in ranked.take(4))
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        option.candidate.displayName ??
+                            'Recording ${option.candidate.mediaStoreId}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      // The evidence, not just the verdict. Someone breaking a
+                      // tie needs to see what made it close.
+                      Text(
+                        '${(option.confidence * 100).toStringAsFixed(0)}% · '
+                        '${Fmt.duration(option.candidate.durationSeconds.round())} · '
+                        '${option.signals}',
+                        style: const TextStyle(
+                          color: AppTokens.textMuted,
+                          fontSize: 11.5,
+                          fontFeatures: [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                RecordingPlayButton(candidate: option.candidate, size: 28),
+                const SizedBox(width: 6),
+                TextButton(
+                  onPressed: _busy ? null : () => _choose(option.candidate),
+                  child: const Text('Use'),
+                ),
+              ],
+            ),
+          ),
+      ],
     );
   }
 }

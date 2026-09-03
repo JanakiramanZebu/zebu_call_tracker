@@ -1,10 +1,17 @@
 package `in`.mynt.zebu_call_tracker.background
 
 import android.content.Context
+import android.os.Build
 import android.util.Log
+import `in`.mynt.zebu_call_tracker.call.CallEnrichment
 import `in`.mynt.zebu_call_tracker.call.CallLogReader
+import `in`.mynt.zebu_call_tracker.call.CallStateJournal
+import `in`.mynt.zebu_call_tracker.call.CallWireFormat
+import `in`.mynt.zebu_call_tracker.call.ContactResolver
 import `in`.mynt.zebu_call_tracker.permissions.PermissionInspector
 import `in`.mynt.zebu_call_tracker.recording.NativeCallForMatching
+import `in`.mynt.zebu_call_tracker.recording.NativeMatchSignals
+import `in`.mynt.zebu_call_tracker.recording.NativeRecordingCandidate
 import `in`.mynt.zebu_call_tracker.recording.NativeRecordingMatcher
 import `in`.mynt.zebu_call_tracker.recording.RecordingScanner
 import kotlinx.coroutines.Dispatchers
@@ -48,6 +55,25 @@ object NativeCallIngestor {
     private const val BACKFILL_DAYS = 30L
     private const val BACKFILL_PAGES = 12
 
+    /**
+     * The app's own build number, for the metadata bag.
+     *
+     * Read from the package manager rather than BuildConfig: `buildConfig` is
+     * an opt-in Gradle feature and this module does not enable it, so the
+     * generated class is not guaranteed to exist.
+     */
+    private fun appVersionCode(context: Context): Int? = try {
+        val info = context.packageManager.getPackageInfo(context.packageName, 0)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.longVersionCode.toInt()
+        } else {
+            @Suppress("DEPRECATION")
+            info.versionCode
+        }
+    } catch (e: Exception) {
+        null
+    }
+
     const val STATUS_OK = "ok"
     const val STATUS_BLOCKED = "blocked"
     const val STATUS_FAILED = "failed"
@@ -60,7 +86,29 @@ object NativeCallIngestor {
 
         try {
             val cursorMillis = IngestStore.callCursorMillis(context)
-            val isFirstRun = cursorMillis == 0L
+
+            // A non-zero cursor over an empty outbox is a contradiction, and the
+            // cursor is the side that is wrong. The rows live in SQLite and the
+            // cursor lives in SharedPreferences, so a database wiped and rebuilt
+            // by the corruption repair in `AppDatabase` — or cleared by hand —
+            // leaves the cursor still claiming everything is captured. Nothing
+            // then re-reads the call log, and the dashboard stays empty
+            // permanently, which is exactly the state this recovers from.
+            //
+            // Treated as a first run, so the backfill horizon applies and the
+            // last 30 days are rebuilt from the call log. Safe to repeat: the
+            // idempotency key is derived from the call's own timestamp and
+            // number, so re-ingesting produces the same rows and the server
+            // upserts them rather than duplicating.
+            val outboxEmpty = NativeCallOutboxDao.isEmpty(context)
+            if (outboxEmpty && cursorMillis != 0L) {
+                Log.w(
+                    TAG,
+                    "[CALL_INGEST] Outbox empty but cursor at $cursorMillis; " +
+                        "rebuilding from the call log.",
+                )
+            }
+            val isFirstRun = cursorMillis == 0L || outboxEmpty
 
             // On the first run, start from the backfill horizon rather than
             // from the beginning of the call log.
@@ -107,35 +155,116 @@ object NativeCallIngestor {
                 }
 
                 val candidates = recordings.mapNotNull { NativeRecordingMatcher.mapToCandidate(it) }
+                val appBuild = appVersionCode(context)
 
-                // 1. Heuristic Recording Matching for new calls
+                // Names for callers the call log has none for. CACHED_NAME is
+                // filled in by the dialer at the time of the call, so anyone
+                // added to Contacts AFTERWARDS is nameless there forever, and
+                // uploaded that way. One batched PhoneLookup per page fixes it;
+                // denial of READ_CONTACTS makes it return nothing, which is a
+                // valid outcome rather than an error.
+                val unnamedNumbers = calls.mapNotNull { c ->
+                    val cached = (c["cachedName"] as? String)?.takeIf { it.isNotBlank() }
+                    if (cached != null) null else (c["number"] as? String)?.takeIf { it.isNotBlank() }
+                }
+                val resolvedNames = if (unnamedNumbers.isNotEmpty()) {
+                    ContactResolver.resolveBatch(context, unnamedNumbers)
+                } else {
+                    emptyMap()
+                }
+
+                // 1. Recording matching and enrichment for new calls
                 val matchesMap = mutableMapOf<Long, Map<String, Any?>>()
                 for (call in calls) {
                     val dateMillis = (call["dateMillis"] as? Number)?.toLong() ?: continue
                     val duration = (call["durationSeconds"] as? Number)?.toInt() ?: 0
-                    if (duration <= 0) continue
+                    val rawNumber = call["number"] as? String
+                    val contactName = (call["cachedName"] as? String)?.takeIf { it.isNotBlank() }
+                        ?: rawNumber?.let { resolvedNames[it] }
 
-                    val matchObj = NativeCallForMatching(
-                        startedAtEpochMillis = dateMillis,
+                    // The direction the row will be stored with, so the answer
+                    // time obeys the same rule the wire format does.
+                    val direction = CallWireFormat.outcomeFor(
+                        rawDirection = (call["type"] as? String) ?: "unknown",
                         durationSeconds = duration,
-                        phoneNumber = call["number"] as? String,
-                        contactName = call["cachedName"] as? String,
+                    ).direction
+
+                    // A call that never connected has no answer time and no
+                    // recording, but its metadata is still worth carrying —
+                    // block reason and presentation are most interesting
+                    // exactly when a call did not happen.
+                    val window = CallStateJournal.windowFor(context, dateMillis, duration)
+
+                    var matched: NativeRecordingCandidate? = null
+                    var signals: NativeMatchSignals? = null
+                    var confidence: Double? = null
+                    var checksum: String? = null
+                    var uri: String? = null
+
+                    if (duration > 0) {
+                        val matchObj = NativeCallForMatching(
+                            startedAtEpochMillis = dateMillis,
+                            durationSeconds = duration,
+                            phoneNumber = rawNumber,
+                            contactName = contactName,
+                            // Anchor on the journal's pickup where there is one.
+                            // Resolved without a recording first, precisely
+                            // because it is what decides WHICH recording.
+                            answeredAtEpochMillis = CallEnrichment.resolveTimes(
+                                direction = direction,
+                                durationSeconds = duration,
+                                window = window,
+                                recording = null,
+                            ).answeredAtMillis,
+                        )
+
+                        val result = NativeRecordingMatcher.match(matchObj, candidates)
+                        if (result.isMatched && result.candidate != null) {
+                            matched = result.candidate
+                            signals = result.signals
+                            confidence = result.confidence
+                            checksum = RecordingScanner.sha256(context, matched.mediaStoreId)
+                                ?.get("checksum") as? String
+                            uri = RecordingScanner.contentUri(matched.mediaStoreId)
+                            Log.i(
+                                TAG,
+                                "[RECORDING_DISCOVERY] Matched recording ${matched.mediaStoreId} " +
+                                    "for call at $dateMillis (anchored=${signals?.isAnchored})",
+                            )
+                        } else if (result.isAmbiguous) {
+                            Log.i(
+                                TAG,
+                                "[RECORDING_AMBIGUOUS] ${result.rankedCandidates.size} candidates " +
+                                    "for call at $dateMillis: ${result.reason}",
+                            )
+                        }
+                    }
+
+                    // Re-resolved WITH the matched recording, which can supply
+                    // the answer and end times the journal could not.
+                    val times = CallEnrichment.resolveTimes(
+                        direction = direction,
+                        durationSeconds = duration,
+                        window = window,
+                        recording = matched,
                     )
 
-                    val result = NativeRecordingMatcher.match(matchObj, candidates)
-                    if (result.isMatched && result.candidate != null) {
-                        val c = result.candidate
-                        val checksumInfo = RecordingScanner.sha256(context, c.mediaStoreId)
-                        val checksum = checksumInfo?.get("checksum") as? String
-                        val uri = RecordingScanner.contentUri(c.mediaStoreId)
-
-                        matchesMap[dateMillis] = mapOf(
-                            "mediaStoreId" to c.mediaStoreId,
-                            "recordingPath" to uri,
-                            "checksum" to checksum,
-                        )
-                        Log.i(TAG, "[RECORDING_DISCOVERY] Matched recording ${c.mediaStoreId} for call at $dateMillis")
-                    }
+                    matchesMap[dateMillis] = mapOf(
+                        "mediaStoreId" to matched?.mediaStoreId,
+                        "recordingPath" to uri,
+                        "checksum" to checksum,
+                        "contactName" to contactName,
+                        "answeredAtMillis" to times.answeredAtMillis,
+                        "endedAtMillis" to times.endedAtMillis,
+                        "metadataJson" to CallEnrichment.buildMetadata(
+                            row = call,
+                            times = times,
+                            recording = matched,
+                            signals = signals,
+                            confidence = confidence,
+                            appBuild = appBuild,
+                        ),
+                    )
                 }
 
                 // 2. Insert newly captured calls directly into persistent SQLite outbox
@@ -154,11 +283,27 @@ object NativeCallIngestor {
                             val duration = (unlinked["durationSeconds"] as? Number)?.toInt() ?: 0
                             val key = unlinked["idempotencyKey"] as? String ?: continue
 
+                            val direction = (unlinked["direction"] as? String) ?: "unknown"
+                            // Either already known from the journal at insert
+                            // time, or resolvable now that the receiver has had
+                            // longer to see the transitions.
+                            val knownAnswered =
+                                (unlinked["answeredAtMillis"] as? Number)?.toLong()
+                            val window =
+                                CallStateJournal.windowFor(context, dateMillis, duration)
+                            val anchor = knownAnswered ?: CallEnrichment.resolveTimes(
+                                direction = direction,
+                                durationSeconds = duration,
+                                window = window,
+                                recording = null,
+                            ).answeredAtMillis
+
                             val matchObj = NativeCallForMatching(
                                 startedAtEpochMillis = dateMillis,
                                 durationSeconds = duration,
                                 phoneNumber = unlinked["phoneNumber"] as? String,
                                 contactName = unlinked["contactName"] as? String,
+                                answeredAtEpochMillis = anchor,
                             )
 
                             val result = NativeRecordingMatcher.match(matchObj, candidates)
@@ -168,8 +313,28 @@ object NativeCallIngestor {
                                 val checksum = checksumInfo?.get("checksum") as? String
                                 val uri = RecordingScanner.contentUri(c.mediaStoreId)
 
+                                val times = CallEnrichment.resolveTimes(
+                                    direction = direction,
+                                    durationSeconds = duration,
+                                    window = window,
+                                    recording = c,
+                                )
+
                                 NativeCallOutboxDao.updateRecordingMatch(
                                     context = context,
+                                    answeredAtMillis = times.answeredAtMillis,
+                                    endedAtMillis = times.endedAtMillis,
+                                    // The row's existing metadata was built
+                                    // before this recording existed, so it
+                                    // carries no `recording` object. Rebuilt
+                                    // from the merged view rather than patched.
+                                    metadataJson = CallEnrichment.remergeRecordingMetadata(
+                                        existingJson = unlinked["metadataJson"] as? String,
+                                        times = times,
+                                        recording = c,
+                                        signals = result.signals,
+                                        confidence = result.confidence,
+                                    ),
                                     idempotencyKey = key,
                                     recordingPath = uri,
                                     mediaStoreId = c.mediaStoreId,

@@ -158,6 +158,78 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
     );
   }
 
+  /// True when the outbox holds no calls at all.
+  ///
+  /// Mirror of `NativeCallOutboxDao.isEmpty`. Used to catch an ingest cursor
+  /// that is lying: the cursor lives in SharedPreferences and the rows live in
+  /// SQLite, so a database wiped and rebuilt empty by [AppDatabase]'s
+  /// corruption repair leaves the cursor still claiming everything is captured.
+  /// Without this the call log is never re-read and the app shows an empty
+  /// dashboard permanently.
+  Future<bool> isEmpty() async {
+    final row = await customSelect(
+      'SELECT EXISTS(SELECT 1 FROM local_calls) AS has_rows;',
+    ).getSingleOrNull();
+    if (row == null) return false;
+    return (row.data['has_rows'] as int? ?? 1) == 0;
+  }
+
+  /// Writes the server-bound `metadata` bag for one call.
+  ///
+  /// Raw SQL rather than a generated column — see the note on
+  /// `AppDatabase._additiveColumns` for why `metadata_json` is not declared on
+  /// the table. The column is created by the additive migration that runs in
+  /// `beforeOpen`, so it is always present by the time this can be called.
+  ///
+  /// A null or empty [json] is a no-op rather than a write of NULL: the caller
+  /// could not build a bag, which is not a reason to erase one another pass
+  /// already stored.
+  Future<void> setMetadataJson({
+    required String idempotencyKey,
+    required String? json,
+  }) async {
+    if (json == null || json.isEmpty) return;
+    await customStatement(
+      'UPDATE local_calls SET metadata_json = ? WHERE idempotency_key = ?;',
+      [json, idempotencyKey],
+    );
+  }
+
+  /// Fills `answered_at` / `ended_at` only where the row has none.
+  ///
+  /// Guarded rather than a plain write: a journal-derived answer time is
+  /// measured from the telephony broadcast itself and beats one reconstructed
+  /// from a file timestamp, so a recording matched minutes later must not
+  /// overwrite the better value the ingester already stored.
+  Future<void> fillMissingTimes({
+    required String idempotencyKey,
+    DateTime? answeredAt,
+    DateTime? endedAt,
+  }) async {
+    if (answeredAt != null) {
+      await (update(_table)
+            ..where((t) =>
+                t.idempotencyKey.equals(idempotencyKey) & t.answeredAt.isNull()))
+          .write(LocalCallsCompanion(answeredAt: Value(answeredAt)));
+    }
+    if (endedAt != null) {
+      await (update(_table)
+            ..where((t) =>
+                t.idempotencyKey.equals(idempotencyKey) & t.endedAt.isNull()))
+          .write(LocalCallsCompanion(endedAt: Value(endedAt)));
+    }
+  }
+
+  /// The stored `metadata` bag, or null when the row has none.
+  Future<String?> metadataJsonFor(String idempotencyKey) async {
+    final rows = await customSelect(
+      'SELECT metadata_json FROM local_calls WHERE idempotency_key = ?;',
+      variables: [Variable<String>(idempotencyKey)],
+    ).get();
+    if (rows.isEmpty) return null;
+    return rows.first.data['metadata_json'] as String?;
+  }
+
   Future<void> updateRecordingInfo({
     required String idempotencyKey,
     required String recordingPath,

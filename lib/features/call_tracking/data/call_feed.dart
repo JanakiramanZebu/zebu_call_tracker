@@ -183,15 +183,43 @@ class CallFeed extends AsyncNotifier<CallFeedState> {
       final localCall = localCallMap[key];
 
       final name = row.number == null ? null : names[row.number!];
-      final match = matcher.match(
-        CallForMatching(
-          startedAtEpochMillis: row.dateMillis!,
-          durationSeconds: row.durationSeconds ?? 0,
-          normalizedNumber: row.number,
-          contactName: name ?? row.cachedName,
-        ),
-        _pool,
-      );
+
+      // A recording the ingester already settled on is not re-litigated here.
+      // This feed rescores every visible row against the whole candidate pool,
+      // so without this it could disagree with the row it is displaying — and
+      // show "Review required" for a call whose audio was matched, uploaded and
+      // long since agreed with the server.
+      final RecordingMatch match;
+      final storedMediaStoreId = localCall?.recordingMediaStoreId;
+      if (localCall != null &&
+          localCall.hasRecording &&
+          storedMediaStoreId != null) {
+        final stored = _pool
+            .where((c) => c.mediaStoreId == storedMediaStoreId)
+            .firstOrNull;
+        match = RecordingMatch(
+          status: RecordingMatchStatus.matched,
+          confidence: 1,
+          candidate: stored,
+          reason: 'Recording confirmed for this call.',
+        );
+      } else {
+        match = matcher.match(
+          CallForMatching(
+            startedAtEpochMillis: row.dateMillis!,
+            durationSeconds: row.durationSeconds ?? 0,
+            normalizedNumber: row.number,
+            contactName: name ?? row.cachedName,
+            // The measured answer instant, when the row has one. It is what
+            // separates two back-to-back calls of similar length, and it is
+            // the difference between offering a real choice and asking the
+            // user to break a tie the app could have broken itself.
+            answeredAtEpochMillis:
+                localCall?.answeredAt?.millisecondsSinceEpoch,
+          ),
+          _pool,
+        );
+      }
 
       UploadState state = UploadState.pending;
       if (localCall != null) {
@@ -208,6 +236,50 @@ class CallFeed extends AsyncNotifier<CallFeedState> {
       hasMore: rows.length >= _pageSize,
       recordingPoolSize: _pool.length,
     );
+  }
+
+  /// Attaches a recording the user picked for an ambiguous call, and queues it.
+  ///
+  /// This is what the "Review required" state was missing. The matcher can be
+  /// confident that several files are plausible and unable to choose between
+  /// them; until now the UI said so and offered nothing, the row kept
+  /// `has_recording = 0`, and the audio was never uploaded — the app asked for
+  /// a decision it had no way to accept.
+  ///
+  /// A person picking the wrong file here is a smaller harm than the automatic
+  /// association the thresholds exist to prevent: it is deliberate, attributable
+  /// and visible, where a wrong auto-match is silent.
+  Future<void> confirmRecording({
+    required int startedAtMillis,
+    required String? rawNumber,
+    required RecordingCandidate candidate,
+  }) async {
+    final dao = ref.read(callsDaoProvider);
+    final bridge = ref.read(nativeBridgeProvider);
+
+    final key = CallWireIdentity.key(
+      startedAtMillis: startedAtMillis,
+      rawNumber: rawNumber,
+    );
+
+    // The URI is resolved before the write: a file deleted between the scan
+    // and the tap must not leave the row pointing at audio that is not there,
+    // which the uploader would then retry until it gave up.
+    final uri = await bridge.getRecordingUri(candidate.mediaStoreId);
+    await dao.updateRecordingInfo(
+      idempotencyKey: key,
+      recordingPath: uri,
+      mediaStoreId: candidate.mediaStoreId,
+    );
+
+    // Hand it to the native coordinator rather than uploading from here: it
+    // owns the outbox, holds the single-flight lock, and is what runs when the
+    // app is closed.
+    try {
+      await bridge.triggerNativeSync();
+    } catch (_) {}
+
+    await refresh();
   }
 
   Future<void> loadMore() async {

@@ -85,10 +85,65 @@ class AppDatabase extends _$AppDatabase {
   @override
   int get schemaVersion => 1;
 
+  /// Columns added after the original schema, as `name: DDL`.
+  ///
+  /// Mirror of `ZebuDatabaseHelper.ADDITIVE_COLUMNS` in
+  /// `android/.../background/NativeCallOutboxDao.kt`. Both owners open this
+  /// same file, either may create the column, and both must tolerate finding
+  /// it already there.
+  ///
+  /// **Deliberately not declared on [LocalCalls].** `metadata_json` is read and
+  /// written by raw statements (`CallsDao.setMetadataJson`) rather than through
+  /// a generated column, because drift codegen cannot run in this toolchain:
+  /// the pinned `analyzer` (language 3.9.0) crashes with
+  /// `Missing implementation of visitDotShorthandInvocation` on a Dart 3.10
+  /// dot-shorthand under `integration_test/`. Declaring the column would make
+  /// every build depend on regenerating `app_database.g.dart`, which currently
+  /// cannot be done. Drift is unaffected by a physical column it does not know
+  /// about — it names its columns explicitly and never does `SELECT *`.
+  ///
+  /// When the analyzer is upgraded, this can become a normal
+  /// `TextColumn get metadataJson => text().nullable()();` and the raw
+  /// statements can go.
+  static const _additiveColumns = <String, String>{
+    'metadata_json': 'metadata_json TEXT NULL',
+  };
+
+  /// True when `local_calls` already has [column].
+  Future<bool> _hasColumn(String table, String column) async {
+    final rows = await customSelect('PRAGMA table_info($table);').get();
+    return rows.any((r) => r.data['name'] == column);
+  }
+
   @override
   MigrationStrategy get migration => MigrationStrategy(
         onCreate: (m) => m.createAll(),
         beforeOpen: (details) async {
+          // Additive columns, applied here rather than through a version bump.
+          //
+          // [schemaVersion] cannot move on its own — see the note on it. So a
+          // new column is added the same way the normalisation below runs:
+          // guarded, idempotent, and correct whichever of the two owners opens
+          // the file first. Kotlin's `ZebuDatabaseHelper.ADDITIVE_COLUMNS`
+          // carries the identical list and either side may win the race.
+          //
+          // Every column here must be nullable: SQLite cannot add a NOT NULL
+          // column without a default, and rows written by an older build have
+          // no value for it.
+          // Caught per column: one failing must not skip the ones after it,
+          // and "duplicate column name" is an expected outcome whenever Kotlin
+          // won the race to add it.
+          for (final entry in _additiveColumns.entries) {
+            try {
+              if (await _hasColumn('local_calls', entry.key)) continue;
+              await customStatement(
+                'ALTER TABLE local_calls ADD COLUMN ${entry.value};',
+              );
+            } catch (error) {
+              debugPrint('[DB] Could not add ${entry.key}: $error');
+            }
+          }
+
           // Fold any rows still carrying the pre-unification lowercase state
           // names onto the shared vocabulary. Idempotent and cheap, so it runs
           // on every open rather than behind a schema version — see the note on
@@ -291,10 +346,41 @@ class AppDatabase extends _$AppDatabase {
       corruptDb = sql.sqlite3.open(backupFile.path);
       corruptDb.execute('PRAGMA busy_timeout=10000;');
 
-      // Scan rowids sequentially to bypass corrupted B-tree indexes
-      final rowidsResult = corruptDb.select('SELECT rowid FROM local_calls;');
-      for (final r in rowidsResult) {
-        final rowid = r['rowid'];
+      // Probe every rowid in range individually, rather than asking the damaged
+      // database to list them.
+      //
+      // `SELECT rowid FROM local_calls` looks like the cheaper way to do this
+      // and is the reason salvage quietly lost half its data: the scan walks
+      // the table b-tree and STOPS at the first damaged page, returning a short
+      // list without raising anything. Measured on a real corrupted database
+      // from this app, it reported 58 rowids — all of them below the damage —
+      // while the table still held 106 readable rows. The per-rowid `catch`
+      // below never got the chance to skip past the break, because the loop was
+      // never told the later rows existed.
+      //
+      // The upper bound comes from `sqlite_sequence`, which is a separate
+      // one-row table and survives damage to the main b-tree. Probing an id
+      // that was never used, or sits on a damaged page, costs one failed lookup
+      // and yields nothing — which is the point.
+      var maxRowId = 0;
+      for (final probe in const [
+        "SELECT seq AS v FROM sqlite_sequence WHERE name = 'local_calls';",
+        'SELECT MAX(rowid) AS v FROM local_calls;',
+      ]) {
+        try {
+          final result = corruptDb.select(probe);
+          final value = (result.isEmpty ? null : result.first['v']) as int?;
+          if (value != null && value > maxRowId) maxRowId = value;
+        } catch (e) {
+          debugPrint('[DB_HEALTH] Row-bound probe failed: $e');
+        }
+      }
+
+      if (maxRowId == 0) {
+        debugPrint('[DB_HEALTH] Could not establish a rowid range to salvage.');
+      }
+
+      for (var rowid = 1; rowid <= maxRowId; rowid++) {
         try {
           final row = corruptDb.select('SELECT * FROM local_calls WHERE rowid = ?;', [rowid]);
           if (row.isNotEmpty) {
@@ -353,7 +439,8 @@ class AppDatabase extends _$AppDatabase {
           sync_state TEXT NOT NULL DEFAULT '${CallSyncState.waiting}',
           attempt_count INTEGER NOT NULL DEFAULT 0,
           next_attempt_at INTEGER,
-          last_error_code TEXT
+          last_error_code TEXT,
+          metadata_json TEXT
         );
       ''');
 
@@ -365,8 +452,8 @@ class AppDatabase extends _$AppDatabase {
           started_at, answered_at, ended_at, duration_seconds, has_recording,
           recording_path, recording_media_store_id, recording_checksum,
           recording_upload_status, sim_slot, client_created_at, sync_state,
-          attempt_count, next_attempt_at, last_error_code
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+          attempt_count, next_attempt_at, last_error_code, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
       ''');
 
       for (final row in recoveredRows) {
@@ -399,6 +486,9 @@ class AppDatabase extends _$AppDatabase {
           row['attempt_count'] ?? 0,
           row['next_attempt_at'],
           row['last_error_code'],
+          // Absent on rows written before the column existed, which is a null
+          // rather than a problem.
+          row['metadata_json'],
         ]);
       }
       stmt.dispose();

@@ -8,11 +8,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/config/app_config.dart';
+import '../../../core/config/app_version.dart';
 import '../../../core/network/api_client_provider.dart';
 import '../../../core/network/call_wire_format.dart';
+import '../../../core/platform/native_call_bridge.dart';
 import '../../../core/storage/app_database.dart';
 import '../../../core/storage/database_providers.dart';
 import '../../../core/storage/sync_state.dart';
+import '../../call_tracking/data/call_enrichment.dart';
 import '../../call_tracking/data/call_feed.dart';
 import '../../device/data/device_repository.dart';
 import '../../recording/domain/recording_matcher.dart';
@@ -296,7 +299,20 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
       }
 
       final storedCursor = force ? 0 : await _readCursor();
-      final isBackfill = storedCursor == 0;
+
+      // A non-zero cursor over an empty outbox is a contradiction, and the
+      // cursor is the side that is wrong — see `CallsDao.isEmpty`. Rebuilding
+      // from the call log is safe to repeat: the idempotency key comes from the
+      // call's own timestamp and number, so the same rows come back and the
+      // server upserts rather than duplicating.
+      final outboxEmpty = await dao.isEmpty();
+      if (outboxEmpty && storedCursor != 0) {
+        debugPrint(
+          '[CALL_INGEST] Outbox empty but cursor at $storedCursor; '
+          'rebuilding from the call log.',
+        );
+      }
+      final isBackfill = storedCursor == 0 || outboxEmpty;
 
       // First run starts at the backfill horizon, not at the beginning of time.
       final cursorMillis = isBackfill
@@ -308,6 +324,10 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
       // Resolved once for the whole run: SubscriptionManager is a platform
       // call, and the mapping cannot change mid-ingest.
       final simSlots = await _simSlotLookup();
+
+      // Matches the Kotlin ingester's `appVersionCode`, so a record does not
+      // reveal which side captured it.
+      final appBuild = int.tryParse(AppVersion.buildNumber);
 
       int totalIngested = 0;
       int beforeMillis = 0;
@@ -352,6 +372,58 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
           } catch (_) {}
         }
 
+        // The telephony transitions the receiver saw, which is what supplies a
+        // real `answered_at` — and, through it, the anchor that tells two
+        // back-to-back calls of similar length apart. Read once per page; a
+        // failure here degrades to the heuristic path rather than aborting.
+        List<CallStateEvent> journal = const [];
+        try {
+          journal = (await bridge.readCallStateJournal()).entries;
+        } catch (_) {}
+
+        // Names for callers the call log has none for. CACHED_NAME is filled in
+        // by the dialer at the time of the call, so anyone added to Contacts
+        // afterwards is nameless there forever, and uploaded that way.
+        final unnamed = <String>[
+          for (final r in rows)
+            if ((r.cachedName ?? '').trim().isEmpty && (r.number ?? '').isNotEmpty)
+              r.number!,
+        ];
+        var resolvedNames = const <String, String>{};
+        if (unnamed.isNotEmpty) {
+          try {
+            resolvedNames = await bridge.resolveContacts(unnamed);
+          } catch (_) {}
+        }
+
+        String? nameFor(CallLogRow r) =>
+            (r.cachedName ?? '').trim().isNotEmpty
+                ? r.cachedName
+                : (r.number == null ? null : resolvedNames[r.number!]);
+
+        // The window and pre-recording answer time for each row, computed once
+        // and reused by the matcher and the enrichment below.
+        final windows = <int, CallWindow?>{};
+        final anchors = <int, int?>{};
+        for (final r in rows) {
+          final at = r.dateMillis;
+          if (at == null) continue;
+          final window = CallEnrichment.windowFor(
+            journal,
+            at,
+            r.durationSeconds ?? 0,
+          );
+          windows[at] = window;
+          anchors[at] = CallEnrichment.resolveTimes(
+            direction: callWireOutcome(
+              rawDirection: r.direction.name,
+              durationSeconds: r.durationSeconds ?? 0,
+            ).direction,
+            durationSeconds: r.durationSeconds ?? 0,
+            window: window,
+          ).answeredAtMillis;
+        }
+
         // Collect calls that connected for batch matching
         final callsToMatch = <CallForMatching>[];
         if (pool.isNotEmpty) {
@@ -361,7 +433,8 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
                 startedAtEpochMillis: r.dateMillis!,
                 durationSeconds: r.durationSeconds ?? 0,
                 normalizedNumber: r.number,
-                contactName: r.cachedName,
+                contactName: nameFor(r),
+                answeredAtEpochMillis: anchors[r.dateMillis!],
               ));
             }
           }
@@ -451,16 +524,31 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
 
           if (r.dateMillis! > newestSeenMillis) newestSeenMillis = r.dateMillis!;
 
+          // Re-resolved WITH the matched recording, which can supply the answer
+          // and end times the journal could not. `ended_at` is deliberately not
+          // derived from `startedAt + duration` anywhere: startedAt is when the
+          // phone began ringing and duration counts connected seconds only, so
+          // that sum is short by the entire ring. Null means unknown, and the
+          // uploader omits the field rather than inventing one.
+          final times = CallEnrichment.resolveTimes(
+            direction: directionStr,
+            durationSeconds: durationSecs,
+            window: windows[r.dateMillis!],
+            recording: matched,
+          );
+
           await dao.insertOrUpdateCall(
             LocalCallsCompanion.insert(
               idempotencyKey: idempotencyKey,
               externalCallId: Value(extId),
               phoneNumber: CallWireIdentity.number(r.number),
               normalizedPhoneNumber: Value(r.number),
-              contactName: Value(r.cachedName),
+              contactName: Value(nameFor(r)),
               direction: directionStr,
               status: statusStr,
               startedAt: date,
+              answeredAt: Value(times.answeredAtUtc),
+              endedAt: Value(times.endedAtUtc),
               durationSeconds: Value(durationSecs),
               hasRecording: Value(matched != null),
               // Written explicitly so both ingesters describe the same
@@ -481,6 +569,20 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
               simSlot: Value(_slotFor(r.phoneAccountId, simSlots)),
               clientCreatedAt: DateTime.now().toUtc(),
               syncState: const Value(CallSyncState.waiting),
+            ),
+          );
+
+          // Written separately from the insert because `metadata_json` is not
+          // a declared drift column — see `AppDatabase._additiveColumns`.
+          await dao.setMetadataJson(
+            idempotencyKey: idempotencyKey,
+            json: CallEnrichment.buildMetadata(
+              row: r.toMetadataRow(),
+              times: times,
+              recording: matched,
+              signals: matchResults[r.dateMillis!]?.signals,
+              confidence: matchResults[r.dateMillis!]?.confidence,
+              appBuild: appBuild,
             ),
           );
           pageIngested++;
@@ -512,6 +614,23 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
           );
 
           if (retroactivePool.isNotEmpty) {
+            // The receiver has had longer to see transitions since these rows
+            // were written, so a call that had no journal window at ingest may
+            // have one now.
+            List<CallStateEvent> retroJournal = const [];
+            try {
+              retroJournal = (await bridge.readCallStateJournal()).entries;
+            } catch (_) {}
+
+            final retroWindows = <String, CallWindow?>{
+              for (final call in unlinked)
+                call.idempotencyKey: CallEnrichment.windowFor(
+                  retroJournal,
+                  call.startedAt.millisecondsSinceEpoch,
+                  call.durationSeconds,
+                ),
+            };
+
             final unlinkedCallsForMatch = [
               for (final call in unlinked)
                 CallForMatching(
@@ -519,6 +638,15 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
                   durationSeconds: call.durationSeconds,
                   normalizedNumber: call.normalizedPhoneNumber,
                   contactName: call.contactName,
+                  // An answer time already on the row was measured from the
+                  // broadcast and beats anything re-derived here.
+                  answeredAtEpochMillis:
+                      call.answeredAt?.millisecondsSinceEpoch ??
+                          CallEnrichment.resolveTimes(
+                            direction: call.direction,
+                            durationSeconds: call.durationSeconds,
+                            window: retroWindows[call.idempotencyKey],
+                          ).answeredAtMillis,
                 )
             ];
 
@@ -541,6 +669,36 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
                     idempotencyKey: call.idempotencyKey,
                     recordingPath: recPath,
                     mediaStoreId: result.candidate!.mediaStoreId,
+                  );
+
+                  // Finding the audio is also how a retroactively matched call
+                  // learns when it was answered: the recording's dateAdded is
+                  // the pickup and dateModified the hangup.
+                  final retroTimes = CallEnrichment.resolveTimes(
+                    direction: call.direction,
+                    durationSeconds: call.durationSeconds,
+                    window: retroWindows[call.idempotencyKey],
+                    recording: result.candidate,
+                  );
+                  await dao.fillMissingTimes(
+                    idempotencyKey: call.idempotencyKey,
+                    answeredAt: retroTimes.answeredAtUtc,
+                    endedAt: retroTimes.endedAtUtc,
+                  );
+
+                  // The row's metadata was built before this recording existed,
+                  // so it carries no `recording` object. Merged rather than
+                  // rebuilt: the call-log row behind it is long out of scope.
+                  await dao.setMetadataJson(
+                    idempotencyKey: call.idempotencyKey,
+                    json: CallEnrichment.remergeRecordingMetadata(
+                      existingJson:
+                          await dao.metadataJsonFor(call.idempotencyKey),
+                      times: retroTimes,
+                      recording: result.candidate!,
+                      signals: result.signals,
+                      confidence: result.confidence,
+                    ),
                   );
                 } catch (_) {}
               }

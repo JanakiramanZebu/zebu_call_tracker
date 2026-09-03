@@ -620,6 +620,15 @@ class CallLogRow {
     required this.dateMillis,
     required this.durationSeconds,
     required this.phoneAccountId,
+    this.phoneAccountComponent,
+    this.geocodedLocation,
+    this.countryIso,
+    this.features = const [],
+    this.dataUsageBytes,
+    this.viaNumber,
+    this.postDialDigits,
+    this.blockReason,
+    this.numberLabel,
   });
 
   final int? systemId;
@@ -630,6 +639,44 @@ class CallLogRow {
   final int? dateMillis;
   final int? durationSeconds;
   final String? phoneAccountId;
+
+  /// Disambiguates [phoneAccountId], which is often an opaque ICCID or null.
+  final String? phoneAccountComponent;
+
+  final String? geocodedLocation;
+  final String? countryIso;
+
+  /// Decoded `CallLog.Calls.FEATURES` bits — `video`, `hd`, `wifi`, `volte`…
+  /// Empty for a plain voice call.
+  final List<String> features;
+
+  final int? dataUsageBytes;
+  final String? viaNumber;
+  final String? postDialDigits;
+
+  /// Why the platform blocked this call. Null when it did not.
+  final String? blockReason;
+
+  /// The contact's label for this number — "mobile", "work", or a custom one.
+  final String? numberLabel;
+
+  /// The shape [CallEnrichment] reads. Kept as the raw platform vocabulary so
+  /// the Dart metadata bag and the Kotlin one are keyed identically — the
+  /// server must not be able to tell which ingester wrote a record.
+  Map<String, Object?> toMetadataRow() => {
+    'systemId': systemId,
+    'presentation': presentation.name,
+    'phoneAccountId': phoneAccountId,
+    'phoneAccountComponent': phoneAccountComponent,
+    'geocodedLocation': geocodedLocation,
+    'countryIso': countryIso,
+    'features': features,
+    'dataUsageBytes': dataUsageBytes,
+    'viaNumber': viaNumber,
+    'postDialDigits': postDialDigits,
+    'blockReason': blockReason,
+    'numberLabel': numberLabel,
+  };
 
   factory CallLogRow.fromPlatform(Map<Object?, Object?> m) => CallLogRow(
     systemId: (m['systemId'] as num?)?.toInt(),
@@ -646,6 +693,18 @@ class CallLogRow {
     dateMillis: (m['dateMillis'] as num?)?.toInt(),
     durationSeconds: (m['durationSeconds'] as num?)?.toInt(),
     phoneAccountId: m['phoneAccountId'] as String?,
+    phoneAccountComponent: m['phoneAccountComponent'] as String?,
+    geocodedLocation: m['geocodedLocation'] as String?,
+    countryIso: m['countryIso'] as String?,
+    features:
+        (m['features'] as List<Object?>? ?? const <Object?>[])
+            .whereType<String>()
+            .toList(growable: false),
+    dataUsageBytes: (m['dataUsageBytes'] as num?)?.toInt(),
+    viaNumber: m['viaNumber'] as String?,
+    postDialDigits: m['postDialDigits'] as String?,
+    blockReason: m['blockReason'] as String?,
+    numberLabel: m['numberLabel'] as String?,
   );
 
   /// Stored in UTC internally; converted to local only for display (brief §5).
