@@ -98,7 +98,12 @@ class NativeSyncStatus {
 
   /// The server refused this handset outright — revoked device, deactivated
   /// account, dead session. Retrying will not help; a person must intervene.
-  bool get isBlocked => status == 'BLOCKED';
+  bool get isBlocked => status == 'BLOCKED' || status == 'BLOCKED_AUTH';
+
+  /// Blocked specifically because the session is gone. Distinguished from
+  /// [isBlocked] because the remedy is different: this one the user fixes by
+  /// registering the device again, rather than by contacting an administrator.
+  bool get isBlockedByAuth => status == 'BLOCKED_AUTH';
 
   /// Human phrasing for how long ago the last run finished.
   String get lastSyncLabel {
@@ -118,6 +123,7 @@ class NativeSyncStatus {
         'PARTIAL' => 'Partial',
         'SKIPPED_NO_AUTH' => 'Not signed in',
         'BLOCKED' => 'Blocked by server',
+        'BLOCKED_AUTH' => 'Sign in again',
         'ALREADY_RUNNING' => 'In progress',
         null => 'Not run yet',
         _ => status!,

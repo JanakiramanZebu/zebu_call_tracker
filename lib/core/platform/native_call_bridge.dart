@@ -114,12 +114,35 @@ abstract interface class NativeCallBridge {
   Future<void> clearIngestBatches();
 
   /// Saves active auth session and device credentials for autonomous native sync.
+  ///
+  /// [authoritative] must be true for a fresh pairing and false for everything
+  /// else, including restoring a stored session at startup.
+  ///
+  /// The native side owns the refresh token, because it rotates it: the
+  /// background coordinator refreshes with no Flutter engine attached, and
+  /// `POST /auth/refresh` invalidates whatever it is given. A non-authoritative
+  /// call may seed a refresh token when native holds none, but may never
+  /// replace one — the copy in this process is stale the moment a background
+  /// sync refreshes, and pushing it back down makes the next request replay a
+  /// rotated token, which the server answers by revoking the whole session.
+  ///
+  /// Pair with [getAuthSession] to bring this side back in step.
   Future<void> setAuthSession({
     required String token,
     String? refreshToken,
     required String apiBaseUrl,
     required String deviceUuid,
+    bool authoritative = false,
+    DateTime? accessTokenExpiresAt,
+    DateTime? refreshTokenExpiresAt,
   });
+
+  /// The token pair the native store currently holds.
+  ///
+  /// Null when the platform channel is unavailable. Read on startup so a pair
+  /// rotated by a background sync is mirrored back into secure storage instead
+  /// of being silently overwritten by an older one.
+  Future<NativeAuthSession?> getAuthSession();
 
   /// Clears native auth credentials on sign out.
   Future<void> clearAuthSession();
@@ -407,13 +430,33 @@ class MethodChannelNativeCallBridge implements NativeCallBridge {
     String? refreshToken,
     required String apiBaseUrl,
     required String deviceUuid,
+    bool authoritative = false,
+    DateTime? accessTokenExpiresAt,
+    DateTime? refreshTokenExpiresAt,
   }) async {
     await _invoke<void>('setAuthSession', {
       'token': token,
       'refreshToken': ?refreshToken,
       'apiBaseUrl': apiBaseUrl,
       'deviceUuid': deviceUuid,
+      'authoritative': authoritative,
+      'accessTokenExpiresAt': ?accessTokenExpiresAt?.toUtc().toIso8601String(),
+      'refreshTokenExpiresAt': ?refreshTokenExpiresAt?.toUtc().toIso8601String(),
     });
+  }
+
+  @override
+  Future<NativeAuthSession?> getAuthSession() async {
+    try {
+      final raw = await _method
+          .invokeMapMethod<Object?, Object?>('getAuthSession');
+      if (raw == null) return null;
+      return NativeAuthSession.fromPlatform(raw);
+    } on PlatformException {
+      return null;
+    } on MissingPluginException {
+      return null;
+    }
   }
 
   @override
@@ -533,6 +576,71 @@ enum TokenRefreshFailure {
 
   /// The platform channel is unavailable — not Android, or no engine.
   unsupported,
+}
+
+/// The auth session as the native store holds it.
+///
+/// Read at startup so this process can mirror a pair rotated by a background
+/// sync. Without it the two stores diverge on the first background refresh and
+/// never reconverge — the stale Dart copy gets pushed back down and the next
+/// request replays a token the server has already retired.
+class NativeAuthSession {
+  const NativeAuthSession({
+    this.token,
+    this.refreshToken,
+    this.apiBaseUrl,
+    this.deviceUuid,
+    this.accessTokenExpiresAt,
+    this.refreshTokenExpiresAt,
+    this.revokedAt,
+  });
+
+  final String? token;
+  final String? refreshToken;
+  final String? apiBaseUrl;
+  final String? deviceUuid;
+
+  /// Expiries belonging to [token] and [refreshToken], as the server stated
+  /// them. Null when it did not say — which is not the same as "expired", so
+  /// callers must not substitute a previous token's expiry here.
+  final DateTime? accessTokenExpiresAt;
+  final DateTime? refreshTokenExpiresAt;
+
+  /// When the server last refused this session outright, if it has.
+  ///
+  /// A background refresh that comes back 401 clears the native credential
+  /// with no engine running to tell. This is the note it leaves behind.
+  final DateTime? revokedAt;
+
+  bool get hasTokens =>
+      (token?.isNotEmpty ?? false) && (refreshToken?.isNotEmpty ?? false);
+
+  bool get wasRevoked => revokedAt != null;
+
+  static DateTime? _parseUtc(String? raw) =>
+      raw == null ? null : DateTime.tryParse(raw)?.toUtc();
+
+  factory NativeAuthSession.fromPlatform(Map<Object?, Object?> m) {
+    final revokedMillis = (m['sessionRevokedAtMillis'] as num?)?.toInt() ?? 0;
+    return NativeAuthSession(
+      token: (m['token'] as String?)?.trimOrNull(),
+      refreshToken: (m['refreshToken'] as String?)?.trimOrNull(),
+      apiBaseUrl: (m['apiBaseUrl'] as String?)?.trimOrNull(),
+      deviceUuid: (m['deviceUuid'] as String?)?.trimOrNull(),
+      accessTokenExpiresAt: _parseUtc(m['accessTokenExpiresAt'] as String?),
+      refreshTokenExpiresAt: _parseUtc(m['refreshTokenExpiresAt'] as String?),
+      revokedAt: revokedMillis > 0
+          ? DateTime.fromMillisecondsSinceEpoch(revokedMillis, isUtc: true)
+          : null,
+    );
+  }
+}
+
+extension _BlankAsNull on String {
+  String? trimOrNull() {
+    final trimmed = trim();
+    return trimmed.isEmpty ? null : trimmed;
+  }
 }
 
 /// Outcome of [NativeCallBridge.refreshAuthTokens].

@@ -43,6 +43,10 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen> {
   @override
   Widget build(BuildContext context) {
     final feed = ref.watch(callFeedProvider).value;
+    // Moved off Settings with the rest of the read-only figures: the handset
+    // model and API level are what a support call asks for, and nothing the
+    // person holding the phone can act on.
+    final device = ref.watch(deviceInfoProvider).value;
     final counters = ref.watch(syncCountersProvider).value;
     final nativeSync = ref.watch(nativeSyncStatusProvider).value;
 
@@ -81,6 +85,26 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen> {
             child: Column(
               children: [
                 _Row(label: 'App version', value: AppVersion.full),
+                const _Divider(),
+                _Row(
+                  label: 'Build',
+                  value: AppConfig.buildLabel(AppVersion.name),
+                ),
+                const _Divider(),
+                _Row(
+                  label: 'Device',
+                  value: device == null
+                      ? 'Reading…'
+                      : '${device["manufacturer"] ?? ""} ${device["model"] ?? ""}'
+                          .trim(),
+                ),
+                const _Divider(),
+                _Row(
+                  label: 'Android',
+                  value: device == null
+                      ? '—'
+                      : '${device["osVersion"] ?? "?"} (API ${device["sdkInt"] ?? "?"})',
+                ),
                 const _Divider(),
                 _Row(
                   label: 'Server',

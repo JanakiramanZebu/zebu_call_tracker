@@ -248,17 +248,42 @@ class NativeBridge(private val context: Context) : MethodChannel.MethodCallHandl
                 }
 
                 // --- auth & background sync ----------------------------------
+                // `authoritative` must be true ONLY for a fresh pairing. See
+                // IngestStore.saveAuthSession: a restore that claims authority
+                // overwrites a refresh token this store has already rotated,
+                // and replaying that token makes the server revoke the whole
+                // session chain. Defaults to false so a caller that forgets the
+                // argument gets the harmless behaviour.
                 "setAuthSession" -> {
                     val token = call.argument<String>("token") ?: ""
                     val refreshToken = call.argument<String>("refreshToken")
                     val apiBaseUrl = call.argument<String>("apiBaseUrl") ?: ""
                     val deviceUuid = call.argument<String>("deviceUuid") ?: ""
-                    IngestStore.saveAuthSession(context, token, refreshToken, apiBaseUrl, deviceUuid)
+                    val authoritative = call.argument<Boolean>("authoritative") ?: false
+                    IngestStore.saveAuthSession(
+                        context,
+                        token,
+                        refreshToken,
+                        apiBaseUrl,
+                        deviceUuid,
+                        authoritative,
+                        call.argument<String>("accessTokenExpiresAt"),
+                        call.argument<String>("refreshTokenExpiresAt"),
+                    )
                     result.success(null)
                 }
 
+                // The other half of the contract TokenRefresher's own doc
+                // comment claimed and nothing implemented: "IngestStore is the
+                // single store of record for the pair; Dart mirrors whatever
+                // this returns." Without a read-back there was no way for Dart
+                // to mirror anything, so the two stores diverged on the first
+                // background refresh and stayed diverged.
+                "getAuthSession" -> result.success(IngestStore.getAuthSession(context))
+
                 "clearAuthSession" -> {
                     IngestStore.clearAuthSession(context)
+                    IngestStore.clearSessionRevoked(context)
                     result.success(null)
                 }
 

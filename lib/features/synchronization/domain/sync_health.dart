@@ -120,7 +120,12 @@ List<SyncAlert> resolveSyncAlerts(SyncHealthInputs input) {
     return alerts;
   }
 
-  if (input.sessionRevoked || input.nativeStatus == 'SKIPPED_NO_AUTH') {
+  // BLOCKED_AUTH belongs here rather than with the generic BLOCKED alert
+  // below: the queue is intact and the only thing missing is a credential the
+  // user can replace themselves.
+  if (input.sessionRevoked ||
+      input.nativeStatus == 'SKIPPED_NO_AUTH' ||
+      input.nativeStatus == 'BLOCKED_AUTH') {
     alerts.add(const SyncAlert(
       id: 'signed-out',
       severity: SyncAlertSeverity.critical,

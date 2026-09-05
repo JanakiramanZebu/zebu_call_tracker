@@ -155,7 +155,13 @@ object TokenRefresher {
                 // Rule 1 of §2.3: the new pair is persisted BEFORE the new
                 // access token is handed to anyone. If the process dies between
                 // the response and this write, the session is lost for good.
-                IngestStore.updateAuthTokens(context, access, newRefresh)
+                IngestStore.updateAuthTokens(
+                    context,
+                    access,
+                    newRefresh,
+                    accessExpiry,
+                    refreshExpiry,
+                )
                 Log.i(TAG, "Refreshed access token.")
                 return Result(
                     accessToken = access,
@@ -171,6 +177,13 @@ object TokenRefresher {
             if (statusCode == 401 || statusCode == 403 || statusCode == 422) {
                 Log.w(TAG, "Refresh rejected with HTTP $statusCode; clearing session.")
                 IngestStore.clearAuthSession(context)
+                // After the clear, not before: clearAuthSession removes the
+                // credential, and this tombstone is what tells Dart on next
+                // start that it was taken away rather than never present. A
+                // background refusal reaches nobody otherwise, so the app kept
+                // rendering a signed-in shell over a session the server had
+                // already destroyed.
+                IngestStore.recordSessionRevoked(context)
                 return Result(failure = Failure.INVALID)
             }
 

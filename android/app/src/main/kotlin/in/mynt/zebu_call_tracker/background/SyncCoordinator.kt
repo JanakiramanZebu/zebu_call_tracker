@@ -100,6 +100,12 @@ object SyncCoordinator {
             // 1. Recover stale records stuck in UPLOADING state from previous process death
             NativeCallOutboxDao.recoverStuckUploadingCalls(appContext)
 
+            // 2. Recover rows buried by a fault that was never theirs. The
+            //    permanent set is passed in rather than duplicated in the DAO
+            //    so there is one list of "the server will refuse this for ever"
+            //    and both halves of the state machine read it.
+            NativeCallOutboxDao.reviveRetryableFailures(appContext, PERMANENT_RECORD_CODES)
+
             val rawBaseUrl = IngestStore.getApiBaseUrl(appContext)
             var currentToken = IngestStore.getAuthToken(appContext)
             val deviceUuid = IngestStore.getDeviceUuid(appContext)
@@ -502,7 +508,7 @@ object SyncCoordinator {
                             Log.i(TAG, "Halting run: $errorCode blocks every remaining row; queue preserved.")
                             IngestStore.recordSyncOutcome(
                                 appContext,
-                                "BLOCKED",
+                                blockedStatusFor(errorCode),
                                 uploadedCount,
                                 lastErrorDetail ?: errorCode,
                             )
@@ -513,18 +519,20 @@ object SyncCoordinator {
                         NativeCallOutboxDao.markFailed(appContext, call.idempotencyKey, errorCode, call.attemptCount)
                         Log.i(TAG, "[SYNC_FAILURE] Permanent failure for ${call.idempotencyKey} (Code: $errorCode)")
 
-                        if (errorCode == "AUTH_EXPIRED" ||
-                            errorCode == "AUTH_REFRESH_FAILED" ||
-                            isFatal(errorCode)
-                        ) {
+                        if (isFatal(errorCode)) {
                             // The handset itself is blocked — revoked device,
-                            // deactivated account, dead session. Nothing else in
-                            // the queue will fare any better, and the guide is
-                            // explicit that these must not be retried.
+                            // deactivated account. Nothing else in the queue
+                            // will fare any better, and the guide is explicit
+                            // that these must not be retried.
+                            //
+                            // The auth codes used to be tested here too. They
+                            // are retryable now and never reach this branch:
+                            // they halt the run from the retryable side, with
+                            // the rows preserved rather than marked FAILED.
                             Log.w(TAG, "Halting outbox processing: $errorCode is fatal for this device.")
                             IngestStore.recordSyncOutcome(
                                 appContext,
-                                "BLOCKED",
+                                blockedStatusFor(errorCode),
                                 uploadedCount,
                                 lastErrorDetail ?: errorCode,
                             )
@@ -703,7 +711,13 @@ object SyncCoordinator {
                 }
                 failed += batch.size
                 lastError = result.errorMessage ?: result.errorCode
-                val fatal = isFatal(result.errorCode) || result.errorCode == "AUTH_EXPIRED"
+                // "Stop the run", not "fail the rows" — every row in this batch
+                // was re-queued above. Tested against the halt set rather than
+                // AUTH_EXPIRED alone so a NO_SESSION or an exhausted refresh
+                // stops here too instead of grinding through the whole backlog
+                // one doomed request at a time.
+                val fatal = isFatal(result.errorCode) ||
+                    result.errorCode in HALT_BUT_RETRYABLE_CODES
                 Log.w(TAG, "[BATCH_TRANSPORT_FAIL] ${result.errorCode}; ${batch.size} re-queued.")
                 return BatchDrainOutcome(uploaded, failed, refreshedToken, lastError, fatal)
             }
@@ -972,7 +986,9 @@ object SyncCoordinator {
                         isSuccess = false,
                         transportFailed = true,
                         errorCode = refreshErrorCode(refreshed.failure),
-                        isRetryable = refreshed.failure == TokenRefresher.Failure.TRANSIENT,
+                        // Retryable whatever the refresh failure was: the row
+                        // is fine, the session is not. See refreshErrorCode.
+                        isRetryable = true,
                         newToken = null,
                     )
                 }
@@ -1068,11 +1084,14 @@ object SyncCoordinator {
             }
         }
 
+        // Both 401 attempts are spent. Retryable, and halting: the row is
+        // untouched by whatever is wrong with the session, so it must not be
+        // buried in FAILED where nothing will ever claim it again.
         return MetadataUploadResult(
             isSuccess = false,
             transportFailed = true,
             errorCode = "AUTH_REFRESH_FAILED",
-            isRetryable = false,
+            isRetryable = true,
             newToken = refreshedNewToken,
         )
     }
@@ -1228,7 +1247,8 @@ object SyncCoordinator {
                     return RecordingUploadResult(
                         isSuccess = false,
                         errorCode = refreshErrorCode(refreshed.failure),
-                        isRetryable = refreshed.failure == TokenRefresher.Failure.TRANSIENT,
+                        // As above: a dead session says nothing about the audio.
+                        isRetryable = true,
                         newToken = null,
                     )
                 }
@@ -1267,7 +1287,7 @@ object SyncCoordinator {
         return RecordingUploadResult(
             isSuccess = false,
             errorCode = "AUTH_REFRESH_FAILED",
-            isRetryable = false,
+            isRetryable = true,
             newToken = refreshedNewToken,
         )
     }
@@ -1325,13 +1345,39 @@ object SyncCoordinator {
     /**
      * Maps a refresh failure onto the vocabulary the outbox state machine reads.
      *
-     * Only [TokenRefresher.Failure.TRANSIENT] is worth coming back for.
-     * `AUTH_EXPIRED` is in [FATAL_CODES], so the run halts and the Sync screen
-     * reports BLOCKED — which is right when the session is genuinely dead and
-     * wrong when the phone merely lost signal.
+     * All three land in [HALT_BUT_RETRYABLE_CODES]: the run stops, because
+     * every remaining row would fail identically against the same dead session,
+     * but each row keeps its backoff and stays claimable.
+     *
+     * None of them may mark a row FAILED. A refusal to refresh is a fact about
+     * the SESSION, never about the call — the record is as valid as it was a
+     * second earlier, and it uploads fine once the handset is paired again.
+     * Marking it FAILED was terminal: the claim query in `NativeCallOutboxDao`
+     * matches only WAITING, RETRY_PENDING and UPLOADED-owing-audio, so a row
+     * that hit one expired token was never offered to the server again — not by
+     * the next run, not after a reboot, not after signing back in.
      */
+    /**
+     * Halt codes whose cure is re-registering the handset, not calling anyone.
+     *
+     * The Sync screen's BLOCKED alert says "contact your administrator", which
+     * is right for a revoked device and useless for an expired session — the
+     * employee fixes that themselves in under a minute. Reported under a
+     * separate status so the alert can say so.
+     */
+    private val AUTH_HALT_CODES = setOf(
+        "AUTH_EXPIRED",
+        "AUTH_NO_SESSION",
+        "AUTH_REFRESH_FAILED",
+    )
+
+    /** BLOCKED, but by a credential the user can replace. */
+    private fun blockedStatusFor(errorCode: String?): String =
+        if (errorCode in AUTH_HALT_CODES) "BLOCKED_AUTH" else "BLOCKED"
+
     private fun refreshErrorCode(failure: TokenRefresher.Failure?): String = when (failure) {
         TokenRefresher.Failure.TRANSIENT -> "AUTH_REFRESH_UNAVAILABLE"
+        TokenRefresher.Failure.NO_SESSION -> "AUTH_NO_SESSION"
         else -> "AUTH_EXPIRED"
     }
 
@@ -1356,8 +1402,18 @@ object SyncCoordinator {
         // The token could not be refreshed for a reason that is not the
         // token's fault — no signal, a 5xx on /auth/refresh. Every remaining
         // row would 401 identically, so the run stops and each keeps its
-        // backoff. Distinct from AUTH_EXPIRED, which is fatal.
+        // backoff.
         "AUTH_REFRESH_UNAVAILABLE",
+
+        // Every other way a refresh can fail. These once fell through to
+        // markFailed, which is the wrong verb entirely: the outbox row is
+        // valid, and it is the credential that has to be replaced. Halting
+        // here preserves the queue and the Sync screen still reports BLOCKED,
+        // so the user is told to sign in — the difference is that the backlog
+        // is still there to upload when they do.
+        "AUTH_EXPIRED",
+        "AUTH_NO_SESSION",
+        "AUTH_REFRESH_FAILED",
         "DEVICE_NOT_REGISTERED",
         "DEVICE_INACTIVE",
         "RATE_LIMIT_EXCEEDED",

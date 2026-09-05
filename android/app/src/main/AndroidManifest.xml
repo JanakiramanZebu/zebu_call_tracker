@@ -51,10 +51,19 @@
          Users grant this once via the "Display over other apps" settings page;
          we open it with ACTION_MANAGE_OVERLAY_PERMISSION. Without it the
          overlay silently does not appear — no crash, no permission dialog loop.
-         FOREGROUND_SERVICE_PHONE_CALL is declared because the overlay service
-         needs foreground on API 34+ when launched from a background receiver. -->
+
+         This is the ONLY permission the card needs, and it does double duty:
+         besides letting the window be drawn, holding it is a documented
+         exemption from both the Android 12 ban on starting services from a
+         background broadcast and the Android 10 background-activity-start
+         restriction that the "View Details" tap would otherwise hit.
+
+         FOREGROUND_SERVICE_PHONE_CALL used to be declared here for an overlay
+         *service*. That service could never start: on API 34+ the phoneCall
+         foreground type requires MANAGE_OWN_CALLS or the dialer role, neither
+         of which this app has or wants. The card is a plain WindowManager view
+         now, so the permission is gone with it. -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
 
     <!-- Reboot recovery: re-arm the call-state receiver and resume the queue.
          Handler is strictly idempotent — see docs/architecture.md. -->
@@ -115,13 +124,12 @@
             </intent-filter>
         </receiver>
 
-        <!-- Post-call overlay service. Launched by CallStateReceiver on IDLE;
-             draws a TYPE_APPLICATION_OVERLAY view via WindowManager. Never
-             kept running — dismisses itself after 8 seconds or on user tap. -->
-        <service
-            android:name=".overlay.PostCallOverlayService"
-            android:exported="false"
-            android:foregroundServiceType="phoneCall" />
+        <!-- No overlay service is declared, deliberately. CallStateReceiver
+             calls PostCallOverlayController on IDLE, which adds a
+             TYPE_APPLICATION_OVERLAY view straight to WindowManager and removes
+             it after 8 seconds or on a tap. A window needs no component of its
+             own, and the service that used to be here was unstartable on every
+             supported API level — see PostCallOverlayController's class doc. -->
 
         <!-- WorkManager Foreground Service for uninterrupted data sync when app is backgrounded or closed -->
         <service

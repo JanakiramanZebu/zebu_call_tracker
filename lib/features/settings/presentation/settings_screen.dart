@@ -4,7 +4,6 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../../../core/config/app_config.dart';
 import '../../../core/config/app_version.dart';
-import '../../../core/network/connectivity_service.dart';
 import '../../../core/storage/database_providers.dart';
 import '../../../core/theme/design_tokens.dart';
 import '../../../shared/widgets/ui_kit.dart';
@@ -46,9 +45,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     if (state == AppLifecycleState.resumed && mounted) {
       ref.invalidate(permissionStatusProvider);
       ref.invalidate(backgroundStatusProvider);
-      // A background run leaves no trace in Dart, so resume is the moment to
-      // re-read what happened while this screen was away.
-      ref.invalidate(nativeSyncStatusProvider);
     }
   }
 
@@ -57,13 +53,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     final session = ref.watch(authControllerProvider).value;
     final meteredAllowed =
         ref.watch(recordingsOnMeteredProvider).value ?? false;
-    final device = ref.watch(deviceInfoProvider).value;
     final background = ref.watch(backgroundStatusProvider).value;
     final perms = ref.watch(permissionStatusProvider).value;
     final counters = ref.watch(syncCountersProvider).value ?? const {};
-    final isOnline = ref.watch(connectivityProvider).value ?? true;
-    // What the NATIVE coordinator recorded, not what this Dart session did.
-    final nativeSync = ref.watch(nativeSyncStatusProvider).value;
 
     // Counted the same way the Permissions screen counts, including the
     // background-activity card, so the two screens cannot disagree.
@@ -73,12 +65,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           background?.ignoringBatteryOptimizations ?? false,
     );
 
-    final isTrackingHealthy = (background?.ignoringBatteryOptimizations ?? false) &&
-        canTrack;
-
     final pendingCount = counters['waiting'] ?? 0;
-    final failedCount = counters['failed'] ?? 0;
-    final uploadedCount = counters['uploaded'] ?? 0;
 
     return Scaffold(
       backgroundColor: AppTokens.bgPrimary,
@@ -108,7 +95,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           _ProfileHeroCard(session: session),
           const SizedBox(height: 20),
 
-          // ── 1. ACCOUNT ─────────────────────────────────────────────────────
+          // ── ACCOUNT ────────────────────────────────────────────────────────
           const _SettingsSectionHeader('Account'),
           _SettingsGroup(
             children: [
@@ -119,41 +106,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                 value: session != null ? session.employeeId : '—',
                 onTap: () => _showProfileDialog(context, session),
               ),
-              _SettingsTile(
-                icon: Icons.verified_outlined,
-                title: 'Account',
-                valueWidget: StatusPill(
-                  label: session == null ? 'Inactive' : 'Active',
-                  color: session == null ? AppTokens.textMuted : AppTokens.success,
-                  icon: session != null ? Icons.check_rounded : null,
-                ),
-              ),
             ],
           ),
           const SizedBox(height: 18),
 
-          // ── 2. DEVICE ──────────────────────────────────────────────────────
-          const _SettingsSectionHeader('Device'),
-          _SettingsGroup(
-            children: [
-              _SettingsTile(
-                icon: Icons.smartphone_rounded,
-                title: device == null
-                    ? 'Reading device…'
-                    : '${device["manufacturer"] ?? "Device"} ${device["model"] ?? ""}',
-                subtitle: device == null
-                    ? ''
-                    : 'Android ${device["osVersion"] ?? ""} · API ${device["sdkInt"] ?? ""}',
-                valueWidget: StatusPill(
-                  label: session == null ? 'Unregistered' : 'Registered',
-                  color: session == null ? AppTokens.textMuted : AppTokens.success,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 18),
-
-          // ── 3. CALL TRACKING ───────────────────────────────────────────────
+          // ── CALL TRACKING ──────────────────────────────────────────────────
           const _SettingsSectionHeader('Tracking'),
           _SettingsGroup(
             children: [
@@ -176,50 +133,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                         .read(backgroundControllerProvider.notifier)
                         .requestBatteryExemption()
                     : null,
-              ),
-              _SettingsTile(
-                icon: Icons.phone_callback_rounded,
-                title: 'Call log access',
-                valueWidget: StatusPill(
-                  label: (perms?.readCallLog ?? false) ? 'Granted' : 'Required',
-                  color: (perms?.readCallLog ?? false)
-                      ? AppTokens.success
-                      : AppTokens.danger,
-                ),
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => const PermissionScreen(),
-                  ),
-                ),
-              ),
-              _SettingsTile(
-                icon: Icons.graphic_eq_rounded,
-                title: 'Recordings on this phone',
-                subtitle: (perms?.readMediaAudio ?? false)
-                    ? 'Audio matched automatically'
-                    : 'Media permission needed for call audio',
-                valueWidget: StatusPill(
-                  label: (perms?.readMediaAudio ?? false) ? 'On' : 'Off',
-                  color: (perms?.readMediaAudio ?? false)
-                      ? AppTokens.success
-                      : AppTokens.textMuted,
-                ),
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => const PermissionScreen(),
-                  ),
-                ),
-              ),
-              _SettingsTile(
-                icon: Icons.health_and_safety_outlined,
-                title: 'Tracking status',
-                valueWidget: StatusPill(
-                  label: isTrackingHealthy ? 'Healthy' : 'Needs Attention',
-                  color: isTrackingHealthy ? AppTokens.success : AppTokens.warning,
-                  icon: isTrackingHealthy
-                      ? Icons.check_circle_rounded
-                      : Icons.warning_amber_rounded,
-                ),
               ),
               _SettingsTile(
                 icon: Icons.radar_rounded,
@@ -245,96 +158,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           ),
           const SizedBox(height: 18),
 
-          // ── 4. SYNC & UPLOAD ───────────────────────────────────────────────
-          const _SettingsSectionHeader('Sync & Upload'),
+          // ── SYNC ───────────────────────────────────────────────────────────
+          //
+          // Status, last-sent time, the three counters, "send now" and "retry
+          // failed" all live on the Sync tab, one tap away. Repeating them here
+          // made Settings a second dashboard that could disagree with the first.
+          // What stays is the one preference and the one list the Sync tab does
+          // not already put in front of the user.
+          const _SettingsSectionHeader('Sync'),
           _SettingsGroup(
             children: [
-              _SettingsTile(
-                icon: Icons.cloud_done_outlined,
-                title: 'Syncing',
-                // The server's own `error.message` is written for people and
-                // is safe here; the raw code and request id are not, and the
-                // banner above already says what to do about it. Settings is
-                // where you look for detail, so a trimmed version stays.
-                subtitle: !isOnline
-                    ? 'Waiting for a connection'
-                    : _lastErrorSummary(nativeSync?.error),
-                valueWidget: StatusPill(
-                  label: !isOnline
-                      ? 'Offline'
-                      : (nativeSync?.statusLabel ?? 'Checking…'),
-                  color: !isOnline
-                      ? AppTokens.danger
-                      : (nativeSync == null
-                          ? AppTokens.textMuted
-                          : (nativeSync.isHealthy
-                              ? AppTokens.success
-                              : (nativeSync.isUnauthenticated
-                                  ? AppTokens.danger
-                                  : AppTokens.warning))),
-                ),
-              ),
-              _SettingsTile(
-                icon: Icons.schedule_rounded,
-                title: 'Last sent',
-                // The real timestamp the background coordinator wrote. This
-                // tile used to print 'Just now'/'Active'/'Pending' inferred
-                // from the current session, which said nothing about whether
-                // the phone had actually reached the server.
-                subtitle: nativeSync?.hasRun == true
-                    ? '${nativeSync!.syncedCount} '
-                        '${nativeSync.syncedCount == 1 ? "call" : "calls"} on that run'
-                    : 'No background run recorded yet',
-                value: nativeSync?.lastSyncLabel ?? '—',
-                valueColor: nativeSync?.hasRun == true
-                    ? AppTokens.textSecondary
-                    : AppTokens.textMuted,
-              ),
-              _SettingsTile(
-                icon: Icons.cloud_done_rounded,
-                title: 'Sent to server',
-                value: '$uploadedCount calls',
-                valueColor: uploadedCount > 0
-                    ? AppTokens.success
-                    : AppTokens.textMuted,
-              ),
-              _SettingsTile(
-                icon: Icons.cloud_upload_outlined,
-                title: 'Waiting to send',
-                value: '$pendingCount ${pendingCount == 1 ? "call" : "calls"}',
-                valueColor: pendingCount > 0 ? AppTokens.warning : AppTokens.textMuted,
-              ),
-              _SettingsTile(
-                icon: Icons.error_outline_rounded,
-                title: 'Could not be sent',
-                value: '$failedCount ${failedCount == 1 ? "record" : "records"}',
-                valueColor: failedCount > 0 ? AppTokens.danger : AppTokens.textMuted,
-              ),
-              _SettingsTile(
-                icon: Icons.sync_rounded,
-                title: 'Send now',
-                subtitle: 'Send everything waiting, without waiting for the schedule',
-                value: 'Sync',
-                valueColor: AppTokens.brandElectric,
-                onTap: () async {
-                  await ref.read(syncServiceProvider.notifier).triggerSync();
-                  ref.invalidate(syncCountersProvider);
-                  ref.invalidate(nativeSyncStatusProvider);
-                },
-              ),
-              if (failedCount > 0)
-                _SettingsTile(
-                  icon: Icons.replay_rounded,
-                  title: 'Try failed calls again',
-                  value: 'Retry',
-                  valueColor: AppTokens.warning,
-                  onTap: () async {
-                    await ref.read(callsDaoProvider).retryAllFailed();
-                    await ref.read(syncServiceProvider.notifier).triggerSync();
-                    ref.invalidate(syncCountersProvider);
-                    ref.invalidate(nativeSyncStatusProvider);
-                  },
-                ),
               _SettingsTile(
                 icon: Icons.network_cell_rounded,
                 title: 'Send recordings on mobile data',
@@ -352,8 +185,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               _SettingsTile(
                 icon: Icons.queue_outlined,
                 title: 'Calls waiting to send',
-                value: 'View',
-                valueColor: AppTokens.brandElectric,
+                value: pendingCount == 0
+                    ? 'None'
+                    : '$pendingCount ${pendingCount == 1 ? "call" : "calls"}',
+                valueColor:
+                    pendingCount > 0 ? AppTokens.warning : AppTokens.textMuted,
                 onTap: () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
                     builder: (_) => const OutboxQueueScreen(),
@@ -364,7 +200,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           ),
           const SizedBox(height: 18),
 
-          // ── 5. YOUR DATA ───────────────────────────────────────────────────
+          // ── YOUR DATA ──────────────────────────────────────────────────────
           //
           // What is left here is what a user can act on. The storage internals
           // that used to sit in this group -- integrity checks, journal mode,
@@ -383,7 +219,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               _SettingsTile(
                 icon: Icons.build_outlined,
                 title: 'Technical details',
-                subtitle: 'Storage checks and version info for support',
+                subtitle: 'Device, version and storage details for support',
                 value: 'Open',
                 valueColor: AppTokens.brandElectric,
                 onTap: () => Navigator.of(context).push(
@@ -396,7 +232,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           ),
           const SizedBox(height: 18),
 
-          // ── 6. PERMISSIONS ─────────────────────────────────────────────────
+          // ── PERMISSIONS ────────────────────────────────────────────────────
           const _SettingsSectionHeader('Permissions'),
           _SettingsGroup(
             children: [
@@ -431,7 +267,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           ),
           const SizedBox(height: 18),
 
-          // ── 7. APP & ABOUT ─────────────────────────────────────────────────
+          // ── APP & ABOUT ────────────────────────────────────────────────────
           const _SettingsSectionHeader('Application'),
           _SettingsGroup(
             children: [
@@ -439,11 +275,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
                 icon: Icons.info_outline_rounded,
                 title: 'Version',
                 value: AppVersion.full,
-              ),
-              _SettingsTile(
-                icon: Icons.numbers_rounded,
-                title: 'Build',
-                value: AppConfig.buildLabel(AppVersion.name),
               ),
               _SettingsTile(
                 icon: Icons.help_outline_rounded,
@@ -454,24 +285,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           ),
           const SizedBox(height: 24),
 
-          // ── 8. ACTIONS & DANGER ZONE ───────────────────────────────────────
-          const _SettingsSectionHeader('System Actions'),
+          // ── TROUBLESHOOTING & SIGN OUT ─────────────────────────────────────
+          const _SettingsSectionHeader('Troubleshooting'),
           _SettingsGroup(
             children: [
-              _SettingsTile(
-                icon: Icons.refresh_rounded,
-                title: 'Reload call history',
-                subtitle: 'Re-reads recent calls from this phone',
-                onTap: () {
-                  ref.read(callFeedProvider.notifier).refresh();
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Call logs re-scanned'),
-                      duration: Duration(seconds: 2),
-                    ),
-                  );
-                },
-              ),
               _SettingsTile(
                 icon: Icons.restart_alt_rounded,
                 title: 'Show the setup steps again',
@@ -978,21 +795,4 @@ class _SettingsTile extends StatelessWidget {
       ),
     );
   }
-}
-
-
-
-/// Trims the coordinator's stored failure into one readable line.
-///
-/// It stores `CODE: message details` so a report can be diagnosed; the code is
-/// the half a user cannot act on, so only the human half is shown, capped so a
-/// long validation payload cannot push the rest of the tile off screen.
-String? _lastErrorSummary(String? raw) {
-  if (raw == null || raw.trim().isEmpty) return null;
-  final text = raw.contains(': ') ? raw.split(': ').skip(1).join(': ') : raw;
-  final clean = text.trim();
-  if (clean.isEmpty) return null;
-  return clean.length > 140
-      ? 'Last problem: ${clean.substring(0, 140)}…'
-      : 'Last problem: $clean';
 }

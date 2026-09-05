@@ -291,23 +291,13 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
             ),
             const SizedBox(height: 14),
 
-            // ── SYNC PIPELINE VISUALIZER ─────────────────────────────────────
-            _SyncPipelineCard(
-              isSyncing: isSyncing,
-              waiting: waiting,
-              uploaded: uploaded,
-              failed: failed,
-            ),
-            const SizedBox(height: 14),
-
-            // ── 4 COMPACT DASHBOARD STATUS METRICS ───────────────────────────
+            // ── THE THREE COUNTS THAT MATTER ─────────────────────────────────
             Row(
               children: [
                 Expanded(
                   child: _SyncStatTile(
                     title: 'Sent',
                     count: '$uploaded',
-                    subtitle: 'Confirmed by the server',
                     icon: Icons.check_circle_rounded,
                     color: AppTokens.success,
                   ),
@@ -315,25 +305,10 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
                 const SizedBox(width: 10),
                 Expanded(
                   child: _SyncStatTile(
-                    title: 'Uploading',
-                    count: isSyncing ? '1' : '0',
-                    subtitle: isSyncing ? 'In flight' : 'Idle',
-                    icon: Icons.cloud_upload_rounded,
-                    color: AppTokens.brandElectric,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                Expanded(
-                  child: _SyncStatTile(
                     title: 'Waiting',
                     count: '$waiting',
-                    subtitle: 'Queued in outbox',
                     icon: Icons.schedule_rounded,
-                    color: AppTokens.warning,
+                    color: waiting > 0 ? AppTokens.warning : AppTokens.textMuted,
                   ),
                 ),
                 const SizedBox(width: 10),
@@ -341,97 +316,62 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
                   child: _SyncStatTile(
                     title: 'Failed',
                     count: '$failed',
-                    subtitle: failed > 0 ? 'Need attention' : 'Zero failures',
                     icon: Icons.error_rounded,
-                    color: AppTokens.danger,
+                    color: failed > 0 ? AppTokens.danger : AppTokens.textMuted,
                   ),
                 ),
               ],
             ),
             const SizedBox(height: 16),
 
-            // ── SYNC CTA ACTION BUTTONS ──────────────────────────────────────
-            Row(
-              children: [
-                Expanded(
-                  flex: 3,
-                  child: SizedBox(
-                    height: 48,
-                    child: FilledButton.icon(
-                      onPressed: isSyncing
-                          ? null
-                          : () async {
-                              await ref.read(syncServiceProvider.notifier).triggerSync();
-                              ref.invalidate(syncCountersProvider);
-                              ref.invalidate(nativeSyncStatusProvider);
-                            },
-                      style: FilledButton.styleFrom(
-                        backgroundColor: failed > 0
-                            ? AppTokens.danger
-                            : AppTokens.brandElectric,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(AppTokens.r12),
-                        ),
-                      ),
-                      icon: isSyncing
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
-                            )
-                          : Icon(
-                              failed > 0
-                                  ? Icons.restart_alt_rounded
-                                  : Icons.sync_rounded,
-                              size: 20,
-                            ),
-                      label: Text(
-                        isSyncing
-                            ? 'Syncing…'
-                            : (failed > 0 ? 'Retry Failed Calls' : 'Sync Now'),
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w700,
-                          fontSize: 14.5,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  flex: 2,
-                  child: SizedBox(
-                    height: 48,
-                    child: OutlinedButton.icon(
-                      onPressed: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (_) => const OutboxQueueScreen(),
-                          ),
-                        );
+            // ── THE ONE ACTION ───────────────────────────────────────────────
+            SizedBox(
+              height: 48,
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: isSyncing
+                    ? null
+                    : () async {
+                        await ref.read(syncServiceProvider.notifier).triggerSync();
+                        ref.invalidate(syncCountersProvider);
+                        ref.invalidate(nativeSyncStatusProvider);
                       },
-                      style: OutlinedButton.styleFrom(
-                        side: const BorderSide(color: AppTokens.borderDefault),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(AppTokens.r12),
-                        ),
-                      ),
-                      icon: const Icon(Icons.list_alt_rounded, size: 18, color: Colors.white),
-                      label: const Text(
-                        'Waiting',
-                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
-                      ),
-                    ),
+                style: FilledButton.styleFrom(
+                  backgroundColor:
+                      failed > 0 ? AppTokens.danger : AppTokens.brandElectric,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(AppTokens.r12),
                   ),
                 ),
-              ],
+                icon: isSyncing
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : Icon(
+                        failed > 0
+                            ? Icons.restart_alt_rounded
+                            : Icons.sync_rounded,
+                        size: 20,
+                      ),
+                label: Text(
+                  isSyncing
+                      ? 'Syncing…'
+                      : (failed > 0 ? 'Retry Failed Calls' : 'Sync Now'),
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 14.5,
+                  ),
+                ),
+              ),
             ),
             const SizedBox(height: 20),
 
-            // ── RECORDING INGESTION STATUS ───────────────────────────────────
+            // ── CALL RECORDINGS ──────────────────────────────────────────────
             const SectionLabel('Call recordings'),
             const SizedBox(height: 8),
             AppCard(
@@ -441,21 +381,10 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
                   _BreakdownItem(
                     icon: Icons.graphic_eq_rounded,
                     iconColor: AppTokens.success,
-                    title: 'Matched Recordings',
-                    subtitle: 'Associated with call duration & timing',
+                    title: 'Recordings found',
+                    subtitle: 'Matched to a call on this phone',
                     count: '${stats.recordingsMatched}',
                     countColor: AppTokens.success,
-                  ),
-                  const _RowDivider(),
-                  _BreakdownItem(
-                    icon: Icons.help_outline_rounded,
-                    iconColor: AppTokens.warning,
-                    title: 'Needs Review',
-                    subtitle: 'Multiple candidates detected',
-                    count: '${stats.recordingsNeedReview}',
-                    countColor: stats.recordingsNeedReview > 0
-                        ? AppTokens.warning
-                        : AppTokens.textMuted,
                   ),
                   const _RowDivider(),
                   _BreakdownItem(
@@ -463,31 +392,22 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
                     iconColor: stats.recordingsAbsent > 0
                         ? AppTokens.warning
                         : AppTokens.textMuted,
-                    title: 'No Audio Found',
-                    // Connected calls only. Unanswered calls are counted
-                    // separately below, because a missing recording for a call
-                    // nobody answered is not a gap in coverage.
-                    subtitle: 'Answered calls with no matching audio file',
+                    title: 'Missing audio',
+                    // Answered calls only. A missed or rejected call is never
+                    // recorded, so counting those as missing audio -- the row
+                    // that used to sit here -- reported a gap that cannot exist.
+                    subtitle: 'Answered calls with no recording',
                     count: '${stats.recordingsAbsent}',
                     countColor: stats.recordingsAbsent > 0
                         ? AppTokens.warning
                         : AppTokens.textMuted,
-                  ),
-                  const _RowDivider(),
-                  _BreakdownItem(
-                    icon: Icons.phone_missed_outlined,
-                    iconColor: AppTokens.textMuted,
-                    title: 'No audio possible',
-                    subtitle: 'Missed or rejected calls are never recorded',
-                    count: '${stats.recordingsNotApplicable}',
-                    countColor: AppTokens.textMuted,
                   ),
                 ],
               ),
             ),
             const SizedBox(height: 20),
 
-            // ── SYSTEM & NETWORK HEALTH ──────────────────────────────────────
+            // ── WHAT IS STOPPING A SEND ──────────────────────────────────────
             const SectionLabel('Status'),
             const SizedBox(height: 8),
             AppCard(
@@ -529,22 +449,6 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
                             : (nativeSync.isHealthy
                                 ? AppTokens.success
                                 : AppTokens.warning)),
-                  ),
-                  const _RowDivider(leftPadding: 44),
-                  _HealthRow(
-                    icon: Icons.schedule_rounded,
-                    label: 'Last sent',
-                    value: nativeSync?.lastSyncLabel ?? '—',
-                    valueColor: nativeSync?.hasRun == true
-                        ? AppTokens.textSecondary
-                        : AppTokens.textMuted,
-                  ),
-                  const _RowDivider(leftPadding: 44),
-                  _HealthRow(
-                    icon: Icons.inventory_2_outlined,
-                    label: 'Waiting to send',
-                    value: '$waiting ${waiting == 1 ? "call" : "calls"} waiting',
-                    valueColor: waiting > 0 ? AppTokens.warning : AppTokens.success,
                   ),
                 ],
               ),
@@ -597,163 +501,34 @@ class _SyncScreenState extends ConsumerState<SyncScreen>
   }
 }
 
-// ── Visual Pipeline Card: Local ➔ Queued ➔ Uploading ➔ Server ➔ Confirmed ───
-class _SyncPipelineCard extends StatelessWidget {
-  const _SyncPipelineCard({
-    required this.isSyncing,
-    required this.waiting,
-    required this.uploaded,
-    required this.failed,
-  });
-
-  final bool isSyncing;
-  final int waiting;
-  final int uploaded;
-  final int failed;
-
-  @override
-  Widget build(BuildContext context) {
-    return AppCard(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'Sync Pipeline',
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
-              color: AppTokens.textMuted,
-              letterSpacing: 0.6,
-            ),
-          ),
-          const SizedBox(height: 12),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              _PipelineStep(label: 'Local', active: true, done: true),
-              _PipelineArrow(active: true),
-              _PipelineStep(label: 'Queued', active: waiting > 0, done: waiting == 0 && uploaded > 0),
-              _PipelineArrow(active: isSyncing),
-              _PipelineStep(label: 'Uploading', active: isSyncing, done: uploaded > 0),
-              _PipelineArrow(active: uploaded > 0),
-              _PipelineStep(label: 'Server', active: uploaded > 0, done: uploaded > 0),
-              _PipelineArrow(active: uploaded > 0 && failed == 0),
-              _PipelineStep(label: 'Confirmed', active: uploaded > 0 && waiting == 0, done: uploaded > 0 && waiting == 0),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _PipelineStep extends StatelessWidget {
-  const _PipelineStep({
-    required this.label,
-    required this.active,
-    required this.done,
-  });
-
-  final String label;
-  final bool active;
-  final bool done;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = done
-        ? AppTokens.success
-        : (active ? AppTokens.brandElectric : AppTokens.textDisabled);
-
-    return Column(
-      children: [
-        Container(
-          width: 24,
-          height: 24,
-          decoration: BoxDecoration(
-            color: color.withValues(alpha: 0.15),
-            shape: BoxShape.circle,
-            border: Border.all(color: color, width: 1.5),
-          ),
-          alignment: Alignment.center,
-          child: Icon(
-            done ? Icons.check_rounded : (active ? Icons.sync_rounded : Icons.circle),
-            size: done ? 13 : 10,
-            color: color,
-          ),
-        ),
-        const SizedBox(height: 4),
-        Text(
-          label,
-          style: TextStyle(
-            fontSize: 9.5,
-            fontWeight: active || done ? FontWeight.w700 : FontWeight.w500,
-            color: active || done ? Colors.white : AppTokens.textMuted,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _PipelineArrow extends StatelessWidget {
-  const _PipelineArrow({required this.active});
-
-  final bool active;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 14),
-      child: Icon(
-        Icons.chevron_right_rounded,
-        size: 14,
-        color: active ? AppTokens.brandElectric : AppTokens.borderDefault,
-      ),
-    );
-  }
-}
-
-// ── 4 Sync Stat Tile ─────────────────────────────────────────────────────────
+// ── Compact stat tile ───────────────────────────────────────────────────────
+/// One number, large, with the word for what it counts.
+///
+/// Three of these fit across a phone only because the subtitle each used to
+/// carry ("Confirmed by the server", "Queued in outbox") repeated its own
+/// label. A fourth tile, "Uploading", showed a hard-coded 1 or 0 derived from
+/// the button's own spinner, so it told the user nothing the button did not.
 class _SyncStatTile extends StatelessWidget {
   const _SyncStatTile({
     required this.title,
     required this.count,
-    required this.subtitle,
     required this.icon,
     required this.color,
   });
 
   final String title;
   final String count;
-  final String subtitle;
   final IconData icon;
   final Color color;
 
   @override
   Widget build(BuildContext context) {
     return AppCard(
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 14),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              IconChip(icon: icon, color: color, size: 28, iconSize: 15),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: AppTokens.textSecondary,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
+          IconChip(icon: icon, color: color, size: 30, iconSize: 16),
+          const SizedBox(height: 8),
           Text(
             count,
             style: TextStyle(
@@ -766,10 +541,11 @@ class _SyncStatTile extends StatelessWidget {
           ),
           const SizedBox(height: 2),
           Text(
-            subtitle,
+            title,
             style: const TextStyle(
-              fontSize: 11,
-              color: AppTokens.textMuted,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: AppTokens.textSecondary,
             ),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,

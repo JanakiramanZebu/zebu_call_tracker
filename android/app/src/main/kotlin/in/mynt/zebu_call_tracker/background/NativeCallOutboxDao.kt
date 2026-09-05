@@ -365,6 +365,71 @@ object NativeCallOutboxDao {
     }
 
     /**
+     * Returns rows that were failed for a reason that has since gone away.
+     *
+     * FAILED is terminal by design — [claimNextWaitingCall] and
+     * [claimMetadataBatch] both refuse to look at it — and that is right for a
+     * row the server rejected on its own merits: a `VALIDATION_ERROR` will be
+     * rejected identically for ever, and retrying it burns battery and data to
+     * no end.
+     *
+     * It was badly wrong for everything else. A row marked FAILED because the
+     * session expired mid-drain, or because an unrecognised 4xx came back from
+     * a proxy, was buried permanently by a condition that had nothing to do
+     * with the call. Nothing in the app resurrected it: not the next run, not a
+     * reboot, not signing back in. The only escape was the user finding "Retry
+     * All Failed" in an overflow menu, and only for a fault they had no way of
+     * knowing about.
+     *
+     * So the terminal set is now [permanentCodes] specifically, and everything
+     * else gets [maxAttempts] before it is left alone. The attempt cap is what
+     * keeps this from becoming an infinite retry loop for a row that is failing
+     * for a reason nobody enumerated: it goes back to WAITING a bounded number
+     * of times and then genuinely stops.
+     *
+     * `next_attempt_at` is cleared so a revived row is claimable immediately —
+     * it is carrying a backoff computed for a failure that no longer applies.
+     */
+    fun reviveRetryableFailures(
+        context: Context,
+        permanentCodes: Set<String>,
+        maxAttempts: Int = 12,
+    ): Int = synchronized(dbLock) {
+        val db = getWritableDb(context) ?: return 0
+        return try {
+            val placeholders = permanentCodes.joinToString(",") { "?" }
+            // last_error_code IS NULL has to be spelled out: SQL three-valued
+            // logic makes `NOT IN (...)` neither true nor false for a null, so
+            // a row that failed before the column was populated would never be
+            // matched by the NOT IN clause alone.
+            val where = buildString {
+                append("sync_state = ? AND attempt_count < ?")
+                if (permanentCodes.isNotEmpty()) {
+                    append(" AND (last_error_code IS NULL OR last_error_code NOT IN ($placeholders))")
+                }
+            }
+            val args = buildList {
+                add(SyncStates.FAILED)
+                add(maxAttempts.toString())
+                addAll(permanentCodes)
+            }.toTypedArray()
+
+            val cv = ContentValues().apply {
+                put("sync_state", SyncStates.WAITING)
+                putNull("next_attempt_at")
+            }
+            val count = db.update(TABLE_LOCAL_CALLS, cv, where, args)
+            if (count > 0) {
+                Log.i(TAG, "[FAILURE_REVIVAL] Returned $count non-permanent FAILED row(s) to WAITING")
+            }
+            count
+        } catch (e: Exception) {
+            Log.e(TAG, "Error reviving failed calls: ${e.message}")
+            0
+        }
+    }
+
+    /**
      * Claims up to [limit] rows that still owe the server their METADATA.
      *
      * The batch counterpart to [claimNextWaitingCall]. `POST /sync/calls` takes

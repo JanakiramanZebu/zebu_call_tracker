@@ -277,37 +277,162 @@ object IngestStore {
     private const val KEY_REFRESH_TOKEN = "refresh_token"
     private const val KEY_API_BASE_URL = "api_base_url"
     private const val KEY_DEVICE_UUID = "device_uuid"
+
+    /**
+     * When the server last refused this session outright.
+     *
+     * A tombstone, not a credential: it outlives [clearAuthSession] on purpose,
+     * because its whole job is to tell Dart why the credential it expected to
+     * find is gone. Cleared by a fresh pairing.
+     */
+    private const val KEY_SESSION_REVOKED_AT = "session_revoked_at_millis"
+
+    /** RFC 3339, as the server sent it. Absent means the server did not say. */
+    private const val KEY_ACCESS_EXPIRES_AT = "access_token_expires_at"
+    private const val KEY_REFRESH_EXPIRES_AT = "refresh_token_expires_at"
     private const val KEY_LAST_SYNC_AT = "last_sync_at_millis"
     private const val KEY_LAST_SYNC_STATUS = "last_sync_status"
     private const val KEY_LAST_SYNCED_COUNT = "last_synced_count"
     private const val KEY_LAST_SYNC_ERROR = "last_sync_error"
 
+    /**
+     * Writes the session Dart is holding into the native store of record.
+     *
+     * [authoritative] decides what happens to the refresh token, and getting it
+     * wrong is what used to kill sessions roughly half an hour after pairing.
+     *
+     * `POST /auth/refresh` ROTATES: the token you send is dead the moment the
+     * server answers, and presenting a rotated one is treated as theft — the
+     * server revokes the entire session chain (Mobile API Guide §2.3 rule 2,
+     * and `AuthService.refresh`'s `token_reuse_detected` branch).
+     *
+     * The background coordinator refreshes with no Flutter engine attached, so
+     * it rotates the pair here and Dart's `flutter_secure_storage` copy goes
+     * stale the instant that happens. `AuthController.build()` then pushed that
+     * stale copy straight back down on the next cold start, and the next 401
+     * replayed an already-rotated token — signing the handset out for good and
+     * stranding whatever was mid-upload.
+     *
+     * So: only a fresh sign-in may REPLACE the refresh token. Every other
+     * caller is restoring a session this store already knows more about than
+     * Dart does, and may only SEED one when there is nothing stored.
+     */
     fun saveAuthSession(
         context: Context,
         token: String,
         refreshToken: String?,
         apiBaseUrl: String,
         deviceUuid: String,
+        authoritative: Boolean,
+        accessTokenExpiresAt: String? = null,
+        refreshTokenExpiresAt: String? = null,
     ) {
-        securePrefs(context).edit().apply {
+        val prefs = securePrefs(context)
+        val stored = prefs.getString(KEY_REFRESH_TOKEN, null)
+        prefs.edit().apply {
+            // The access token is safe to overwrite either way: it is not
+            // rotated on use, and a stale one costs one 401 and one refresh.
             putString(KEY_AUTH_TOKEN, token)
-            if (!refreshToken.isNullOrBlank()) {
+            if (!refreshToken.isNullOrBlank() && (authoritative || stored.isNullOrBlank())) {
                 putString(KEY_REFRESH_TOKEN, refreshToken)
+            } else if (!refreshToken.isNullOrBlank() && refreshToken != stored) {
+                Log.i(TAG, "Keeping the stored refresh token; caller offered an older one.")
+            }
+            // Expiries travel with the token they describe. Only recorded when
+            // the caller is replacing that token, so a restore cannot re-date a
+            // pair this store has since rotated.
+            if (!accessTokenExpiresAt.isNullOrBlank()) {
+                putString(KEY_ACCESS_EXPIRES_AT, accessTokenExpiresAt)
+            }
+            if (!refreshTokenExpiresAt.isNullOrBlank() &&
+                (authoritative || stored.isNullOrBlank())
+            ) {
+                putString(KEY_REFRESH_EXPIRES_AT, refreshTokenExpiresAt)
             }
             putString(KEY_API_BASE_URL, apiBaseUrl)
             putString(KEY_DEVICE_UUID, deviceUuid)
         }.apply()
+        if (authoritative) {
+            // A new pairing clears the tombstone from whatever killed the last
+            // session, so the shell does not bounce the user straight back out.
+            prefs.edit().remove(KEY_SESSION_REVOKED_AT).apply()
+        }
     }
 
+    /**
+     * The pair this store currently holds, for Dart to mirror.
+     *
+     * The counterpart to [saveAuthSession]: native rotates the tokens, so Dart
+     * has to read them back rather than assume its own copy is current.
+     * `sessionRevokedAtMillis` is non-zero when a refresh was refused outright
+     * and the session was cleared — the app shell reads it to move the user to
+     * sign-in instead of sitting on a shell with no usable credential.
+     */
+    fun getAuthSession(context: Context): Map<String, Any?> {
+        val p = securePrefs(context)
+        return mapOf(
+            "token" to p.getString(KEY_AUTH_TOKEN, null),
+            "refreshToken" to p.getString(KEY_REFRESH_TOKEN, null),
+            "apiBaseUrl" to p.getString(KEY_API_BASE_URL, null),
+            "deviceUuid" to p.getString(KEY_DEVICE_UUID, null),
+            "accessTokenExpiresAt" to p.getString(KEY_ACCESS_EXPIRES_AT, null),
+            "refreshTokenExpiresAt" to p.getString(KEY_REFRESH_EXPIRES_AT, null),
+            "sessionRevokedAtMillis" to p.getLong(KEY_SESSION_REVOKED_AT, 0L),
+        )
+    }
+
+    /**
+     * Records that the server refused this session, before it is cleared.
+     *
+     * Written by [TokenRefresher] on a 401/403/422 from `/auth/refresh`. The
+     * native side has no way to push anything to Dart when no engine is
+     * running, so it leaves this behind and Dart collects it on next start.
+     */
+    fun recordSessionRevoked(context: Context) {
+        securePrefs(context).edit()
+            .putLong(KEY_SESSION_REVOKED_AT, System.currentTimeMillis())
+            .apply()
+    }
+
+    fun clearSessionRevoked(context: Context) {
+        securePrefs(context).edit().remove(KEY_SESSION_REVOKED_AT).apply()
+    }
+
+    /**
+     * Stores a pair this process just obtained from `/auth/refresh`.
+     *
+     * Unlike [saveAuthSession] this is always authoritative: the caller is
+     * [TokenRefresher], which is the only thing in the app permitted to perform
+     * the exchange, and the tokens it is holding are by definition the newest
+     * that exist.
+     *
+     * The expiries are RFC 3339 exactly as the server sent them. They are
+     * stored so [getAuthSession] can hand Dart a complete session rather than a
+     * new token wearing the previous one's expiry — which would read as already
+     * expired and mislead anything that decides to refresh proactively.
+     */
     fun updateAuthTokens(
         context: Context,
         accessToken: String,
         refreshToken: String?,
+        accessTokenExpiresAt: String? = null,
+        refreshTokenExpiresAt: String? = null,
     ) {
         securePrefs(context).edit().apply {
             putString(KEY_AUTH_TOKEN, accessToken)
             if (!refreshToken.isNullOrBlank()) {
                 putString(KEY_REFRESH_TOKEN, refreshToken)
+            }
+            // Absent means "the server did not say", which must not be confused
+            // with "expires at the previous token's time": drop the old value
+            // rather than let it describe a token it does not belong to.
+            if (accessTokenExpiresAt.isNullOrBlank()) {
+                remove(KEY_ACCESS_EXPIRES_AT)
+            } else {
+                putString(KEY_ACCESS_EXPIRES_AT, accessTokenExpiresAt)
+            }
+            if (!refreshTokenExpiresAt.isNullOrBlank()) {
+                putString(KEY_REFRESH_EXPIRES_AT, refreshTokenExpiresAt)
             }
         }.apply()
     }
@@ -316,6 +441,8 @@ object IngestStore {
         securePrefs(context).edit()
             .remove(KEY_AUTH_TOKEN)
             .remove(KEY_REFRESH_TOKEN)
+            .remove(KEY_ACCESS_EXPIRES_AT)
+            .remove(KEY_REFRESH_EXPIRES_AT)
             .remove(KEY_API_BASE_URL)
             .remove(KEY_DEVICE_UUID)
             .apply()

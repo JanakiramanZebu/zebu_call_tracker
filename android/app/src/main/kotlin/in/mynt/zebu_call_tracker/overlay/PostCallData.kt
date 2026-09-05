@@ -1,11 +1,13 @@
 ﻿package `in`.mynt.zebu_call_tracker.overlay
 
 import android.content.Context
-import android.content.Intent
 
 /**
- * Snapshot of one completed call, carried into the overlay service via intent
- * extras. Uses only primitive types so it survives process boundaries cleanly.
+ * Snapshot of one completed call.
+ *
+ * Persisted to SharedPreferences so the "View Details" tap survives the app
+ * being cold-started by it, and so Flutter can pick the call up whenever its
+ * engine next runs. Primitives only, for the same reason.
  *
  * Every field defaults to a safe value: the overlay must never crash because
  * a call-log column was null (withheld number, missing duration, etc).
@@ -56,29 +58,14 @@ data class PostCallData(
                 .edit().clear().apply()
         }
 
-        /** Packs [data] into a launch intent for [PostCallOverlayService]. */
-        fun intoIntent(context: Context, data: PostCallData): Intent =
-            Intent(context, PostCallOverlayService::class.java).apply {
-                putExtra(KEY_DISPLAY,    data.displayName)
-                putExtra(KEY_NUMBER,     data.phoneNumber)
-                putExtra(KEY_DIRECTION,  data.direction)
-                putExtra(KEY_DURATION,   data.durationSeconds)
-                putExtra(KEY_RECORDING,  data.hasRecording)
-                putExtra(KEY_STARTED,    data.startedAtMillis)
-            }
-
-        /** Unpacks from an intent. Returns null if essential extras are missing. */
-        fun fromIntent(intent: Intent): PostCallData? {
-            val started = intent.getLongExtra(KEY_STARTED, -1L)
-            if (started == -1L) return null
-            return PostCallData(
-                displayName     = intent.getStringExtra(KEY_DISPLAY) ?: "Unknown",
-                phoneNumber     = intent.getStringExtra(KEY_NUMBER) ?: "",
-                direction       = intent.getStringExtra(KEY_DIRECTION) ?: "unknown",
-                durationSeconds = intent.getIntExtra(KEY_DURATION, 0),
-                hasRecording    = intent.getBooleanExtra(KEY_RECORDING, false),
-                startedAtMillis = started,
-            )
-        }
+        /**
+         * Set on the launcher intent when the user taps "View Details".
+         *
+         * Read by `MainActivity`, which hands it to `NativeBridge` so Flutter
+         * can open the matching call. Lives here rather than on the overlay
+         * itself because the overlay is no longer a component with a lifetime
+         * of its own — see [PostCallOverlayController].
+         */
+        const val EXTRA_OPEN_CALL = "open_call_started_millis"
     }
 }
