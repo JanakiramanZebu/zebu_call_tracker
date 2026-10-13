@@ -911,7 +911,7 @@ class _WizardHeader extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Zebu Call Tracker', style: AppType.bodyStrong),
+                    Text('Zebu Echo', style: AppType.bodyStrong),
                     Text(
                       'One-time device setup',
                       style: AppType.label.copyWith(

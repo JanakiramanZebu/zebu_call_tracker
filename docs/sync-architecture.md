@@ -270,18 +270,31 @@ check-in via `enqueueRecordingRequests`) enqueue the same unique work,
 
 1. finds the row by server id, else `external_call_id`, else `started_at`
    ±2 min (and number, when known), never a WhatsApp row;
-2. links its recording with the ingestor's own matcher
-   (`NativeCallIngestor.linkRecordingFor`), reading only what the media
-   permission allows;
+2. links its recording (`NativeCallIngestor.linkRecordingFor`), reading only
+   what the media permission allows: first the ingestor's own matcher, then,
+   before any `not_found`, a fresh scan asking only whether a recording
+   started while the call was being answered (`AnsweredTimeMatcher`: Samsung's
+   `_yyMMdd_HHmmss` name time or the file's stamps, within start → start +
+   ring + 60 s, length within max(15 s, 10 %), name never required). The
+   search window and folders are logged at warning level on a miss;
 3. uploads through `SyncCoordinator.uploadRequestedRecording`, which takes the
    run lock, so this is still the coordinator's upload;
 4. otherwise answers `recording-request/response` with `not_found` or
    `failed` and a short reason (no numbers, no names).
 
+A 409 (`RECORDING_ALREADY_EXISTS`, `RECORDING_DELETED`) is **not** done in this
+flow, unlike the drain: the server asked for the file and refused it, so the
+answer is `failed` "Server refused the upload: <code>".
+
 Transient failures retry with WorkManager backoff; after five real attempts
 the request is answered `failed`. A fatal code stops the job without retrying.
 Requested items are never reopened or PATCHed by reconciliation. The decision
 table is `RequestedRecordingDecision`.
+
+An answered `request_id` is handled again only while the server still lists
+the call as requested: a `/sync/status` entry is that listing, and a repeated
+push checks `/sync/status` first. So "Send again" after a lost answer works,
+and a late duplicate push after a completed upload sends nothing.
 
 ### Uploads are fire-and-forget
 

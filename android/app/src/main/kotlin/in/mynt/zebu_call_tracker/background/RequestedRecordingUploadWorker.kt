@@ -67,9 +67,20 @@ class RequestedRecordingUploadWorker(
             Log.i(TAG, "[$tag] no session; stopping.")
             return@withContext Result.failure()
         }
-        if (DoneRequests.isDone(ctx, request)) {
-            Log.i(TAG, "[$tag] already answered; nothing to do.")
-            return@withContext Result.success()
+        // KEEP on the unique work already stops a second run while this one is
+        // queued or running. Once answered, the same request_id is handled
+        // again only if the server still lists the call as requested: the
+        // administrator pressed "Send again" because the answer never landed.
+        // A sync-status entry is that listing; a push has to ask.
+        if (DoneRequests.isDone(ctx, request) && !request.listedInStatus) {
+            when (stillRequested(ctx, request.callId)) {
+                false -> {
+                    Log.i(TAG, "[$tag] already answered and no longer requested; nothing to do.")
+                    return@withContext Result.success()
+                }
+                null -> return@withContext Result.retry()
+                true -> Log.i(TAG, "[$tag] answered before but still requested; handling again.")
+            }
         }
 
         val call = NativeCallOutboxDao.findCallForRecordingRequest(
@@ -118,6 +129,21 @@ class RequestedRecordingUploadWorker(
             is Action.Stop -> Result.failure()
             is Action.Respond -> respond(ctx, request, action, tag)
         }
+    }
+
+    /**
+     * Whether `GET /sync/status` still lists [callId] as an administrator
+     * request. Null when the server could not be asked.
+     */
+    private fun stillRequested(context: Context, callId: String): Boolean? {
+        val response = NativeApi.request(context, "GET", "/sync/status")
+        if (!response.isSuccess) return null
+        val pending = response.data?.optJSONArray("pending_recording_uploads") ?: return false
+        for (i in 0 until pending.length()) {
+            val item = pending.optJSONObject(i) ?: continue
+            if (item.optString("call_id") == callId && item.optBoolean("requested", false)) return true
+        }
+        return false
     }
 
     /**
@@ -174,6 +200,12 @@ class RequestedRecordingUploadWorker(
         val phoneNumber: String?,
         val source: String,
     ) {
+        /**
+         * Came from a `/sync/status` listing (natively or via the app), which
+         * is itself proof the server still wants it; a push is not.
+         */
+        val listedInStatus: Boolean get() = source != SOURCE_PUSH
+
         internal fun toData(): Data = Data.Builder()
             .putString(KEY_CALL_ID, callId)
             .putString(KEY_REQUEST_ID, requestId)
@@ -286,6 +318,10 @@ class RequestedRecordingUploadWorker(
                 SyncCoordinator.RequestedUploadOutcome.UPLOADED -> Action.Done
                 SyncCoordinator.RequestedUploadOutcome.CALL_GONE -> Action.Done
                 SyncCoordinator.RequestedUploadOutcome.STOPPED -> Action.Stop
+                // The server asked for the file, then refused it (409). Not
+                // "done" in this flow: the administrator is waiting on it.
+                SyncCoordinator.RequestedUploadOutcome.REFUSED ->
+                    Action.Respond(FAILED, "Server refused the upload: ${code ?: "CONFLICT"}")
                 SyncCoordinator.RequestedUploadOutcome.REJECTED -> when (code) {
                     "FILE_NOT_FOUND" -> Action.Respond(NOT_FOUND, "Recording file was deleted")
                     "PAYLOAD_TOO_LARGE" -> Action.Respond(FAILED, "Upload failed: file too large")
@@ -305,9 +341,10 @@ class RequestedRecordingUploadWorker(
     }
 
     /**
-     * Request ids already answered, so a push that arrives after the upload
-     * (FCM may deliver late, or twice) does not send the file again. A new
-     * request for the same call has a new id and goes through.
+     * Request ids already answered. A push repeating one is checked against
+     * `/sync/status` before anything is sent again (see doWork), so a late or
+     * doubled FCM delivery does not upload twice, while a "Send again" for a
+     * request that is still open is handled. A new request has a new id.
      */
     private object DoneRequests {
         private const val PREFS = "zebu_recording_requests"
@@ -348,6 +385,9 @@ class RequestedRecordingUploadWorker(
         private const val KEY_PHONE_NUMBER = "phone_number"
         private const val KEY_SOURCE = "source"
         private const val MAX_MESSAGE_LENGTH = 255
+
+        /** [Request.source] for a request that arrived by FCM push. */
+        const val SOURCE_PUSH = "push"
 
         // 1001-1005 belong to ingest, sync, the tracking service, the
         // coordinator's legacy notification and the push sync.

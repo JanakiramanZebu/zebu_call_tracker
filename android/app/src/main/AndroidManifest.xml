@@ -95,7 +95,7 @@
          call records leaving the device by a route nobody asked for. The two
          rules files keep the same position on the API 31+ and legacy paths. -->
     <application
-        android:label="Zebu Call Tracker"
+        android:label="Zebu Echo"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"
@@ -232,7 +232,7 @@
         <service
             android:name=".whatsapp.WhatsAppCallListener"
             android:exported="true"
-            android:label="Zebu Call Tracker - WhatsApp calls"
+            android:label="Zebu Echo - WhatsApp calls"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />

@@ -36,7 +36,7 @@ void main() {
 
     await tester.pumpAndSettle();
 
-    expect(find.text('Call Tracker'), findsOneWidget);
+    expect(find.text('Zebu Echo'), findsOneWidget);
     // No calls in the period: the empty state, with the way out of it.
     expect(find.text('No calls in this period'), findsWidgets);
     expect(find.text('Show all time'), findsOneWidget);

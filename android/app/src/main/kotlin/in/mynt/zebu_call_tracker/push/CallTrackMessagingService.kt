@@ -46,7 +46,7 @@ class CallTrackMessagingService : FirebaseMessagingService() {
             externalCallId = data["external_call_id"],
             startedAt = data["started_at"],
             phoneNumber = null,
-            source = "push",
+            source = RequestedRecordingUploadWorker.SOURCE_PUSH,
         )
         if (request == null) {
             Log.w(TAG, "UPLOAD_RECORDING without a usable call_id; ignored.")

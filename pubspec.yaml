@@ -1,5 +1,5 @@
 name: zebu_call_tracker
-description: "Zebu Call Tracker - logs employees' work calls and sends them to Zebu CRM."
+description: "Zebu Echo - logs employees' work calls and sends them to Zebu CRM."
 publish_to: 'none'
 
 version: 1.0.0+1

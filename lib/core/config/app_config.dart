@@ -65,7 +65,7 @@ abstract final class AppConfig {
       ? null
       : 'This copy of the app is set up wrongly. Ask IT for a fresh install.';
 
-  static const appName = 'Zebu Call Tracker';
+  static const appName = 'Zebu Echo';
 
   static final _Resolved _resolved = _resolve(_rawApiBaseUrl);
 

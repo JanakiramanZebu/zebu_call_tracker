@@ -29,7 +29,7 @@ class SplashScreen extends StatelessWidget {
             children: [
               const ZebuAppMark(size: 72),
               const SizedBox(height: 20),
-              Text('Zebu Call Tracker', style: AppType.statement),
+              Text('Zebu Echo', style: AppType.statement),
               const SizedBox(height: 24),
 
               // Slim indeterminate progress bar

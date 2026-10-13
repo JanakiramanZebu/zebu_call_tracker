@@ -626,7 +626,7 @@ object PostCallOverlayController {
         )
 
         strip.addView(
-            text(ctx, "Zebu Call Tracker", 13f, 600, Color.WHITE),
+            text(ctx, "Zebu Echo", 13f, 600, Color.WHITE),
             LinearLayout.LayoutParams(0, LP_WRAP, 1f).apply { leftMargin = dp(ctx, 10) },
         )
 

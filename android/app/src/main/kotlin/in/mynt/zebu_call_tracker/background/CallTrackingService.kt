@@ -139,10 +139,10 @@ class CallTrackingService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && notificationManager != null) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Call tracking",
+                "Zebu Echo status",
                 NotificationManager.IMPORTANCE_LOW,
             ).apply {
-                description = "Shown while call tracking is active."
+                description = "Shown while Zebu Echo is saving your work calls."
                 setShowBadge(false)
                 setSound(null, null)
                 enableVibration(false)
@@ -155,7 +155,7 @@ class CallTrackingService : Service() {
             // status-bar icon must be. It used to borrow the system download
             // arrow, which read as "something is downloading" all day.
             .setSmallIcon(R.drawable.ic_launcher_monochrome)
-            .setContentTitle("Call tracking is on")
+            .setContentTitle("Echo is on")
             .setContentText("Call details and recordings are sent to Zebu CRM.")
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Zebu Call Tracker: an Android-only Flutter app that logs employees' work calls (made with the phone's own dialer) and their OEM dialer recordings, and uploads them to the Zebu CRM backend. Employees almost never open the app after pairing, so **everything that matters must work with the Flutter engine dead**. That is why the core pipeline is native Kotlin, not Dart.
+Zebu Echo (formerly Zebu Call Tracker; the package and IDs keep the `zebu_call_tracker` name): an Android-only Flutter app that logs employees' work calls (made with the phone's own dialer) and their OEM dialer recordings, and uploads them to the Zebu CRM backend. Employees almost never open the app after pairing, so **everything that matters must work with the Flutter engine dead**. That is why the core pipeline is native Kotlin, not Dart.
 
 The server (FastAPI backend, Vue admin console, and `docs/MOBILE_API.md`, the wire contract) lives in the sibling repo `D:\John\Zebu Projects\Zebu-calltrack`. When you need to know what the server accepts (enums, error codes, retry semantics), read that repo. Do not infer it from this client.
 

@@ -764,6 +764,13 @@ object SyncCoordinator {
         /** The server (or the local pre-check) refused this file for good. */
         REJECTED,
 
+        /**
+         * 409: the server asked for this recording and then refused it
+         * (RECORDING_ALREADY_EXISTS, RECORDING_DELETED). Done in the normal
+         * upload; in a requested one the administrator has to be told.
+         */
+        REFUSED,
+
         /** Worth trying again later: network, 5xx, rate limit, a drain in progress. */
         RETRY,
 
@@ -781,6 +788,9 @@ object SyncCoordinator {
 
     /** [uploadRequestedRecording] could not take the run lock in time. */
     const val CODE_SYNC_BUSY = "SYNC_BUSY"
+
+    /** The 409s a requested upload reports back instead of treating as done. */
+    private val REQUEST_REFUSED_CODES = setOf("RECORDING_ALREADY_EXISTS", "RECORDING_DELETED")
 
     /**
      * Uploads one call's recording at an administrator's request
@@ -860,9 +870,21 @@ object SyncCoordinator {
             val code = result.errorCode
 
             when {
-                result.isSuccess || code == "RECORDING_ALREADY_EXISTS" -> {
+                result.isSuccess -> {
                     NativeCallOutboxDao.markRecordingUploaded(appContext, idempotencyKey)
-                    RequestedUpload(RequestedUploadOutcome.UPLOADED, if (result.isSuccess) null else code)
+                    RequestedUpload(RequestedUploadOutcome.UPLOADED)
+                }
+                // Not "done" here, unlike the drain: the server asked for this
+                // file and refused it, which the administrator must hear about.
+                // The row is filed as the drain would file it, so the normal
+                // pipeline does not keep offering it.
+                result.httpStatus == 409 || code in REQUEST_REFUSED_CODES -> {
+                    if (code == "RECORDING_ALREADY_EXISTS") {
+                        NativeCallOutboxDao.markRecordingUploaded(appContext, idempotencyKey)
+                    } else {
+                        NativeCallOutboxDao.markRecordingAbsent(appContext, idempotencyKey, code)
+                    }
+                    RequestedUpload(RequestedUploadOutcome.REFUSED, code)
                 }
                 code == "RATE_LIMIT_EXCEEDED" -> {
                     RateLimiter.onRateLimited(appContext, RateLimiter.Bucket.RECORDING, result.retryAfterSeconds)
@@ -1733,6 +1755,7 @@ object SyncCoordinator {
                         isRetryable = isRetryableFailure(statusCode, serverCode),
                         retryAfterSeconds = parseRetryAfter(conn),
                         newToken = refreshedNewToken,
+                        httpStatus = statusCode,
                     )
                 }
             } catch (e: Exception) {
@@ -2139,5 +2162,7 @@ object SyncCoordinator {
         val isRetryable: Boolean = true,
         val retryAfterSeconds: Long? = null,
         val newToken: String? = null,
+        /** The server's HTTP status on a refusal; null when it never answered. */
+        val httpStatus: Int? = null,
     )
 }

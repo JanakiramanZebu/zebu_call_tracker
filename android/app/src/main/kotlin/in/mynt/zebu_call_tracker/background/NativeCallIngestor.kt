@@ -9,6 +9,7 @@ import `in`.mynt.zebu_call_tracker.call.CallStateJournal
 import `in`.mynt.zebu_call_tracker.call.CallWireFormat
 import `in`.mynt.zebu_call_tracker.call.ContactResolver
 import `in`.mynt.zebu_call_tracker.permissions.PermissionInspector
+import `in`.mynt.zebu_call_tracker.recording.AnsweredTimeMatcher
 import `in`.mynt.zebu_call_tracker.recording.NativeCallForMatching
 import `in`.mynt.zebu_call_tracker.recording.NativeMatchSignals
 import `in`.mynt.zebu_call_tracker.recording.NativeRecordingCandidate
@@ -761,6 +762,7 @@ object NativeCallIngestor {
         if (!RecordingScanner.hasPermission(context)) return RecordingLink.NO_PERMISSION
         if (call.durationSeconds <= 0) return RecordingLink.NO_MATCH
 
+        // 1. Exactly as a late recording is matched after any call.
         val startSeconds = call.startedAtMillis / 1000L
         val candidates = scanRecordings(
             context,
@@ -769,23 +771,67 @@ object NativeCallIngestor {
                 RECORDING_SKEW_SECONDS,
             limit = RECORDING_LIMIT,
         ).mapNotNull { NativeRecordingMatcher.mapToCandidate(it) }
-        if (candidates.isEmpty()) return RecordingLink.NO_MATCH
-
-        val row = mapOf(
-            "idempotencyKey" to call.idempotencyKey,
-            "phoneNumber" to call.phoneNumber,
-            "contactName" to call.contactName,
-            "startedAtMillis" to call.startedAtMillis,
-            "durationSeconds" to call.durationSeconds,
-            "direction" to call.direction,
-            "answeredAtMillis" to call.answeredAtMillis,
-            "metadataJson" to call.metadataJson,
-        )
-        return if (linkOne(context, CallStateJournal.snapshot(context), row, candidates)) {
-            RecordingLink.LINKED
-        } else {
-            RecordingLink.NO_MATCH
+        if (candidates.isNotEmpty()) {
+            val row = mapOf(
+                "idempotencyKey" to call.idempotencyKey,
+                "phoneNumber" to call.phoneNumber,
+                "contactName" to call.contactName,
+                "startedAtMillis" to call.startedAtMillis,
+                "durationSeconds" to call.durationSeconds,
+                "direction" to call.direction,
+                "answeredAtMillis" to call.answeredAtMillis,
+                "metadataJson" to call.metadataJson,
+            )
+            if (linkOne(context, CallStateJournal.snapshot(context), row, candidates)) {
+                return RecordingLink.LINKED
+            }
         }
+
+        // 2. Before saying "not found": a fresh scan of the whole window,
+        //    asking only whether a recording started while this call was
+        //    being answered (see AnsweredTimeMatcher).
+        return if (linkByAnsweredTime(context, call)) RecordingLink.LINKED else RecordingLink.NO_MATCH
+    }
+
+    /**
+     * The second search, logged with the folders and window it covered (never
+     * a file name or number), so a wrong "not found" can be diagnosed.
+     */
+    private fun linkByAnsweredTime(context: Context, call: CallRecord): Boolean {
+        val startSeconds = call.startedAtMillis / 1000L
+        val answeredSeconds = call.answeredAtMillis?.let { it / 1000L }
+        val window = AnsweredTimeMatcher.window(startSeconds, answeredSeconds)
+        // DATE_ADDED bounds wide enough for either stamping convention: a file
+        // stamped at hang-up is dated a whole call-length after its start.
+        val scanned = scanRecordings(
+            context,
+            sinceEpochSeconds = max(0L, window.fromSeconds - RECORDING_SKEW_SECONDS),
+            beforeEpochSeconds = window.untilSeconds + call.durationSeconds + RECORDING_SKEW_SECONDS,
+            limit = RECORDING_LIMIT,
+        ).mapNotNull { NativeRecordingMatcher.mapToCandidate(it) }
+        val picked = AnsweredTimeMatcher.pick(
+            callStartSeconds = startSeconds,
+            callDurationSeconds = call.durationSeconds,
+            answeredAtSeconds = answeredSeconds,
+            candidates = scanned,
+        )
+        val folders = scanned.mapNotNull { it.relativePath }.distinct().ifEmpty { listOf("none") }
+        val line = "[RECORDING_REQUEST_SEARCH] ${call.idempotencyKey}: " +
+            "window=${window.fromSeconds}..${window.untilSeconds} answerKnown=${answeredSeconds != null} " +
+            "files=${scanned.size} folders=$folders " +
+            "-> ${if (picked != null) "found ${picked.mediaStoreId}" else "none"}"
+        // A miss at warning level: release builds strip info logs, and this
+        // line is how a wrong "not found" gets diagnosed on a production phone.
+        if (picked == null) Log.w(TAG, line) else Log.i(TAG, line)
+        if (picked == null) return false
+        return NativeCallOutboxDao.updateRecordingMatch(
+            context = context,
+            idempotencyKey = call.idempotencyKey,
+            recordingPath = RecordingScanner.contentUri(picked.mediaStoreId),
+            mediaStoreId = picked.mediaStoreId,
+            // Hashed at upload; see capturePage.
+            checksum = null,
+        )
     }
 
     /** Whether [uriString] still opens: false once the dialer's file is deleted. */

@@ -3,10 +3,11 @@ import 'package:flutter/material.dart';
 import '../../core/theme/design_tokens.dart';
 import 'ui_kit.dart';
 
-/// The official Call Tracker app icon glyph drawn natively in Flutter.
+/// The Zebu Echo app icon glyph (a handset with two echo arcs) drawn in Flutter.
 ///
-/// Transcribed directly from `res/drawable/ic_launcher_foreground.xml` so the app icon
-/// in Android launcher, the splash screen, and the in-app headers remain 100% identical.
+/// Transcribed from `res/drawable/ic_launcher_foreground.xml` (108-unit adaptive
+/// icon canvas) so the launcher icon, the splash screen and the in-app headers
+/// match. Change both together.
 class ZebuMark extends StatelessWidget {
   const ZebuMark({super.key, this.size = 40, this.color});
 
@@ -26,68 +27,66 @@ class _ZebuMarkPainter extends CustomPainter {
 
   final Color color;
 
+  /// The glyph's square bounds on the 108-unit icon canvas, round caps included.
+  static const _originX = 31.0;
+  static const _originY = 28.0;
+  static const _extent = 49.0;
+
   @override
   void paint(Canvas canvas, Size size) {
-    // Target size scale factor from design viewBox (36x36)
-    final scale = size.height / 36.0;
+    final scale = size.height / _extent;
 
     canvas.save();
     canvas.scale(scale, scale);
-    canvas.translate(-7.8, -9.5);
+    canvas.translate(-_originX, -_originY);
 
-    final fillPaint = Paint()
-      ..color = color
-      ..style = PaintingStyle.fill
-      ..isAntiAlias = true;
-
-    final strokePaint = Paint()
-      ..color = color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.4
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round
-      ..isAntiAlias = true;
-
-    // 1. Phone Receiver path from ic_launcher_foreground.xml
-    final phonePath = Path()
-      ..moveTo(13.25, 24.19)
-      ..cubicTo(15.65, 28.9, 19.5, 32.74, 24.21, 35.15)
-      ..lineTo(27.88, 31.48)
-      ..cubicTo(28.34, 31.02, 29.01, 30.87, 29.62, 31.08)
-      ..cubicTo(31.57, 31.72, 33.68, 32.07, 35.83, 32.07)
-      ..cubicTo(36.83, 32.07, 37.66, 32.9, 37.66, 33.9)
-      ..lineTo(37.66, 39.69)
-      ..cubicTo(37.66, 40.69, 36.83, 41.52, 35.83, 41.52)
-      ..cubicTo(20.55, 41.52, 8.18, 29.15, 8.18, 13.87)
-      ..cubicTo(8.18, 12.87, 9.01, 12.04, 10.01, 12.04)
-      ..lineTo(15.8, 12.04)
-      ..cubicTo(16.8, 12.04, 17.63, 12.87, 17.63, 13.87)
-      ..cubicTo(17.63, 16.03, 17.97, 18.13, 18.62, 20.08)
-      ..cubicTo(18.82, 20.69, 18.68, 21.36, 18.22, 21.82)
+    // 1. Handset: the Material "call" path, placed at (28, 32) and scaled 2x.
+    final handset = Path()
+      ..moveTo(6.62, 10.79)
+      ..relativeCubicTo(1.44, 2.83, 3.76, 5.14, 6.59, 6.59)
+      ..relativeLineTo(2.2, -2.2)
+      ..relativeCubicTo(0.27, -0.27, 0.67, -0.36, 1.02, -0.24)
+      ..relativeCubicTo(1.12, 0.37, 2.33, 0.57, 3.57, 0.57)
+      ..relativeCubicTo(0.55, 0, 1, 0.45, 1, 1)
+      ..lineTo(21, 20)
+      ..relativeCubicTo(0, 0.55, -0.45, 1, -1, 1)
+      ..relativeCubicTo(-9.39, 0, -17, -7.61, -17, -17)
+      ..relativeCubicTo(0, -0.55, 0.45, -1, 1, -1)
+      ..relativeLineTo(3.5, 0)
+      ..relativeCubicTo(0.55, 0, 1, 0.45, 1, 1)
+      ..relativeCubicTo(0, 1.25, 0.2, 2.45, 0.57, 3.57)
+      ..relativeCubicTo(0.11, 0.35, 0.03, 0.74, -0.25, 1.02)
+      ..relativeLineTo(-2.2, 2.2)
       ..close();
 
-    canvas.drawPath(phonePath, fillPaint);
+    canvas.save();
+    canvas.translate(28, 32);
+    canvas.scale(2, 2);
+    canvas.drawPath(
+      handset,
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.fill
+        ..isAntiAlias = true,
+    );
+    canvas.restore();
 
-    // 2. Signal Waves arc paths from ic_launcher_foreground.xml
-    final wavesPath = Path()
-      ..moveTo(27.5, 12.04)
-      ..cubicTo(30.8, 13.8, 33.5, 16.5, 35.26, 19.8)
-      ..moveTo(24.5, 16.04)
-      ..cubicTo(26.2, 17.0, 27.5, 18.3, 28.46, 20.0);
+    // 2. Echo arcs, both centred on (58, 50).
+    final arcs = Path()
+      ..moveTo(58, 33)
+      ..arcToPoint(const Offset(75, 50), radius: const Radius.circular(17))
+      ..moveTo(58, 41)
+      ..arcToPoint(const Offset(67, 50), radius: const Radius.circular(9));
 
-    canvas.drawPath(wavesPath, strokePaint);
-
-    // 3. Tracking Chart Arrow polyline paths from ic_launcher_foreground.xml
-    final chartPath = Path()
-      ..moveTo(22.0, 28.0)
-      ..lineTo(28.0, 22.0)
-      ..lineTo(33.0, 26.0)
-      ..lineTo(42.0, 16.0)
-      ..moveTo(36.0, 16.0)
-      ..lineTo(42.0, 16.0)
-      ..lineTo(42.0, 22.0);
-
-    canvas.drawPath(chartPath, strokePaint);
+    canvas.drawPath(
+      arcs,
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 4.5
+        ..strokeCap = StrokeCap.round
+        ..isAntiAlias = true,
+    );
 
     canvas.restore();
   }

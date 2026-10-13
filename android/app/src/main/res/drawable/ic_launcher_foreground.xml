@@ -1,29 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Call Tracker adaptive icon foreground vector: phone receiver, signal waves, and tracking arrow -->
+<!-- Zebu Echo adaptive icon foreground: phone handset with two echo arcs.
+     Keep in sync with ZebuMark in lib/shared/widgets/brand.dart. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
     <group
-        android:translateX="27"
-        android:translateY="27">
+        android:translateX="28"
+        android:translateY="32"
+        android:scaleX="2"
+        android:scaleY="2">
         <path
             android:fillColor="#FFFFFF"
-            android:pathData="M13.25,24.19 C15.65,28.9 19.5,32.74 24.21,35.15 L27.88,31.48 C28.34,31.02 29.01,30.87 29.62,31.08 C31.57,31.72 33.68,32.07 35.83,32.07 C36.83,32.07 37.66,32.9 37.66,33.9 L37.66,39.69 C37.66,40.69 36.83,41.52 35.83,41.52 C20.55,41.52 8.18,29.15 8.18,13.87 C8.18,12.87 9.01,12.04 10.01,12.04 L15.8,12.04 C16.8,12.04 17.63,12.87 17.63,13.87 C17.63,16.03 17.97,18.13 18.62,20.08 C18.82,20.69 18.68,21.36 18.22,21.82 L13.25,24.19 Z" />
-        <path
-            android:fillColor="#00000000"
-            android:pathData="M27.5,12.04 C30.8,13.8 33.5,16.5 35.26,19.8 M24.5,16.04 C26.2,17 27.5,18.3 28.46,20"
-            android:strokeColor="#FFFFFF"
-            android:strokeWidth="2.5"
-            android:strokeLineCap="round" />
-        <path
-            android:fillColor="#00000000"
-            android:pathData="M22,28 L28,22 L33,26 L42,16 M36,16 L42,16 L42,22"
-            android:strokeColor="#FFFFFF"
-            android:strokeWidth="2.5"
-            android:strokeLineCap="round"
-            android:strokeLineJoin="round" />
+            android:pathData="M6.62,10.79c1.44,2.83 3.76,5.14 6.59,6.59l2.2,-2.2c0.27,-0.27 0.67,-0.36 1.02,-0.24 1.12,0.37 2.33,0.57 3.57,0.57 0.55,0 1,0.45 1,1V20c0,0.55 -0.45,1 -1,1 -9.39,0 -17,-7.61 -17,-17 0,-0.55 0.45,-1 1,-1h3.5c0.55,0 1,0.45 1,1 0,1.25 0.2,2.45 0.57,3.57 0.11,0.35 0.03,0.74 -0.25,1.02l-2.2,2.2z" />
     </group>
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M58,33a17,17 0,0 1,17 17M58,41a9,9 0,0 1,9 9"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="4.5"
+        android:strokeLineCap="round" />
 </vector>
-

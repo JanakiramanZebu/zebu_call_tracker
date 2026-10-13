@@ -580,7 +580,7 @@ class _PanelHeader extends StatelessWidget {
               Semantics(
                 header: true,
                 child: Text(
-                  'Call Tracker',
+                  'Zebu Echo',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: AppType.bodyStrong.copyWith(
