@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "588875322511",
+    "project_id": "zebu-calltraker",
+    "storage_bucket": "zebu-calltraker.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:588875322511:android:c2eb99727e7b2792b58cfa",
+        "android_client_info": {
+          "package_name": "in.mynt.zebu_call_tracker"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAphjkeVI5Yc4tCvJBAWwWgbO-VpDUtlOk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
