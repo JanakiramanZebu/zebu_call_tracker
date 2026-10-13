@@ -1,23 +1,25 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/theme/design_tokens.dart';
+import '../../../core/utils/formatters.dart';
 import '../../../shared/widgets/ui_kit.dart';
 import '../data/recording_player.dart';
 import '../domain/recording_matcher.dart';
 
-String _clock(Duration d) {
-  final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
-  final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
-  final h = d.inHours;
-  return h > 0 ? '$h:$m:$s' : '$m:$s';
-}
-
-/// Full transport for one recording: play/pause, scrubber, elapsed/remaining,
-/// skip and speed.
+/// Full transport for one recording: play/pause, a waveform scrubber,
+/// elapsed/total, skip and speed.
 ///
-/// The scrubber is a real [Slider] rather than a progress bar — staff reviewing
-/// a ten-minute call need to jump to the part they remember, and a bar they
-/// cannot drag makes them play the whole thing.
+/// The waveform is a real seek control rather than a progress picture — staff
+/// reviewing a ten-minute call need to jump to the part they remember, and a
+/// bar they cannot drag makes them play the whole thing. Tap or drag anywhere
+/// on it to seek; screen readers get it as a slider.
+///
+/// Only [_Scrubber] follows the playback position. The player publishes it
+/// several times a second, and when the whole bar — and every play button on
+/// the screen — watched the full state, each tick rebuilt all of them.
 class RecordingPlayerBar extends ConsumerWidget {
   const RecordingPlayerBar({super.key, required this.candidate});
 
@@ -25,18 +27,17 @@ class RecordingPlayerBar extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final state = ref.watch(recordingPlayerProvider);
+    final id = candidate.mediaStoreId;
+    final (:isCurrent, :error, :speed) = ref.watch(
+      recordingPlayerProvider.select(
+        (s) => (
+          isCurrent: s.isFor(id),
+          error: s.isFor(id) ? s.error : null,
+          speed: s.speed,
+        ),
+      ),
+    );
     final player = ref.read(recordingPlayerProvider.notifier);
-
-    final isCurrent = state.isFor(candidate.mediaStoreId);
-    final error = isCurrent ? state.error : null;
-
-    // Before this recording is loaded the bar still needs a scale, so it falls
-    // back to the duration MediaStore reported for the file.
-    final duration = isCurrent && state.duration > Duration.zero
-        ? state.duration
-        : Duration(milliseconds: candidate.durationMillis);
-    final position = isCurrent ? state.position : Duration.zero;
 
     if (error != null) {
       return _PlaybackError(
@@ -45,105 +46,65 @@ class RecordingPlayerBar extends ConsumerWidget {
       );
     }
 
+    // Read at the moment of the tap, so the buttons need not rebuild with
+    // every position tick to know where "ten seconds back" is.
+    void skip(Duration by) {
+      final s = ref.read(recordingPlayerProvider);
+      final target = s.position + by;
+      player.seek(
+        target < Duration.zero
+            ? Duration.zero
+            : (target > s.duration ? s.duration : target),
+      );
+    }
+
+    final normalSpeed = speed == 1.0;
+    final speedLabel = '${speed.toStringAsFixed(normalSpeed ? 0 : 1)}×';
+
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Row(
           children: [
-            _PlayButton(
-              playing: state.isPlaying(candidate.mediaStoreId),
-              loading: state.isLoading(candidate.mediaStoreId),
-              onPressed: () => player.toggle(candidate),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                children: [
-                  SliderTheme(
-                    data: SliderTheme.of(context).copyWith(
-                      trackHeight: 4,
-                      // A slim thumb keeps the bar readable at this size while
-                      // staying inside the 48dp touch target the overlay gives.
-                      thumbShape: const RoundSliderThumbShape(
-                        enabledThumbRadius: 7,
-                      ),
-                      overlayShape: const RoundSliderOverlayShape(
-                        overlayRadius: 16,
-                      ),
-                      activeTrackColor: context.colors.primary,
-                      inactiveTrackColor: context.palette.tint,
-                      thumbColor: context.colors.primary,
-                    ),
-                    child: Slider(
-                      value: position.inMilliseconds
-                          .clamp(0, duration.inMilliseconds)
-                          .toDouble(),
-                      max: duration.inMilliseconds.toDouble().clamp(
-                        1,
-                        double.infinity,
-                      ),
-                      onChanged: isCurrent
-                          ? (v) =>
-                                player.seek(Duration(milliseconds: v.round()))
-                          // Seeking a recording that is not loaded would have to
-                          // load it first; tapping play is the clearer gesture.
-                          : null,
-                    ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 4),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        _Time(_clock(position)),
-                        _Time(_clock(duration)),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
+            RecordingPlayButton(candidate: candidate, size: 48),
+            const SizedBox(width: 14),
+            Expanded(child: _Scrubber(candidate: candidate)),
           ],
         ),
-        const SizedBox(height: 4),
+        const SizedBox(height: 12),
         Row(
-          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            _SkipButton(
-              icon: Icons.replay_10_rounded,
-              tooltip: 'Back 10 seconds',
+            ZButton(
+              label: 'Back 10s',
+              semanticLabel: 'Back 10 seconds',
+              variant: ZButtonVariant.secondary,
+              size: ZButtonSize.small,
+              expand: false,
               onPressed: isCurrent
-                  ? () => player.seek(
-                      position - const Duration(seconds: 10) < Duration.zero
-                          ? Duration.zero
-                          : position - const Duration(seconds: 10),
-                    )
+                  ? () => skip(const Duration(seconds: -10))
                   : null,
             ),
             const SizedBox(width: 8),
-            _SkipButton(
-              icon: Icons.forward_30_rounded,
-              tooltip: 'Forward 30 seconds',
+            ZButton(
+              label: 'Forward 30s',
+              semanticLabel: 'Forward 30 seconds',
+              variant: ZButtonVariant.secondary,
+              size: ZButtonSize.small,
+              expand: false,
               onPressed: isCurrent
-                  ? () => player.seek(
-                      position + const Duration(seconds: 30) > duration
-                          ? duration
-                          : position + const Duration(seconds: 30),
-                    )
+                  ? () => skip(const Duration(seconds: 30))
                   : null,
             ),
-            const SizedBox(width: 8),
-            TextButton(
-              onPressed: player.cycleSpeed,
-              style: TextButton.styleFrom(
-                minimumSize: const Size(56, 36),
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                foregroundColor: state.speed == 1.0
-                    ? context.palette.muted
-                    : context.colors.primary,
-              ),
-              child: Text(
-                '${state.speed.toStringAsFixed(state.speed == 1.0 ? 0 : 1)}×',
-                style: const TextStyle(fontWeight: FontWeight.w600),
+            const Spacer(),
+            ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 52),
+              child: ZButton(
+                label: speedLabel,
+                semanticLabel: 'Playback speed $speedLabel',
+                variant: ZButtonVariant.outline,
+                size: ZButtonSize.small,
+                expand: false,
+                onPressed: player.cycleSpeed,
               ),
             ),
           ],
@@ -153,8 +114,188 @@ class RecordingPlayerBar extends ConsumerWidget {
   }
 }
 
+/// The waveform and elapsed/total labels — the only part of the bar that
+/// follows the playback position, and only for the recording that is loaded.
+class _Scrubber extends ConsumerWidget {
+  const _Scrubber({required this.candidate});
+
+  final RecordingCandidate candidate;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final z = context.z;
+    final id = candidate.mediaStoreId;
+    // Null for every bar but the loaded one, so those never rebuild on a tick.
+    final live = ref.watch(
+      recordingPlayerProvider.select(
+        (s) => s.isFor(id) ? (s.position, s.duration) : null,
+      ),
+    );
+
+    // Before this recording is loaded the bar still needs a scale, so it falls
+    // back to the duration MediaStore reported for the file.
+    final duration = live != null && live.$2 > Duration.zero
+        ? live.$2
+        : Duration(milliseconds: candidate.durationMillis);
+    final position = live?.$1 ?? Duration.zero;
+    final totalMs = duration.inMilliseconds;
+    final fraction = totalMs <= 0
+        ? 0.0
+        : (position.inMilliseconds / totalMs).clamp(0.0, 1.0);
+
+    // Seeking a recording that is not loaded would have to load it first;
+    // tapping play is the clearer gesture, so the waveform is inert until then.
+    final canSeek = live != null && totalMs > 0;
+    final player = ref.read(recordingPlayerProvider.notifier);
+
+    void seekTo(Duration d) => player.seek(
+      d < Duration.zero ? Duration.zero : (d > duration ? duration : d),
+    );
+
+    void seekToX(double dx, double width) {
+      if (width <= 0) return;
+      final f = (dx / width).clamp(0.0, 1.0);
+      seekTo(Duration(milliseconds: (totalMs * f).round()));
+    }
+
+    final elapsed = Fmt.stopwatch(position.inSeconds);
+    final total = Fmt.stopwatch(duration.inSeconds);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Semantics(
+          slider: true,
+          enabled: canSeek,
+          label: 'Playback position',
+          value: '$elapsed of $total',
+          increasedValue: canSeek
+              ? Fmt.stopwatch(
+                  math.min(position.inSeconds + 10, duration.inSeconds),
+                )
+              : null,
+          decreasedValue: canSeek
+              ? Fmt.stopwatch(math.max(position.inSeconds - 10, 0))
+              : null,
+          onIncrease: canSeek
+              ? () => seekTo(position + const Duration(seconds: 10))
+              : null,
+          onDecrease: canSeek
+              ? () => seekTo(position - const Duration(seconds: 10))
+              : null,
+          excludeSemantics: true,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final width = constraints.maxWidth;
+              return GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTapDown: canSeek
+                    ? (d) => seekToX(d.localPosition.dx, width)
+                    : null,
+                onHorizontalDragStart: canSeek
+                    ? (d) => seekToX(d.localPosition.dx, width)
+                    : null,
+                onHorizontalDragUpdate: canSeek
+                    ? (d) => seekToX(d.localPosition.dx, width)
+                    : null,
+                // 44 tall for the touch target; the bars sit in the middle 36.
+                child: SizedBox(
+                  height: AppTokens.minTap,
+                  child: Center(
+                    child: SizedBox(
+                      height: 36,
+                      width: double.infinity,
+                      child: RepaintBoundary(
+                        child: CustomPaint(
+                          painter: _WavePainter(
+                            seed: id,
+                            fraction: fraction,
+                            played: z.accent,
+                            rest: z.lineStrong,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        const SizedBox(height: 2),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            _Time(elapsed, emphasised: live != null),
+            _Time(total),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+/// Forty-eight thin bars, played portion in the accent.
+///
+/// The heights are not the audio's: decoding the file to draw its envelope
+/// would cost far more than the picture is worth. They are derived from the
+/// bar index and the file's id, so a recording always draws the same shape
+/// and two recordings on one screen look different.
+class _WavePainter extends CustomPainter {
+  const _WavePainter({
+    required this.seed,
+    required this.fraction,
+    required this.played,
+    required this.rest,
+  });
+
+  static const _bars = 48;
+  static const _gap = 2.0;
+
+  final int seed;
+  final double fraction;
+  final Color played;
+  final Color rest;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final barWidth = (size.width - _gap * (_bars - 1)) / _bars;
+    if (barWidth <= 0) return;
+    final phase = (seed % 97) * 0.61;
+    final paint = Paint()..isAntiAlias = true;
+
+    for (var i = 0; i < _bars; i++) {
+      final wave =
+          (math.sin(i * 1.7 + phase) + math.sin(i * 0.37 + phase * 0.5) * 0.8)
+              .abs();
+      final h = (6 + wave * 14).clamp(4.0, size.height);
+      final x = i * (barWidth + _gap);
+      final top = (size.height - h) / 2;
+      paint.color = i / _bars < fraction ? played : rest;
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTWH(x, top, barWidth, h),
+          const Radius.circular(1),
+        ),
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_WavePainter old) =>
+      old.fraction != fraction ||
+      old.seed != seed ||
+      old.played != played ||
+      old.rest != rest;
+}
+
 /// Compact play control for a history row, where a full transport would
 /// overwhelm the line it sits on.
+///
+/// Selects only this recording's playing/loading flags: a list of thirty rows
+/// each watching the whole player state rebuilt all thirty on every position
+/// tick of whichever one was playing.
 class RecordingPlayButton extends ConsumerWidget {
   const RecordingPlayButton({super.key, required this.candidate, this.size = 34});
 
@@ -163,23 +304,27 @@ class RecordingPlayButton extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final state = ref.watch(recordingPlayerProvider);
+    final id = candidate.mediaStoreId;
+    final (playing, loading) = ref.watch(
+      recordingPlayerProvider.select((s) => (s.isPlaying(id), s.isLoading(id))),
+    );
     return _PlayButton(
       size: size,
-      playing: state.isPlaying(candidate.mediaStoreId),
-      loading: state.isLoading(candidate.mediaStoreId),
+      playing: playing,
+      loading: loading,
       onPressed: () =>
           ref.read(recordingPlayerProvider.notifier).toggle(candidate),
     );
   }
 }
 
+/// A solid primary disc with a circular ripple and no pressed overlay.
 class _PlayButton extends StatelessWidget {
   const _PlayButton({
     required this.playing,
     required this.loading,
     required this.onPressed,
-    this.size = 48,
+    required this.size,
   });
 
   final bool playing;
@@ -188,65 +333,59 @@ class _PlayButton extends StatelessWidget {
   final double size;
 
   @override
-  Widget build(BuildContext context) => Material(
-    color: context.colors.primary,
-    shape: const CircleBorder(),
-    child: InkWell(
-      customBorder: const CircleBorder(),
-      onTap: onPressed,
+  Widget build(BuildContext context) {
+    final z = context.z;
+    return Semantics(
+      button: true,
+      label: playing ? 'Pause recording' : 'Play recording',
+      excludeSemantics: true,
       child: SizedBox(
         width: size,
         height: size,
-        child: loading
-            ? Padding(
-                padding: EdgeInsets.all(size * 0.3),
-                child: const CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: Colors.white,
-                ),
-              )
-            : Icon(
-                playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                color: Colors.white,
-                size: size * 0.55,
-              ),
+        child: Material(
+          color: z.primary,
+          shape: const CircleBorder(),
+          clipBehavior: Clip.antiAlias,
+          child: InkResponse(
+            onTap: onPressed,
+            containedInkWell: true,
+            customBorder: const CircleBorder(),
+            highlightColor: Colors.transparent,
+            splashColor: z.onPrimary.withValues(alpha: 0.16),
+            child: Center(
+              child: loading
+                  ? SizedBox(
+                      width: size * 0.4,
+                      height: size * 0.4,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: z.onPrimary,
+                      ),
+                    )
+                  : Icon(
+                      playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                      color: z.onPrimary,
+                      size: size * 0.5,
+                    ),
+            ),
+          ),
+        ),
       ),
-    ),
-  );
-}
-
-class _SkipButton extends StatelessWidget {
-  const _SkipButton({
-    required this.icon,
-    required this.tooltip,
-    required this.onPressed,
-  });
-
-  final IconData icon;
-  final String tooltip;
-  final VoidCallback? onPressed;
-
-  @override
-  Widget build(BuildContext context) => IconButton(
-    onPressed: onPressed,
-    icon: Icon(icon, size: 22),
-    tooltip: tooltip,
-    color: context.palette.muted,
-    visualDensity: VisualDensity.compact,
-  );
+    );
+  }
 }
 
 class _Time extends StatelessWidget {
-  const _Time(this.text);
+  const _Time(this.text, {this.emphasised = false});
 
   final String text;
+  final bool emphasised;
 
   @override
   Widget build(BuildContext context) => Text(
     text,
-    style: context.text.bodySmall?.copyWith(
-      color: context.palette.muted,
-      fontFeatures: const [FontFeature.tabularFigures()],
+    style: AppType.tabular(AppType.caption).copyWith(
+      color: emphasised ? context.z.ink2 : context.z.ink3,
     ),
   );
 }
@@ -258,36 +397,15 @@ class _PlaybackError extends StatelessWidget {
   final VoidCallback onRetry;
 
   @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.all(12),
-    decoration: BoxDecoration(
-      color: context.palette.missed.withValues(alpha: 0.10),
-      borderRadius: BorderRadius.circular(8),
-    ),
-    child: Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Icon(
-          Icons.error_outline_rounded,
-          size: 18,
-          color: context.palette.missed,
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Text(
-            message,
-            style: context.text.bodySmall?.copyWith(height: 1.5),
-          ),
-        ),
-        TextButton(
-          onPressed: onRetry,
-          style: TextButton.styleFrom(
-            minimumSize: const Size(0, 32),
-            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          ),
-          child: const Text('Retry'),
-        ),
-      ],
+  Widget build(BuildContext context) => InfoBanner(
+    message: message,
+    tone: BannerTone.danger,
+    action: ZButton(
+      label: 'Retry',
+      variant: ZButtonVariant.text,
+      size: ZButtonSize.small,
+      expand: false,
+      onPressed: onRetry,
     ),
   );
 }

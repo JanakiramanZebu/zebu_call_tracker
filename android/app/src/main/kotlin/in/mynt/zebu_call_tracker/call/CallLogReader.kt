@@ -133,8 +133,20 @@ object CallLogReader {
             args.toTypedArray(),
             "${CallLog.Calls.DATE} DESC",
         )?.use { cursor ->
+            // Once per read: SubscriptionManager is a binder call.
+            val subscriptions = SimInfoReader.activeSubscriptions(context)
             while (cursor.moveToNext()) {
-                rows += mapRow(cursor)
+                val row = mapRow(cursor)
+                // Resolved here, once, so the Kotlin and Dart ingesters store
+                // the same slot for the same call.
+                rows += row + (
+                    "simSlot" to SimInfoReader.slotForCallLogRow(
+                        context,
+                        row["phoneAccountId"] as? String,
+                        row["phoneAccountComponent"] as? String,
+                        subscriptions,
+                    )
+                )
             }
         }
         return rows

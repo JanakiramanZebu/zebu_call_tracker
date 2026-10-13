@@ -3,20 +3,73 @@ import 'package:flutter/material.dart';
 import '../../core/theme/design_tokens.dart';
 import 'ui_kit.dart';
 
-/// Shimmering placeholder block for dark UI surfaces.
+/// One pulse clock for every [Skeleton] beneath it.
+///
+/// Each skeleton used to own an `AnimationController.repeat()` — some twenty
+/// tickers for one placeholder screen, all running the same sweep. The scope
+/// runs one and the skeletons read it.
+class ShimmerScope extends StatefulWidget {
+  const ShimmerScope({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  State<ShimmerScope> createState() => _ShimmerScopeState();
+}
+
+class _ShimmerScopeState extends State<ShimmerScope>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = _pulseController(this);
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      _Shimmer(animation: _c, child: widget.child);
+}
+
+class _Shimmer extends InheritedWidget {
+  const _Shimmer({required this.animation, required super.child});
+
+  final Animation<double> animation;
+
+  @override
+  bool updateShouldNotify(_Shimmer old) => old.animation != animation;
+}
+
+AnimationController _pulseController(TickerProvider vsync) {
+  final c = AnimationController(
+    vsync: vsync,
+    duration: const Duration(milliseconds: 1100),
+  );
+  final reduce = WidgetsBinding
+      .instance
+      .platformDispatcher
+      .accessibilityFeatures
+      .disableAnimations;
+  if (!reduce) c.repeat(reverse: true);
+  return c;
+}
+
+/// A placeholder block the shape of the content it stands in for.
+///
+/// A flat block whose fill breathes between two neighbouring surface shades.
+/// Solid fills only: a sweeping gradient banded on low-precision GPUs.
+/// Follows the nearest [ShimmerScope]; outside one it runs a clock of its own.
 class Skeleton extends StatefulWidget {
   const Skeleton({
     super.key,
     required this.width,
     required this.height,
-    this.radius = AppTokens.r8,
+    this.radius = AppTokens.r4,
   });
 
-  const Skeleton.line({Key? key, double width = double.infinity})
-      : this(key: key, width: width, height: 12, radius: 4);
-
   const Skeleton.circle({Key? key, double size = 38})
-      : this(key: key, width: size, height: size, radius: size / 2);
+    : this(key: key, width: size, height: size, radius: size / 2);
 
   final double width;
   final double height;
@@ -28,224 +81,168 @@ class Skeleton extends StatefulWidget {
 
 class _SkeletonState extends State<Skeleton>
     with SingleTickerProviderStateMixin {
-  late final AnimationController _c = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1400),
-  )..repeat();
+  AnimationController? _own;
+  late Animation<double> _animation;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final shared = context
+        .dependOnInheritedWidgetOfExactType<_Shimmer>()
+        ?.animation;
+    _animation = shared ?? (_own ??= _pulseController(this));
+  }
 
   @override
   void dispose() {
-    _c.dispose();
+    _own?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    const base = Color(0xFF131C2C);
-    const highlight = Color(0xFF1F2E45);
+    final z = context.z;
+    final base = z.sunken;
+    final highlight = z.line;
 
     return RepaintBoundary(
       child: AnimatedBuilder(
-        animation: _c,
-        builder: (context, _) {
-          final x = _c.value * 3 - 1;
-          return Container(
-            width: widget.width,
-            height: widget.height,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(widget.radius),
-              gradient: LinearGradient(
-                begin: Alignment(x - 1, 0),
-                end: Alignment(x + 1, 0),
-                colors: const [base, highlight, base],
-                stops: const [0.0, 0.5, 1.0],
-              ),
-            ),
-          );
-        },
+        animation: _animation,
+        builder: (context, _) => Container(
+          width: widget.width,
+          height: widget.height,
+          decoration: BoxDecoration(
+            color: Color.lerp(base, highlight, _animation.value),
+            borderRadius: BorderRadius.circular(widget.radius),
+          ),
+        ),
       ),
     );
   }
 }
 
-/// Placeholder rows for the call list timeline.
+/// Placeholder ledger rows for the call list.
 class SkeletonList extends StatelessWidget {
-  const SkeletonList({super.key, this.rows = 7, this.padding});
+  const SkeletonList({super.key, this.rows = 8});
 
   final int rows;
-  final EdgeInsets? padding;
 
   @override
-  Widget build(BuildContext context) => ListView(
-        padding: padding ?? const EdgeInsets.fromLTRB(16, 12, 16, 24),
-        physics: const NeverScrollableScrollPhysics(),
-        children: [
-          AppCard(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                for (var i = 0; i < rows; i++) ...[
-                  if (i > 0)
-                    const Padding(
-                      padding: EdgeInsets.only(left: 64),
-                      child: Divider(
-                        height: 1,
-                        color: AppTokens.borderSubtle,
-                      ),
-                    ),
-                  const _SkeletonRow(),
-                ],
-              ],
-            ),
-          ),
+  Widget build(BuildContext context) => ShimmerScope(
+    child: ListView(
+      padding: const EdgeInsets.only(top: 8, bottom: 24),
+      physics: const NeverScrollableScrollPhysics(),
+      children: [
+        for (var i = 0; i < rows; i++) ...[
+          if (i > 0) const Divider(height: 1),
+          const SkeletonCallRow(),
         ],
-      );
+      ],
+    ),
+  );
 }
 
-class _SkeletonRow extends StatelessWidget {
-  const _SkeletonRow();
+/// One placeholder row in the shape of a [CallRowTile].
+class SkeletonCallRow extends StatelessWidget {
+  const SkeletonCallRow({super.key});
 
   @override
   Widget build(BuildContext context) => const Padding(
-        padding: EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-        child: Row(
+    padding: EdgeInsets.symmetric(horizontal: AppTokens.gutter, vertical: 15),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Skeleton(width: 52, height: 12),
+        SizedBox(width: 22),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Skeleton(width: 140, height: 14),
+              SizedBox(height: 8),
+              Skeleton(width: 110, height: 11),
+            ],
+          ),
+        ),
+        SizedBox(width: 12),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.end,
           children: [
-            Skeleton.circle(size: 36),
-            SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Skeleton(width: 140, height: 13),
-                  SizedBox(height: 8),
-                  Skeleton(width: 100, height: 11),
-                ],
-              ),
-            ),
-            SizedBox(width: 10),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Skeleton(width: 36, height: 11),
-                SizedBox(height: 8),
-                Skeleton(width: 22, height: 11),
-              ],
-            ),
+            Skeleton(width: 34, height: 13),
+            SizedBox(height: 8),
+            Skeleton(width: 28, height: 10),
           ],
         ),
-      );
+      ],
+    ),
+  );
 }
 
-/// Dashboard-shaped placeholder: Hero metric + 6 compact tiles + Chart.
+/// Home-shaped placeholder: the brand summary panel, the outcome list and a
+/// few ledger rows.
 class DashboardSkeleton extends StatelessWidget {
   const DashboardSkeleton({super.key});
 
   @override
-  Widget build(BuildContext context) => ListView(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-        physics: const NeverScrollableScrollPhysics(),
-        children: const [
-          // Filter pills skeleton
-          Row(
-            children: [
-              Skeleton(width: 76, height: 36, radius: 20),
-              SizedBox(width: 8),
-              Skeleton(width: 96, height: 36, radius: 20),
-              SizedBox(width: 8),
-              Skeleton(width: 90, height: 36, radius: 20),
-            ],
+  Widget build(BuildContext context) => ShimmerScope(
+    child: ListView(
+      padding: const EdgeInsets.only(bottom: 24),
+      physics: const NeverScrollableScrollPhysics(),
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            AppTokens.gutter,
+            20,
+            AppTokens.gutter,
+            0,
           ),
-          SizedBox(height: 16),
-
-          // Date range skeleton
-          Skeleton(width: 220, height: 18),
-          SizedBox(height: 20),
-
-          // Hero Metric Card skeleton
-          AppCard(
-            padding: EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Skeleton(width: 90, height: 12),
-                SizedBox(height: 12),
-                Row(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Row(
+                children: [
+                  Skeleton(width: 54, height: 14),
+                  SizedBox(width: 22),
+                  Skeleton(width: 70, height: 14),
+                  SizedBox(width: 22),
+                  Skeleton(width: 50, height: 14),
+                ],
+              ),
+              const SizedBox(height: 24),
+              const Skeleton(width: 120, height: 52),
+              const SizedBox(height: 12),
+              const Skeleton(width: 200, height: 13),
+              const SizedBox(height: 22),
+              const Skeleton(width: double.infinity, height: 60),
+              const SizedBox(height: 32),
+              const Skeleton(width: 90, height: 16),
+              const SizedBox(height: 14),
+              const Skeleton(width: double.infinity, height: 8),
+              const SizedBox(height: 12),
+              for (var i = 0; i < 4; i++) ...[
+                const SizedBox(height: 14),
+                const Row(
                   children: [
-                    Skeleton(width: 130, height: 34),
+                    Skeleton(width: 10, height: 10, radius: 3),
                     SizedBox(width: 12),
-                    Skeleton(width: 70, height: 22, radius: 6),
+                    Skeleton(width: 110, height: 13),
+                    Spacer(),
+                    Skeleton(width: 30, height: 13),
                   ],
                 ),
-                SizedBox(height: 16),
-                Skeleton(width: double.infinity, height: 42, radius: 6),
+                const SizedBox(height: 14),
+                if (i < 3) const Divider(height: 1),
               ],
-            ),
-          ),
-          SizedBox(height: 14),
-
-          // 2x3 Metric Grid skeleton
-          Row(
-            children: [
-              Expanded(child: _SkeletonTile()),
-              SizedBox(width: 10),
-              Expanded(child: _SkeletonTile()),
             ],
           ),
-          SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(child: _SkeletonTile()),
-              SizedBox(width: 10),
-              Expanded(child: _SkeletonTile()),
-            ],
-          ),
-          SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(child: _SkeletonTile()),
-              SizedBox(width: 10),
-              Expanded(child: _SkeletonTile()),
-            ],
-          ),
-          SizedBox(height: 16),
-
-          // Activity Chart placeholder
-          AppCard(
-            padding: EdgeInsets.all(18),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Skeleton(width: 110, height: 14),
-                SizedBox(height: 16),
-                Skeleton(width: double.infinity, height: 140, radius: 8),
-              ],
-            ),
-          ),
-        ],
-      );
-}
-
-class _SkeletonTile extends StatelessWidget {
-  const _SkeletonTile();
-
-  @override
-  Widget build(BuildContext context) => const AppCard(
-        padding: EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Skeleton.circle(size: 28),
-                SizedBox(width: 8),
-                Expanded(child: Skeleton(width: 60, height: 12)),
-              ],
-            ),
-            SizedBox(height: 12),
-            Skeleton(width: 48, height: 20, radius: 5),
-          ],
         ),
-      );
+        const SizedBox(height: 16),
+        const SkeletonCallRow(),
+        const Divider(height: 1),
+        const SkeletonCallRow(),
+      ],
+    ),
+  );
 }
 
 /// Small inline loader for footers and button refreshes.
@@ -256,33 +253,27 @@ class InlineLoader extends StatelessWidget {
   final double size;
 
   @override
-  Widget build(BuildContext context) => Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          SizedBox(
-            width: size,
-            height: size,
-            child: const CircularProgressIndicator(
-              strokeWidth: 2,
-              color: AppTokens.brandElectric,
-            ),
-          ),
-          if (label case final text?) ...[
-            const SizedBox(width: 10),
-            Text(
-              text,
-              style: const TextStyle(
-                color: AppTokens.textMuted,
-                fontSize: 12.5,
-              ),
-            ),
-          ],
+  Widget build(BuildContext context) {
+    final z = context.z;
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SizedBox(
+          width: size,
+          height: size,
+          child: CircularProgressIndicator(strokeWidth: 2, color: z.accent),
+        ),
+        if (label case final text?) ...[
+          const SizedBox(width: 10),
+          Text(text, style: AppType.label.copyWith(color: z.ink3)),
         ],
-      );
+      ],
+    );
+  }
 }
 
-/// Dark scrim + centered loader for async blocking operations.
+/// Scrim + centred loader for async blocking operations.
 class BusyOverlay extends StatelessWidget {
   const BusyOverlay({
     super.key,
@@ -296,39 +287,38 @@ class BusyOverlay extends StatelessWidget {
   final String? message;
 
   @override
-  Widget build(BuildContext context) => Stack(
-        children: [
-          AbsorbPointer(absorbing: busy, child: child),
-          if (busy)
-            Positioned.fill(
-              child: AnimatedOpacity(
-                opacity: busy ? 1 : 0,
-                duration: const Duration(milliseconds: 160),
-                child: ColoredBox(
-                  color: Colors.black.withValues(alpha: 0.65),
-                  child: Center(
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 22,
-                        vertical: 18,
-                      ),
-                      decoration: BoxDecoration(
-                        color: AppTokens.surface2,
-                        borderRadius: BorderRadius.circular(AppTokens.r16),
-                        border: Border.all(color: AppTokens.borderDefault),
-                        boxShadow: AppTokens.cardShadow,
-                      ),
-                      child: InlineLoader(label: message, size: 20),
-                    ),
+  Widget build(BuildContext context) {
+    final z = context.z;
+    return Stack(
+      children: [
+        AbsorbPointer(absorbing: busy, child: child),
+        if (busy)
+          Positioned.fill(
+            child: ColoredBox(
+              color: z.overlay,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 22,
+                    vertical: 18,
                   ),
+                  decoration: BoxDecoration(
+                    color: z.raised,
+                    borderRadius: BorderRadius.circular(AppTokens.r14),
+                  ),
+                  child: InlineLoader(label: message, size: 20),
                 ),
               ),
             ),
-        ],
-      );
+          ),
+      ],
+    );
+  }
 }
 
-/// Primary button with animated busy indicator.
+/// Primary footer button with a busy state.
+///
+/// A thin adapter over [ZButton], kept so call sites read the same.
 class LoadingFilledButton extends StatelessWidget {
   const LoadingFilledButton({
     super.key,
@@ -344,32 +334,11 @@ class LoadingFilledButton extends StatelessWidget {
   final IconData? icon;
 
   @override
-  Widget build(BuildContext context) => FilledButton(
-        onPressed: loading ? null : onPressed,
-        style: FilledButton.styleFrom(
-          backgroundColor: AppTokens.brandElectric,
-          disabledBackgroundColor:
-              AppTokens.brandElectric.withValues(alpha: loading ? 0.8 : 0.35),
-          disabledForegroundColor: Colors.white,
-        ),
-        child: loading
-            ? const SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2.2,
-                  color: Colors.white,
-                ),
-              )
-            : Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (icon != null) ...[
-                    Icon(icon, size: 18),
-                    const SizedBox(width: 8),
-                  ],
-                  Text(label),
-                ],
-              ),
-      );
+  Widget build(BuildContext context) => ZButton(
+    label: label,
+    onPressed: onPressed,
+    loading: loading,
+    icon: icon,
+    size: ZButtonSize.large,
+  );
 }

@@ -40,7 +40,17 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
   Future<int> repairDivergentWithheldKeys() async {
     final legacy = await (select(_table)
           ..where((t) => t.externalCallId.like('%-null'))
-          ..where((t) => t.serverCallId.isNull()))
+          ..where((t) => t.serverCallId.isNull())
+          // Not while its POST is in flight: the coordinator records the
+          // verdict by the old key, finds no row, and the renamed one is then
+          // sent again — two server records. The next ingest repairs it.
+          ..where((t) => t.syncState.equals(CallSyncState.uploading).not())
+          // Never sent. A row with an attempt behind it may be on the server
+          // under its old key with the response lost (§5.4); no
+          // server_call_id does not prove otherwise. Renaming that one would
+          // create the second record this exists to prevent, and the key must
+          // never change once it may have left the phone (§4.1).
+          ..where((t) => t.attemptCount.equals(0)))
         .get();
     if (legacy.isEmpty) return 0;
 
@@ -86,8 +96,20 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
     return repaired;
   }
 
-  Future<int> insertOrUpdateCall(LocalCallsCompanion entry) async {
-    return into(_table).insertOnConflictUpdate(entry);
+  /// Inserts [entry] unless a row with its idempotency key already exists, and
+  /// says whether it did. Ignoring covers the unique key as well as the
+  /// primary key, which matters because Kotlin inserts into this table too.
+  ///
+  /// Not `insertReturningOrNull`: that emits `INSERT ... RETURNING`, which
+  /// needs SQLite 3.35, and drift runs on Android's own SQLite here (3.32 up to
+  /// Android 13). On those phones every insert threw, the page's transaction
+  /// rolled back, and the Dart ingest captured nothing at all. `changes()`
+  /// reports whether the ignore fired on any SQLite version. Callers run this
+  /// inside a transaction, so nothing can slip between the two statements.
+  Future<bool> insertCallIfAbsent(LocalCallsCompanion entry) async {
+    await into(_table).insert(entry, mode: InsertMode.insertOrIgnore);
+    final changed = await customSelect('SELECT changes() AS c').getSingle();
+    return changed.read<int>('c') > 0;
   }
 
   Future<LocalCall?> findByIdempotencyKey(String key) {
@@ -134,28 +156,6 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
       results.addAll(batch);
     }
     return results;
-  }
-
-  /// Records a successful upload.
-  ///
-  /// The one writer left on the Dart side, used when `BackgroundController`
-  /// folds in what the native coordinator reported while the engine was
-  /// down. Everything else that moves a row through the state machine now
-  /// lives in `NativeCallOutboxDao`, so there is one writer per transition.
-  Future<void> markSynced({
-    required String idempotencyKey,
-    required String serverCallId,
-    required int revision,
-  }) async {
-    await (update(_table)..where((t) => t.idempotencyKey.equals(idempotencyKey)))
-        .write(
-      LocalCallsCompanion(
-        serverCallId: Value(serverCallId),
-        revision: Value(revision),
-        syncState: const Value(CallSyncState.uploaded),
-        lastErrorCode: const Value(null),
-      ),
-    );
   }
 
   /// True when the outbox holds no calls at all.
@@ -230,12 +230,28 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
     return rows.first.data['metadata_json'] as String?;
   }
 
-  Future<void> updateRecordingInfo({
+  /// Links a recording to a call that has never had one. True when it did.
+  ///
+  /// Guarded at write time, not just at read time: the matcher runs between
+  /// reading the row and writing it, across platform calls and an isolate, and
+  /// the native ingester may link — and the coordinator upload — a recording in
+  /// that gap. Unguarded, this put a second file on a call the server already
+  /// had audio for. It also never revives a recording the coordinator gave up
+  /// on (`has_recording = 0` with the media id kept): re-linking that file sent
+  /// it to be refused again on every sync, for ever.
+  Future<bool> updateRecordingInfo({
     required String idempotencyKey,
     required String recordingPath,
     required int mediaStoreId,
   }) async {
-    await (update(_table)..where((t) => t.idempotencyKey.equals(idempotencyKey)))
+    final changed = await (update(_table)
+          ..where((t) =>
+              t.idempotencyKey.equals(idempotencyKey) &
+              t.recordingMediaStoreId.isNull() &
+              (t.recordingUploadStatus.isNull() |
+                  t.recordingUploadStatus
+                      .equals(RecordingUploadStatus.uploaded)
+                      .not())))
         .write(
       LocalCallsCompanion(
         hasRecording: const Value(true),
@@ -244,23 +260,34 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
         recordingUploadStatus: const Value(RecordingUploadStatus.pending),
       ),
     );
+    return changed > 0;
   }
 
-  Map<String, int> _countStates(List<LocalCall> all) {
+  /// Counted in SQL: the counters stream is watched for the whole session
+  /// and re-runs on every write to the table, so it must not pull every row
+  /// across into Dart to tally a handful of states.
+  Selectable<QueryRow> get _stateCounts => customSelect(
+        'SELECT sync_state, COUNT(*) AS n FROM local_calls GROUP BY sync_state;',
+        readsFrom: {_table},
+      );
+
+  Map<String, int> _countStates(List<QueryRow> rows) {
     int uploaded = 0;
     int uploading = 0;
     int waiting = 0;
     int failed = 0;
 
-    for (final c in all) {
-      if (CallSyncState.isUploaded(c.syncState)) {
-        uploaded++;
-      } else if (CallSyncState.isInFlight(c.syncState)) {
-        uploading++;
-      } else if (CallSyncState.isPermanentFailure(c.syncState)) {
-        failed++;
+    for (final row in rows) {
+      final state = row.read<String>('sync_state');
+      final n = row.read<int>('n');
+      if (CallSyncState.isUploaded(state)) {
+        uploaded += n;
+      } else if (CallSyncState.isInFlight(state)) {
+        uploading += n;
+      } else if (CallSyncState.isPermanentFailure(state)) {
+        failed += n;
       } else {
-        waiting++;
+        waiting += n;
       }
     }
 
@@ -269,15 +296,15 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
       'uploading': uploading,
       'waiting': waiting,
       'failed': failed,
-      'total': all.length,
+      'total': uploaded + uploading + waiting + failed,
     };
   }
 
   Future<Map<String, int>> getSyncCounters() async =>
-      _countStates(await select(_table).get());
+      _countStates(await _stateCounts.get());
 
   Stream<Map<String, int>> watchSyncCounters() =>
-      select(_table).watch().map(_countStates);
+      _stateCounts.watch().map(_countStates).distinct(mapEquals);
 
   /// Calls the server already has, whose audio is still owed to it.
   ///
@@ -295,17 +322,61 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
         .get();
   }
 
+  /// `external_call_id` prefix of WhatsApp calls (Kotlin's
+  /// `NativeCallOutboxDao.EXTERNAL_WHATSAPP_PREFIX`).
+  static const whatsAppPrefix = 'whatsapp-';
+
   /// Calls that connected but have not yet been linked to a recording candidate.
+  ///
+  /// WhatsApp calls are excluded: their audio cannot be recorded, so any match
+  /// would be a cellular call's recording that merely overlapped in time.
+  ///
+  /// "Never linked" is `recording_media_store_id IS NULL`. This used to also
+  /// take `has_recording = 0`, which is how the coordinator marks a recording
+  /// it gave up on (refused by the server, rejected locally) while keeping the
+  /// media id — so those files were re-matched and re-sent on every sync.
   Future<List<LocalCall>> getCallsNeedingRecordingMatch({int limit = 100}) {
     return (select(_table)
           ..where((t) =>
               t.durationSeconds.isBiggerThanValue(0) &
-              (t.hasRecording.equals(false) | t.recordingMediaStoreId.isNull()))
+              (t.externalCallId.isNull() |
+                  t.externalCallId.like('$whatsAppPrefix%').not()) &
+              t.recordingMediaStoreId.isNull() &
+              (t.recordingUploadStatus.isNull() |
+                  t.recordingUploadStatus
+                      .equals(RecordingUploadStatus.uploaded)
+                      .not()))
           ..orderBy([
             (t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)
           ])
           ..limit(limit))
         .get();
+  }
+
+  /// WhatsApp calls started in [fromMillis, beforeMillis), newest first. A
+  /// null bound is open.
+  Future<List<LocalCall>> getWhatsAppCalls({int? fromMillis, int? beforeMillis}) {
+    final query = select(_table)
+      ..where((t) {
+        Expression<bool> e = t.externalCallId.like('$whatsAppPrefix%');
+        if (fromMillis != null) {
+          e = e &
+              t.startedAt.isBiggerOrEqualValue(
+                DateTime.fromMillisecondsSinceEpoch(fromMillis),
+              );
+        }
+        if (beforeMillis != null) {
+          e = e &
+              t.startedAt.isSmallerThanValue(
+                DateTime.fromMillisecondsSinceEpoch(beforeMillis),
+              );
+        }
+        return e;
+      })
+      ..orderBy([
+        (t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc),
+      ]);
+    return query.get();
   }
 
   Future<List<LocalCall>> getOutboxItems({String? filter}) {
@@ -322,8 +393,14 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
     } else if (filter == 'synced') {
       query.where((t) => t.syncState.equals(CallSyncState.uploaded));
     }
-    query.orderBy(
-        [(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)]);
+    query
+      ..orderBy([
+        (t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)
+      ])
+      // The queue view is a support tool, not an archive: the newest few
+      // hundred are what anyone looks at, and "all" or "synced" otherwise
+      // loaded every call this phone has ever made.
+      ..limit(500);
     return query.get();
   }
 
@@ -378,31 +455,6 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
     );
   }
 
-  Future<List<LocalCall>> getCallsForAnalytics({
-    DateTime? startUtc,
-    DateTime? endUtc,
-    bool excludeInternal = false,
-  }) async {
-    var query = select(_table);
-    if (startUtc != null && endUtc != null) {
-      query.where((t) =>
-          t.startedAt.isBiggerOrEqualValue(startUtc) &
-          t.startedAt.isSmallerOrEqualValue(endUtc));
-    } else if (startUtc != null) {
-      query.where((t) => t.startedAt.isBiggerOrEqualValue(startUtc));
-    } else if (endUtc != null) {
-      query.where((t) => t.startedAt.isSmallerOrEqualValue(endUtc));
-    }
-
-    if (excludeInternal) {
-      query.where((t) => t.phoneNumber.length.isBiggerThanValue(4));
-    }
-
-    query.orderBy(
-        [(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)]);
-    return query.get();
-  }
-
   Stream<List<LocalCall>> watchCallsForAnalytics({
     DateTime? startUtc,
     DateTime? endUtc,
@@ -428,51 +480,12 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
     return query.watch();
   }
 
-  Stream<List<LocalCall>> watchAllCalls() {
-    return (select(_table)
-          ..orderBy([
-            (t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)
-          ]))
-        .watch();
-  }
-
   Future<int> getUnsyncedCount() async {
-    final unsynced = await (select(_table)
-          ..where((t) => t.syncState.isNotValue(CallSyncState.uploaded)))
-        .get();
-    return unsynced.length;
-  }
-
-  Future<int> deleteSyncedCalls() async {
-    return (delete(_table)
-          ..where((t) => t.syncState.equals(CallSyncState.uploaded)))
-        .go();
-  }
-
-  /// Purges synced calls older than [cutoff] (e.g. 180 days) to prevent
-  /// unbounded SQLite storage growth on low-end devices.
-  ///
-  /// Rows whose audio is still owed to the server survive regardless of age:
-  /// deleting one is the single way to lose a recording permanently.
-  Future<int> deleteSyncedCallsOlderThan(DateTime cutoff) async {
-    return (delete(_table)
-          ..where((t) =>
-              t.syncState.equals(CallSyncState.uploaded) &
-              t.startedAt.isSmallerThanValue(cutoff) &
-              (t.hasRecording.equals(false) |
-                  t.recordingUploadStatus
-                      .equals(RecordingUploadStatus.uploaded) |
-                  t.recordingUploadStatus
-                      .equals(RecordingUploadStatus.absent))))
-        .go();
-  }
-
-  /// Purges non-retryable permanently failed calls older than [cutoff].
-  Future<int> deletePermanentFailuresOlderThan(DateTime cutoff) async {
-    return (delete(_table)
-          ..where((t) =>
-              t.syncState.equals(CallSyncState.failed) &
-              t.startedAt.isSmallerThanValue(cutoff)))
-        .go();
+    final row = await customSelect(
+      'SELECT COUNT(*) AS n FROM local_calls WHERE sync_state <> ?;',
+      variables: [Variable<String>(CallSyncState.uploaded)],
+      readsFrom: {_table},
+    ).getSingle();
+    return row.read<int>('n');
   }
 }

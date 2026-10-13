@@ -49,7 +49,9 @@ object CallStateJournal {
             .putString(KEY_ENTRIES, trimmed.toString())
             .putBoolean(KEY_OVERFLOWED, overflowed)
             // Any transition means the log may have gained a row we have not
-            // ingested. Dart clears this once its cursor has caught up.
+            // ingested. Nothing clears it any more — the native ingester's
+            // cursor is what tracks catching up — so it only reports that the
+            // receiver has run at all.
             .putBoolean(KEY_RECONCILE_PENDING, true)
             .apply()
     }
@@ -72,12 +74,11 @@ object CallStateJournal {
     /**
      * The raw transition timestamps belonging to one call-log row.
      *
-     * All three are nullable because the receiver only sees what it was alive
-     * for. A backfilled call, or one that arrived while the process was dead,
-     * yields nulls rather than approximations.
+     * Both nullable because the receiver only sees what it was alive for. A
+     * backfilled call, or one that arrived while the process was dead, yields
+     * nulls rather than approximations.
      */
     data class CallWindow(
-        val ringingAtMillis: Long?,
         val offHookAtMillis: Long?,
         val idleAtMillis: Long?,
     )
@@ -109,13 +110,17 @@ object CallStateJournal {
      * result is deliberately all-or-nothing: half a window paired with a
      * guessed other half is how a wrong `answered_at` reaches the server, and
      * the server recomputes `duration_seconds` from the pair it is given.
+     *
+     * Takes the journal already parsed by [snapshot] rather than reading it
+     * itself: an ingest pass asks this once per call, and re-parsing the whole
+     * JSON blob from SharedPreferences for every row of a 500-call backfill
+     * page was pure waste.
      */
     fun windowFor(
-        context: Context,
+        entries: List<Pair<String, Long>>,
         startedAtMillis: Long,
         durationSeconds: Int,
     ): CallWindow? {
-        val entries = entries(context)
         if (entries.isEmpty()) return null
 
         val durationMillis = durationSeconds * 1000L
@@ -158,14 +163,16 @@ object CallStateJournal {
         }
 
         return CallWindow(
-            ringingAtMillis = ringing,
             offHookAtMillis = offHook,
             idleAtMillis = idle,
         )
     }
 
-    /** Transitions as (state, atMillis), in the order recorded. */
-    private fun entries(context: Context): List<Pair<String, Long>> {
+    /**
+     * Transitions as (state, atMillis), in the order recorded. Parse once per
+     * pass and hand the result to [windowFor].
+     */
+    fun snapshot(context: Context): List<Pair<String, Long>> {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val array = JSONArray(prefs.getString(KEY_ENTRIES, "[]"))
         val out = ArrayList<Pair<String, Long>>(array.length())
@@ -175,14 +182,5 @@ object CallStateJournal {
             out += state to o.optLong("atMillis")
         }
         return out
-    }
-
-    /** Called by Dart only after the transitions have been folded into the DB. */
-    fun clear(context: Context) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_ENTRIES, "[]")
-            .putBoolean(KEY_OVERFLOWED, false)
-            .putBoolean(KEY_RECONCILE_PENDING, false)
-            .apply()
     }
 }

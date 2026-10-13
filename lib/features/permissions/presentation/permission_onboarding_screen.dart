@@ -3,10 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/theme/design_tokens.dart';
 import '../../../shared/widgets/brand.dart';
-import '../../../shared/widgets/loaders.dart';
 import '../../../shared/widgets/ui_kit.dart';
 import '../../auth/data/auth_controller.dart';
-import '../../background/data/background_service.dart';
 import '../../call_tracking/data/call_feed.dart';
 import '../domain/permission_ask.dart';
 import 'ask_card.dart';
@@ -41,16 +39,19 @@ class _PermissionOnboardingScreenState
   @override
   Widget build(BuildContext context) {
     final snapshot = ref.watch(permissionStatusProvider);
-    final background = ref.watch(backgroundStatusProvider).value;
 
     return Scaffold(
-      backgroundColor: AppTokens.bgPrimary,
+      backgroundColor: context.z.canvas,
+      // Top edge only. The pinned footer pads itself clear of the system
+      // navigation bar (BottomSafe).
       body: SafeArea(
+        bottom: false,
         child: snapshot.when(
-          loading: () => Column(
+          loading: () => ListView(
+            physics: const NeverScrollableScrollPhysics(),
             children: [
               _Header(recovery: widget.recovery),
-              Expanded(child: AskSkeletonList()),
+              const AskSkeletonList(),
             ],
           ),
           error: (e, _) => ErrorStateView(
@@ -61,52 +62,37 @@ class _PermissionOnboardingScreenState
             onRetry: refreshPermissions,
           ),
           data: (perms) {
-            final asks = permissionAsks(perms, background: background);
+            final asks = watchAsks(perms);
 
             return Column(
               children: [
-                _Header(recovery: widget.recovery),
                 Expanded(
                   child: ListView(
-                    padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+                    // The pinned footer sits between this list and the
+                    // navigation bar, so no system inset is added here. The
+                    // ask list runs edge to edge; the header indents itself.
+                    padding: const EdgeInsets.only(bottom: 24),
                     children: [
-                      AskProgress(
-                        granted: asks.grantedCount,
-                        total: asks.length,
+                      _Header(recovery: widget.recovery),
+                      AskList(
+                        asks: asks,
+                        isBlocked: isBlocked,
+                        isBusy: isBusy,
+                        onRequest: request,
                       ),
-                      const SizedBox(height: 16),
-                      const Text(
-                        'Phone and call log access is required to track calls at '
-                        'all. The rest are optional — each one adds detail, and '
-                        'you can grant them later from Settings.',
-                        style: TextStyle(
-                          color: AppTokens.textSecondary,
-                          fontSize: 13,
-                          height: 1.45,
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      for (final ask in asks) ...[
-                        AskCard(
-                          ask: ask,
-                          blocked: isBlocked(ask),
-                          busy: isBusy(ask),
-                          onRequest: () => request(ask),
-                        ),
-                        const SizedBox(height: 10),
-                      ],
                     ],
                   ),
                 ),
                 _Footer(
-                  asks: asks,
+                  canProceed: asks.canProceed,
+                  allGranted: asks.allGranted,
                   finishing: _finishing,
                   recovery: widget.recovery,
                   onContinue: _finish,
                   onSkip: widget.recovery
                       ? () => ref
-                          .read(permissionRecoveryDismissedProvider.notifier)
-                          .dismiss()
+                            .read(permissionRecoveryDismissedProvider.notifier)
+                            .dismiss()
                       : null,
                 ),
               ],
@@ -118,61 +104,95 @@ class _PermissionOnboardingScreenState
   }
 }
 
+/// Mark, title and one short line.
 class _Header extends StatelessWidget {
   const _Header({this.recovery = false});
 
   final bool recovery;
 
   @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const ZebuAppMark(size: 48),
-            const SizedBox(height: 16),
-            Text(
-              recovery ? 'Call tracking has stopped' : 'Set up call tracking',
-              style: const TextStyle(
-                fontWeight: FontWeight.w800,
-                fontSize: 24,
-                color: Colors.white,
-                letterSpacing: -0.5,
-              ),
+  Widget build(BuildContext context) {
+    final z = context.z;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AppTokens.gutter,
+        32,
+        AppTokens.gutter,
+        24,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Stack(
+            clipBehavior: Clip.none,
+            children: [
+              const ZebuAppMark(size: 48),
+              // Recovery: a danger badge on the tile says "something
+              // stopped" before a word is read.
+              if (recovery)
+                Positioned(
+                  right: -5,
+                  bottom: -5,
+                  child: Container(
+                    width: 22,
+                    height: 22,
+                    decoration: BoxDecoration(
+                      color: z.danger,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: z.canvas, width: 3),
+                    ),
+                    alignment: Alignment.center,
+                    child: Icon(
+                      Icons.priority_high_rounded,
+                      size: 12,
+                      color: z.canvas,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          Semantics(
+            header: true,
+            child: Text(
+              recovery ? 'Call tracking has stopped' : 'Allow access',
+              style: AppType.title,
             ),
-            const SizedBox(height: 4),
-            Text(
-              recovery
-                  // Says what is true and what is not: capture has stopped, but
-                  // nothing already saved has been lost. A user who thinks
-                  // their history is gone reacts very differently.
-                  ? 'Permission to read the call log was turned off, so no new '
-                      'calls are being recorded. Calls already saved on this '
-                      'phone are safe and will still be sent.'
-                  : 'Zebu Call Tracker requires system permissions to log '
-                      'calls, upload recordings, and sync data in the '
-                      'background.',
-              style: const TextStyle(
-                color: AppTokens.textMuted,
-                fontSize: 13,
-                height: 1.45,
-              ),
-            ),
-          ],
-        ),
-      );
+          ),
+          const SizedBox(height: 6),
+          Text(
+            recovery
+                // Says what is true and what is not: capture has stopped, but
+                // nothing already saved has been lost. A user who thinks their
+                // history is gone reacts very differently.
+                ? 'Phone or call log access was turned off. Calls already '
+                      'saved are safe.'
+                : 'So your work calls are logged automatically.',
+            style: AppType.body.copyWith(color: z.ink2),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
+/// Bottom-pinned action bar. Pads itself up from the system navigation bar
+/// so the primary button never sits under the nav buttons.
+///
+/// Just the button: it stays disabled until the required access is allowed,
+/// and the list already marks that row "Required".
 class _Footer extends StatelessWidget {
   const _Footer({
-    required this.asks,
+    required this.canProceed,
+    required this.allGranted,
     required this.finishing,
     required this.onContinue,
     this.recovery = false,
     this.onSkip,
   });
 
-  final List<PermissionAsk> asks;
+  final bool canProceed;
+  final bool allGranted;
   final bool finishing;
   final VoidCallback onContinue;
   final bool recovery;
@@ -182,95 +202,46 @@ class _Footer extends StatelessWidget {
   final VoidCallback? onSkip;
 
   @override
-  Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.fromLTRB(20, 14, 20, 16),
-        decoration: const BoxDecoration(
-          color: AppTokens.surface1,
-          border: Border(top: BorderSide(color: AppTokens.borderDefault)),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (!asks.canProceed)
-              _FooterNote(
-                icon: Icons.lock_outline_rounded,
-                color: AppTokens.danger,
-                message:
-                    'Grant ${_join(asks.missingEssential.map((a) => a.title))} '
-                    'to start tracking calls.',
-              )
-            else if (asks.missingOptional.isNotEmpty)
-              _FooterNote(
-                icon: Icons.info_outline_rounded,
-                color: AppTokens.warning,
-                message:
-                    '${asks.missingOptional.length} optional '
-                    '${asks.missingOptional.length == 1 ? "permission is" : "permissions are"} '
-                    'not granted. You can add them any time from Settings.',
+  Widget build(BuildContext context) {
+    final z = context.z;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: z.canvas,
+        border: Border(top: BorderSide(color: z.line)),
+      ),
+      child: BottomSafe(
+        minimum: 14,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(
+            AppTokens.gutter,
+            14,
+            AppTokens.gutter,
+            0,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ZButton(
+                label: recovery
+                    ? 'Resume call tracking'
+                    : (allGranted ? 'Start tracking' : 'Continue'),
+                size: ZButtonSize.large,
+                loading: finishing,
+                onPressed: canProceed ? onContinue : null,
               ),
-            LoadingFilledButton(
-              label: recovery
-                  ? 'Resume call tracking'
-                  : (asks.allGranted ? 'Start tracking' : 'Continue'),
-              loading: finishing,
-              onPressed: asks.canProceed ? onContinue : null,
-            ),
-            if (onSkip != null && !asks.canProceed)
-              TextButton(
-                onPressed: onSkip,
-                child: const Text(
-                  'Continue without call tracking',
-                  style: TextStyle(
-                    color: AppTokens.textMuted,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                  ),
+              if (onSkip != null && !canProceed) ...[
+                const SizedBox(height: 4),
+                ZButton(
+                  label: 'Continue without call tracking',
+                  variant: ZButtonVariant.text,
+                  size: ZButtonSize.regular,
+                  onPressed: onSkip,
                 ),
-              ),
-          ],
+              ],
+            ],
+          ),
         ),
-      );
-}
-
-/// Joins titles into readable prose: "A", "A and B", "A, B and C".
-String _join(Iterable<String> parts) {
-  final list = parts.toList();
-  if (list.isEmpty) return '';
-  if (list.length == 1) return list.single;
-  return '${list.take(list.length - 1).join(', ')} and ${list.last}';
-}
-
-class _FooterNote extends StatelessWidget {
-  const _FooterNote({
-    required this.icon,
-    required this.color,
-    required this.message,
-  });
-
-  final IconData icon;
-  final Color color;
-  final String message;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(bottom: 12),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(icon, size: 16, color: color),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                message,
-                style: TextStyle(
-                  color: color,
-                  fontSize: 12,
-                  height: 1.4,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-          ],
-        ),
-      );
+      ),
+    );
+  }
 }

@@ -5,6 +5,7 @@ import 'package:just_audio/just_audio.dart';
 
 import '../../call_tracking/data/call_feed.dart';
 import '../domain/recording_matcher.dart';
+import 'server_recording.dart';
 
 /// What the player is doing, as one value the UI can render without reaching
 /// into three separate streams.
@@ -17,10 +18,15 @@ class PlaybackState {
     this.duration = Duration.zero,
     this.speed = 1.0,
     this.error,
+    this.remoteKey,
   });
 
   /// Which recording is loaded. Null when nothing has been played yet.
   final int? mediaStoreId;
+
+  /// Set instead of [mediaStoreId] when the audio is streaming from the
+  /// server: the server's call id it belongs to.
+  final String? remoteKey;
 
   final bool playing;
 
@@ -40,30 +46,24 @@ class PlaybackState {
   bool isFor(int id) => mediaStoreId == id;
   bool isPlaying(int id) => isFor(id) && playing;
   bool isLoading(int id) => isFor(id) && loading;
-
-  /// 0..1, safe when duration is not yet known.
-  double get progress {
-    if (duration.inMilliseconds <= 0) return 0;
-    return (position.inMilliseconds / duration.inMilliseconds).clamp(0.0, 1.0);
-  }
+  bool isForRemote(String key) => remoteKey == key;
 
   PlaybackState copyWith({
-    int? mediaStoreId,
     bool? playing,
     bool? loading,
     Duration? position,
     Duration? duration,
     double? speed,
     String? error,
-    bool clearError = false,
   }) => PlaybackState(
-    mediaStoreId: mediaStoreId ?? this.mediaStoreId,
+    mediaStoreId: mediaStoreId,
+    remoteKey: remoteKey,
     playing: playing ?? this.playing,
     loading: loading ?? this.loading,
     position: position ?? this.position,
     duration: duration ?? this.duration,
     speed: speed ?? this.speed,
-    error: clearError ? null : (error ?? this.error),
+    error: error ?? this.error,
   );
 }
 
@@ -171,8 +171,53 @@ class RecordingPlayer extends Notifier<PlaybackState> {
     }
   }
 
-  Future<void> pause() async {
-    await _player?.pause();
+  /// Plays a recording streamed from the server, keyed by [key] (its call
+  /// id). Same toggle rules as [toggle].
+  ///
+  /// [resolveUrl] is called for every fresh load and never cached: the
+  /// stream URL carries a playback token that lives for minutes.
+  Future<void> toggleRemote(
+    String key,
+    Future<String> Function() resolveUrl, {
+    Duration duration = Duration.zero,
+  }) async {
+    final player = _ensurePlayer();
+
+    if (state.isForRemote(key) && state.error == null && !state.loading) {
+      if (state.playing) {
+        await player.pause();
+      } else {
+        await player.play();
+      }
+      return;
+    }
+
+    state = PlaybackState(
+      remoteKey: key,
+      loading: true,
+      speed: state.speed,
+      duration: duration,
+    );
+
+    try {
+      final url = await resolveUrl();
+      // Another recording was started while the URL was being fetched.
+      if (!state.isForRemote(key)) return;
+      await player.setUrl(url);
+      await player.setSpeed(state.speed);
+      await player.play();
+    } on ServerRecordingUnavailable catch (e) {
+      if (!state.isForRemote(key)) return;
+      state = state.copyWith(loading: false, playing: false, error: e.message);
+    } on Object {
+      if (!state.isForRemote(key)) return;
+      state = state.copyWith(
+        loading: false,
+        playing: false,
+        error: "Couldn't play the recording from Zebu CRM. Check your "
+            'connection and try again.',
+      );
+    }
   }
 
   Future<void> seek(Duration to) async {

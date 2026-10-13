@@ -2,7 +2,18 @@ import 'package:intl/intl.dart';
 
 /// Display helpers. Everything here takes UTC in and emits local time, which is
 /// the only place that conversion is allowed to happen (brief §5).
+///
+/// Formatters and patterns are built once: these run per row of every list, and
+/// a `DateFormat` or `RegExp` constructed per call was a measurable share of a
+/// scroll frame.
 abstract final class Fmt {
+  static final _clock = DateFormat('h:mm a');
+  static final _weekday = DateFormat.EEEE();
+  static final _dayMonth = DateFormat('d MMMM');
+  static final _dayMonthYear = DateFormat('d MMMM yyyy');
+  static final _nonDigits = RegExp(r'[^0-9]');
+  static final _whitespace = RegExp(r'\s+');
+
   /// `4m 32s`, `1h 05m`, `12s`. Used wherever a call length is shown inline.
   static String duration(int seconds) {
     if (seconds <= 0) return '0s';
@@ -14,63 +25,33 @@ abstract final class Fmt {
     return '${s}s';
   }
 
-  /// `0h 17m 24s` exact format matching the analytics cards.
-  static String exactDuration(int seconds) {
-    if (seconds <= 0) return '0h  0m 0s';
+  /// `4:12`, `1:02:05`, `0:07`. A call length in a ledger column, where every
+  /// row's figure has to line up; pair it with tabular figures.
+  static String stopwatch(int seconds) {
+    if (seconds <= 0) return '0:00';
     final h = seconds ~/ 3600;
     final m = (seconds % 3600) ~/ 60;
-    final s = seconds % 60;
-    return '${h}h  ${m}m ${s}s';
+    final s = (seconds % 60).toString().padLeft(2, '0');
+    if (h > 0) return '$h:${m.toString().padLeft(2, '0')}:$s';
+    return '$m:$s';
   }
 
-  /// `02:18` style, for the talk-time hero where the unit labels sit separately.
-  static (String hours, String minutes) talkTime(int seconds) {
-    final h = seconds ~/ 3600;
-    final m = (seconds % 3600) ~/ 60;
-    return (h.toString().padLeft(2, '0'), m.toString().padLeft(2, '0'));
-  }
-
-  static String clock(DateTime utc) => DateFormat.Hm().format(utc.toLocal());
+  /// `3:42 PM`.
+  static String clock(DateTime utc) => _clock.format(utc.toLocal());
 
   static String dayHeading(DateTime utc) {
-    final local = DateTime(
-      utc.toLocal().year,
-      utc.toLocal().month,
-      utc.toLocal().day,
-    );
+    final l = utc.toLocal();
+    final local = DateTime(l.year, l.month, l.day);
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final delta = today.difference(local).inDays;
     if (delta == 0) return 'Today';
     if (delta == 1) return 'Yesterday';
-    if (delta < 7) return DateFormat.EEEE().format(local);
-    return DateFormat('d MMMM').format(local);
+    if (delta < 7) return _weekday.format(local);
+    return local.year == now.year
+        ? _dayMonth.format(local)
+        : _dayMonthYear.format(local);
   }
-
-  /// `just now`, `12 minutes ago`, `3 hours ago`, `yesterday`, `on 12 August`.
-  ///
-  /// Used for "when did this last happen" status lines, where an exact
-  /// timestamp reads as precision the user has to decode. Ages beyond a week
-  /// fall back to a date, because "9 days ago" is harder to place than the day
-  /// itself.
-  static String relative(DateTime utc) {
-    final delta = DateTime.now().toUtc().difference(utc);
-    if (delta.isNegative || delta.inMinutes < 1) return 'just now';
-    if (delta.inMinutes < 60) {
-      final m = delta.inMinutes;
-      return '$m minute${m == 1 ? '' : 's'} ago';
-    }
-    if (delta.inHours < 24) {
-      final h = delta.inHours;
-      return '$h hour${h == 1 ? '' : 's'} ago';
-    }
-    if (delta.inDays == 1) return 'yesterday';
-    if (delta.inDays < 7) return '${delta.inDays} days ago';
-    return 'on ${DateFormat('d MMMM').format(utc.toLocal())}';
-  }
-
-  static String fullTimestamp(DateTime utc) =>
-      DateFormat('HH:mm:ss').format(utc.toLocal());
 
   static String fileSize(int bytes) {
     if (bytes < 1024) return '$bytes B';
@@ -85,8 +66,10 @@ abstract final class Fmt {
   /// the call detail screen, where looking at it is a deliberate act.
   static String maskNumber(String? number) {
     if (number == null || number.isEmpty) return 'Number withheld';
-    final digits = number.replaceAll(RegExp(r'[^0-9]'), '');
-    if (digits.length < 7) return number;
+    final digits = number.replaceAll(_nonDigits, '');
+    // Below ten digits there is no national number to mask around; slicing
+    // the last ten threw a RangeError for 7–9 digit landlines.
+    if (digits.length < 10) return number;
     final cc = number.startsWith('+')
         ? '+${digits.substring(0, digits.length - 10)} '
         : '';
@@ -97,7 +80,7 @@ abstract final class Fmt {
   /// `+91 97397 87538` — grouped but complete.
   static String prettyNumber(String? number) {
     if (number == null || number.isEmpty) return 'Number withheld';
-    final digits = number.replaceAll(RegExp(r'[^0-9]'), '');
+    final digits = number.replaceAll(_nonDigits, '');
     if (digits.length < 10) return number;
     final tail = digits.substring(digits.length - 10);
     final cc = digits.substring(0, digits.length - 10);
@@ -109,7 +92,7 @@ abstract final class Fmt {
   /// than showing digits, which read as noise at avatar size.
   static String initials(String? name) {
     if (name == null || name.trim().isEmpty) return '#';
-    final parts = name.trim().split(RegExp(r'\s+'));
+    final parts = name.trim().split(_whitespace);
     if (parts.length == 1) {
       return parts.first.substring(0, 1).toUpperCase();
     }

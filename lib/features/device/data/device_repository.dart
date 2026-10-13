@@ -41,7 +41,10 @@ class DeviceRepository {
       'manufacturer': deviceInfo['manufacturer'] as String? ?? 'Generic',
       'model': deviceInfo['model'] as String? ?? 'Unknown',
       'platform': Platform.isAndroid ? 'android' : 'ios',
-      'os_version': deviceInfo['version'] as String? ?? Platform.operatingSystemVersion,
+      // Native reports it as `osVersion`; `version` never existed, so every
+      // registration sent Dart's own platform string instead.
+      'os_version': deviceInfo['osVersion'] as String? ??
+          Platform.operatingSystemVersion,
       'app_version': AppVersion.name,
       'phone_number': deviceInfo['phone_number'] as String?,
     };
@@ -59,20 +62,7 @@ class DeviceRepository {
     );
   }
 
-  Future<void> sendHeartbeat({
-    int pendingCalls = 0,
-    int pendingRecordings = 0,
-  }) async {
-    final uuid = await getDeviceUuid();
-    await _apiClient.post<dynamic>(
-      ApiEndpoints.heartbeat(uuid),
-      data: {
-        'app_version': AppVersion.name,
-        'os_version': Platform.operatingSystemVersion,
-        'pending_calls': pendingCalls,
-        'pending_recordings': pendingRecordings,
-      },
-    );
-  }
+  // The heartbeat is sent natively (`NativeCallBridge.sendHeartbeat`), so the
+  // foreground, background and push senders share one once-a-minute limit.
 }
 

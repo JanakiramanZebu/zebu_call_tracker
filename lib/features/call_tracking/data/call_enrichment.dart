@@ -99,7 +99,6 @@ abstract final class CallEnrichment {
     if (!isIncoming && measured > durationMillis + _maxRingMillis) return null;
 
     return CallWindow(
-      ringingAtMillis: ringing,
       offHookAtMillis: offHook,
       idleAtMillis: idle,
     );
@@ -280,6 +279,9 @@ abstract final class CallEnrichment {
       rec['match_anchored'] = signals.isAnchored;
       rec['duration_delta_seconds'] = _round(signals.durationDeltaSeconds);
       rec['ring_gap_seconds'] = signals.ringGapSeconds;
+      // Whether the file was read as stamped at hang-up, so its start (and
+      // ring_gap_seconds) came from date_modified minus the audio.
+      rec['end_stamped'] = signals.endStamped;
       rec['identity_matched'] = signals.identityMatched;
       _put(rec, 'anchor_delta_seconds', signals.anchorDeltaSeconds);
     }
@@ -327,12 +329,9 @@ abstract final class TimingSource {
 /// The raw transition timestamps belonging to one call-log row.
 class CallWindow {
   const CallWindow({
-    this.ringingAtMillis,
     this.offHookAtMillis,
     this.idleAtMillis,
   });
-
-  final int? ringingAtMillis;
 
   /// **Not an answer time on its own** — see [CallEnrichment.resolveTimes].
   final int? offHookAtMillis;

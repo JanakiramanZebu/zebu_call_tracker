@@ -1,41 +1,21 @@
 import '../../../core/network/api_client.dart';
 import '../../../core/network/api_endpoints.dart';
 
+/// The one limit from `GET /sync/status` that Dart acts on itself.
+///
+/// The full policy object is forwarded to the native coordinator as raw JSON
+/// (`SyncStatusResponse.rawPolicy`), which is what enforces batch size,
+/// recording ceiling and formats.
 class SyncPolicy {
-  const SyncPolicy({
-    this.maxBatchSize = 200,
-    this.maxCallAgeDays = 90,
-    this.maxClockSkewMinutes = 15,
-    this.maxRecordingSizeBytes = 209715200,
-    this.allowedExtensions = const [
-      '3gp', 'aac', 'amr', 'm4a', 'mp3', 'mp4', 'ogg', 'opus', 'wav'
-    ],
-    this.recommendedIntervalSeconds = 300,
-    this.recommendedBatchSize = 50,
-  });
+  const SyncPolicy({this.maxClockSkewMinutes = 15});
 
-  final int maxBatchSize;
-  final int maxCallAgeDays;
   final int maxClockSkewMinutes;
-  final int maxRecordingSizeBytes;
-  final List<String> allowedExtensions;
-  final int recommendedIntervalSeconds;
-  final int recommendedBatchSize;
 
   factory SyncPolicy.fromJson(Map<String, dynamic>? json) {
     if (json == null) return const SyncPolicy();
     return SyncPolicy(
-      maxBatchSize: (json['max_batch_size'] as num?)?.toInt() ?? 200,
-      maxCallAgeDays: (json['max_call_age_days'] as num?)?.toInt() ?? 90,
-      maxClockSkewMinutes: (json['max_clock_skew_minutes'] as num?)?.toInt() ?? 15,
-      maxRecordingSizeBytes: (json['max_recording_size_bytes'] as num?)?.toInt() ?? 209715200,
-      allowedExtensions: (json['allowed_recording_extensions'] as List?)
-              ?.map((e) => e.toString())
-              .toList() ??
-          const ['3gp', 'aac', 'amr', 'm4a', 'mp3', 'mp4', 'ogg', 'opus', 'wav'],
-      recommendedIntervalSeconds:
-          (json['recommended_sync_interval_seconds'] as num?)?.toInt() ?? 300,
-      recommendedBatchSize: (json['recommended_batch_size'] as num?)?.toInt() ?? 50,
+      maxClockSkewMinutes:
+          (json['max_clock_skew_minutes'] as num?)?.toInt() ?? 15,
     );
   }
 }
@@ -43,25 +23,25 @@ class SyncPolicy {
 class PendingRecordingItem {
   const PendingRecordingItem({
     required this.callId,
-    required this.uploadUrl,
     this.startedAt,
     this.phoneNumber,
   });
 
   final String callId;
-  final String uploadUrl;
   final String? startedAt;
   final String? phoneNumber;
 
   factory PendingRecordingItem.fromJson(Map<String, dynamic> json) {
     return PendingRecordingItem(
       callId: json['call_id'] as String? ?? '',
-      uploadUrl: json['upload_url'] as String? ?? '',
       startedAt: json['started_at'] as String?,
       phoneNumber: json['phone_number'] as String?,
     );
   }
 }
+
+DateTime? _time(Object? raw) =>
+    raw is String ? DateTime.tryParse(raw)?.toUtc() : null;
 
 class SyncStatusResponse {
   const SyncStatusResponse({
@@ -71,6 +51,12 @@ class SyncStatusResponse {
     required this.policy,
     required this.pendingRecordingUploads,
     this.rawPolicy,
+    this.lastSyncAt,
+    this.lastCallAt,
+    this.totalCalls,
+    this.callsToday,
+    this.callsLast7Days,
+    this.recordingsStored,
   });
 
   final String serverTime;
@@ -86,6 +72,16 @@ class SyncStatusResponse {
   /// two sides cannot disagree about what the server said.
   final Map<String, dynamic>? rawPolicy;
 
+  /// What the server itself holds for this employee — the only proof that
+  /// calls arrived, as opposed to the phone's belief that they were sent.
+  /// Null when the server did not say.
+  final DateTime? lastSyncAt;
+  final DateTime? lastCallAt;
+  final int? totalCalls;
+  final int? callsToday;
+  final int? callsLast7Days;
+  final int? recordingsStored;
+
   factory SyncStatusResponse.fromJson(Map<String, dynamic> json) {
     final pendingList = json['pending_recording_uploads'] as List? ?? [];
     return SyncStatusResponse(
@@ -97,86 +93,12 @@ class SyncStatusResponse {
       pendingRecordingUploads: pendingList
           .map((i) => PendingRecordingItem.fromJson(i as Map<String, dynamic>))
           .toList(),
-    );
-  }
-}
-
-class BatchSuccessItem {
-  const BatchSuccessItem({
-    required this.idempotencyKey,
-    required this.callId,
-    required this.revision,
-  });
-
-  final String idempotencyKey;
-  final String callId;
-  final int revision;
-
-  factory BatchSuccessItem.fromJson(Map<String, dynamic> json) {
-    return BatchSuccessItem(
-      idempotencyKey: json['idempotency_key'] as String? ?? '',
-      callId: json['call_id'] as String? ?? '',
-      revision: (json['revision'] as num?)?.toInt() ?? 1,
-    );
-  }
-}
-
-class BatchFailedItem {
-  const BatchFailedItem({
-    required this.idempotencyKey,
-    required this.errorCode,
-    required this.message,
-    required this.retryable,
-  });
-
-  final String idempotencyKey;
-  final String errorCode;
-  final String message;
-  final bool retryable;
-
-  factory BatchFailedItem.fromJson(Map<String, dynamic> json) {
-    final err = json['error'] as Map<String, dynamic>? ?? {};
-    return BatchFailedItem(
-      idempotencyKey: json['idempotency_key'] as String? ?? '',
-      errorCode: err['code'] as String? ?? 'UNKNOWN_ERROR',
-      message: err['message'] as String? ?? '',
-      retryable: json['retryable'] as bool? ?? true,
-    );
-  }
-}
-
-/// Response shape of `POST /sync/calls`.
-///
-/// Nothing in Dart posts to that endpoint any more — the native coordinator
-/// does, and parses the same three arrays in Kotlin. This stays as the written
-/// record of the contract both sides are coding against; if the server changes
-/// it, these fields and `SyncCoordinator.executeMetadataUpload` change together.
-class BatchSyncResult {
-  const BatchSyncResult({
-    required this.successful,
-    required this.duplicates,
-    required this.failed,
-  });
-
-  final List<BatchSuccessItem> successful;
-  final List<BatchSuccessItem> duplicates;
-  final List<BatchFailedItem> failed;
-
-  factory BatchSyncResult.fromJson(Map<String, dynamic> json) {
-    final succList = json['successful'] as List? ?? [];
-    final dupList = json['duplicates'] as List? ?? [];
-    final failList = json['failed'] as List? ?? [];
-
-    return BatchSyncResult(
-      successful: succList
-          .map((i) => BatchSuccessItem.fromJson(i as Map<String, dynamic>))
-          .toList(),
-      duplicates: dupList
-          .map((i) => BatchSuccessItem.fromJson(i as Map<String, dynamic>))
-          .toList(),
-      failed: failList
-          .map((i) => BatchFailedItem.fromJson(i as Map<String, dynamic>))
-          .toList(),
+      lastSyncAt: _time(json['last_sync_at']),
+      lastCallAt: _time(json['last_call_at']),
+      totalCalls: (json['total_calls'] as num?)?.toInt(),
+      callsToday: (json['calls_today'] as num?)?.toInt(),
+      callsLast7Days: (json['calls_last_7_days'] as num?)?.toInt(),
+      recordingsStored: (json['recordings_stored'] as num?)?.toInt(),
     );
   }
 }

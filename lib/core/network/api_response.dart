@@ -9,43 +9,11 @@ class ApiMeta {
   final String? timestamp;
   final String? serverTime;
 
-  DateTime? get serverDateTime =>
-      serverTime != null ? DateTime.tryParse(serverTime!)?.toUtc() : null;
-
   factory ApiMeta.fromJson(Map<String, dynamic>? json) {
     return ApiMeta(
       requestId: json?['request_id'] as String? ?? '',
       timestamp: json?['timestamp'] as String?,
       serverTime: json?['server_time'] as String?,
-    );
-  }
-}
-
-class ApiPagination {
-  const ApiPagination({
-    required this.page,
-    required this.pageSize,
-    required this.total,
-    required this.totalPages,
-    required this.hasNext,
-    required this.hasPrevious,
-  });
-
-  final int page;
-  final int pageSize;
-  final int total;
-  final int totalPages;
-  final bool hasNext;
-  final bool hasPrevious;
-
-  factory ApiPagination.fromJson(Map<String, dynamic>? json) {
-    return ApiPagination(
-      page: (json?['page'] as num?)?.toInt() ?? 1,
-      pageSize: (json?['page_size'] as num?)?.toInt() ?? 50,
-      total: (json?['total'] as num?)?.toInt() ?? 0,
-      totalPages: (json?['total_pages'] as num?)?.toInt() ?? 1,
-      hasNext: json?['has_next'] as bool? ?? false,
-      hasPrevious: json?['has_previous'] as bool? ?? false,
     );
   }
 }
@@ -75,14 +43,12 @@ class ApiResponse<T> {
     required this.success,
     this.data,
     this.error,
-    this.pagination,
     this.meta,
   });
 
   final bool success;
   final T? data;
   final ApiErrorPayload? error;
-  final ApiPagination? pagination;
   final ApiMeta? meta;
 
   factory ApiResponse.fromJson(
@@ -107,14 +73,9 @@ class ApiResponse<T> {
 
     final rawData = json['data'];
     final data = rawData != null ? fromJsonT(rawData) : null;
-    final pagination = json['pagination'] is Map<String, dynamic>
-        ? ApiPagination.fromJson(json['pagination'] as Map<String, dynamic>)
-        : null;
-
     return ApiResponse<T>(
       success: true,
       data: data,
-      pagination: pagination,
       meta: meta,
     );
   }

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
 
 import '../../../core/config/app_config.dart';
 import '../../../core/config/app_version.dart';
@@ -10,6 +11,18 @@ import '../../../shared/widgets/ui_kit.dart';
 import '../../call_tracking/data/call_feed.dart';
 import '../../synchronization/data/sync_service.dart';
 
+/// Values on this screen are read aloud to support over the phone, so digits
+/// are tabular, zeros slashed and letters slightly tracked — the closest IBM
+/// Plex Sans gets to a monospace readout without bundling another font.
+final TextStyle _readout = AppType.tabular(AppType.small).copyWith(
+  fontWeight: FontWeight.w500,
+  letterSpacing: 0.2,
+  fontFeatures: const [
+    FontFeature.tabularFigures(),
+    FontFeature.slashedZero(),
+  ],
+);
+
 /// Everything a support conversation needs and a normal user never should see.
 ///
 /// These figures used to sit in the main Settings list: "Database Health &
@@ -19,7 +32,8 @@ import '../../synchronization/data/sync_service.dart';
 /// the settings people actually change made the whole screen read as an
 /// engineering console.
 ///
-/// Reached from one tile at the bottom of Settings. Nothing here is a control;
+/// Support only: reached by long-pressing Version in Settings, never from a
+/// visible row. Nothing here is a control;
 /// it is all read-only, except the storage check, which is the one repair a
 /// user can be talked through over the phone.
 class DiagnosticsScreen extends ConsumerStatefulWidget {
@@ -42,6 +56,7 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final z = context.z;
     final feed = ref.watch(callFeedProvider).value;
     // Moved off Settings with the rest of the read-only figures: the handset
     // model and API level are what a support call asks for, and nothing the
@@ -50,208 +65,192 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen> {
     final counters = ref.watch(syncCountersProvider).value;
     final nativeSync = ref.watch(nativeSyncStatusProvider).value;
 
+    final failedCount = counters?['failed'] ?? 0;
+    final waitingCount = counters?['waiting'] ?? 0;
+
     return Scaffold(
-      backgroundColor: AppTokens.bgPrimary,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
-        elevation: 0,
-        scrolledUnderElevation: 0,
-        title: const Text(
-          'Technical details',
-          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
-        ),
-        iconTheme: const IconThemeData(color: AppTokens.textSecondary),
+        title: const Text('Technical details'),
       ),
+      // A pushed screen with no bottom bar: scrollPadding adds the system
+      // navigation bar's height so the repair button clears the nav buttons.
+      // Rows run edge to edge; each one indents itself by the gutter.
       body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 40),
+        padding: context.scrollPadding(top: 4, bottom: 32, horizontal: 0),
         children: [
-          const Padding(
-            padding: EdgeInsets.fromLTRB(4, 0, 4, 16),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: AppTokens.gutter),
             child: Text(
               'Information for support. Nothing here needs changing during '
               'normal use.',
-              style: TextStyle(
-                color: AppTokens.textMuted,
-                fontSize: 12.5,
-                height: 1.45,
-              ),
+              style: AppType.small.copyWith(color: z.ink2),
             ),
           ),
 
           const SectionLabel('This build'),
-          const SizedBox(height: 8),
-          AppCard(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                _Row(label: 'App version', value: AppVersion.full),
-                const _Divider(),
-                _Row(
-                  label: 'Build',
-                  value: AppConfig.buildLabel(AppVersion.name),
-                ),
-                const _Divider(),
-                _Row(
-                  label: 'Device',
-                  value: device == null
-                      ? 'Reading…'
-                      : '${device["manufacturer"] ?? ""} ${device["model"] ?? ""}'
+          ListGroup(
+            children: [
+              _Row(label: 'App version', value: AppVersion.full),
+              _Row(
+                label: 'Device',
+                value: device == null
+                    ? 'Reading…'
+                    : '${device["manufacturer"] ?? ""} ${device["model"] ?? ""}'
                           .trim(),
-                ),
-                const _Divider(),
+              ),
+              _Row(
+                label: 'Android',
+                value: device == null
+                    ? '—'
+                    : '${device["osVersion"] ?? "?"} (API ${device["sdkInt"] ?? "?"})',
+              ),
+              _Row(
+                label: 'Server',
+                value: AppConfig.hasServer
+                    ? (Uri.tryParse(AppConfig.apiBaseUrl)?.host ?? '—')
+                    : switch (AppConfig.problem) {
+                        ConfigProblem.missingServerUrl =>
+                          'No address in this build',
+                        ConfigProblem.malformedServerUrl => 'Invalid address',
+                        ConfigProblem.insecureServerUrl =>
+                          'Insecure (http) address',
+                        null => 'Not configured',
+                      },
+                statusColor: AppConfig.hasServer ? null : z.danger,
+              ),
+              _Row(
+                label: 'Last background run',
+                value: switch (nativeSync?.lastSyncAt) {
+                  final at? => DateFormat('d MMM, h:mm a').format(at.toLocal()),
+                  null => 'Never',
+                },
+              ),
+              _Row(
+                label: 'Last outcome',
+                // Plain words first; the raw status stays for support.
+                value: switch (nativeSync?.status) {
+                  final code? => '${nativeSync!.statusLabel} ($code)',
+                  null => 'Not run yet',
+                },
+                statusColor: switch (nativeSync) {
+                  null || NativeSyncStatus(status: null) => null,
+                  NativeSyncStatus(isHealthy: true) => z.ok,
+                  NativeSyncStatus(isBlocked: true) => z.danger,
+                  _ => z.warn,
+                },
+              ),
+              if (nativeSync?.error != null)
                 _Row(
-                  label: 'Android',
-                  value: device == null
-                      ? '—'
-                      : '${device["osVersion"] ?? "?"} (API ${device["sdkInt"] ?? "?"})',
+                  label: 'Last error',
+                  value: nativeSync!.error!,
+                  valueColor: z.danger,
                 ),
-                const _Divider(),
-                _Row(
-                  label: 'Server',
-                  value: AppConfig.hasServer
-                      ? (Uri.tryParse(AppConfig.apiBaseUrl)?.host ?? '—')
-                      : 'Not configured',
-                ),
-                const _Divider(),
-                _Row(
-                  label: 'Last background run',
-                  value: nativeSync?.lastSyncLabel ?? '—',
-                ),
-                const _Divider(),
-                _Row(
-                  label: 'Last outcome',
-                  value: nativeSync?.status ?? 'Not run yet',
-                ),
-                if (nativeSync?.error != null) ...[
-                  const _Divider(),
-                  _Row(label: 'Last error', value: nativeSync!.error!),
-                ],
-              ],
-            ),
+            ],
           ),
-          const SizedBox(height: 18),
 
           const SectionLabel('Call store'),
-          const SizedBox(height: 8),
-          AppCard(
-            padding: EdgeInsets.zero,
-            child: Column(
-              children: [
-                _Row(
-                  label: 'Calls held on this phone',
-                  value: '${counters?['total'] ?? 0}',
-                ),
-                const _Divider(),
-                _Row(
-                  label: 'Sent to server',
-                  value: '${counters?['uploaded'] ?? 0}',
-                ),
-                const _Divider(),
-                _Row(
-                  label: 'Waiting to send',
-                  value: '${counters?['waiting'] ?? 0}',
-                ),
-                const _Divider(),
-                _Row(
-                  label: 'Could not be sent',
-                  value: '${counters?['failed'] ?? 0}',
-                ),
-                const _Divider(),
-                _Row(
-                  label: 'Loaded into the call list',
-                  value: '${feed?.entries.length ?? 0}',
-                ),
-              ],
-            ),
+          ListGroup(
+            children: [
+              _Row(
+                label: 'Calls held on this phone',
+                value: '${counters?['total'] ?? 0}',
+              ),
+              _Row(
+                label: 'Sent to server',
+                value: '${counters?['uploaded'] ?? 0}',
+                valueColor: z.ok,
+              ),
+              _Row(
+                label: 'Waiting to send',
+                value: '$waitingCount',
+                valueColor: waitingCount > 0 ? z.warn : null,
+              ),
+              _Row(
+                label: 'Could not be sent',
+                value: '$failedCount',
+                valueColor: failedCount > 0 ? z.danger : null,
+              ),
+              _Row(
+                label: 'Loaded into the call list',
+                value: '${feed?.entries.length ?? 0}',
+              ),
+            ],
           ),
-          const SizedBox(height: 18),
 
           const SectionLabel('Local storage'),
-          const SizedBox(height: 8),
           FutureBuilder<DatabaseHealthReport>(
             future: _health,
             builder: (context, snap) {
               final report = snap.data;
               final checking = snap.connectionState != ConnectionState.done;
 
-              return AppCard(
-                padding: EdgeInsets.zero,
-                child: Column(
-                  children: [
+              return ListGroup(
+                children: [
+                  _Row(
+                    label: 'Integrity',
+                    value: checking
+                        ? 'Checking…'
+                        : (report?.isHealthy == true ? 'OK' : 'Problem found'),
+                    statusColor: checking
+                        ? z.ink3
+                        : (report?.isHealthy == true ? z.ok : z.danger),
+                  ),
+                  _Row(
+                    label: 'File size',
+                    // The real file, not an estimate. This tile used to
+                    // multiply the number of loaded calls by 1280 bytes and
+                    // add a constant, which produced a plausible-looking
+                    // figure that was never measured from anything.
+                    value: report == null
+                        ? '—'
+                        : Fmt.fileSize(report.fileSizeBytes),
+                  ),
+                  _Row(
+                    label: 'Rows stored',
+                    value: report == null ? '—' : '${report.totalRows}',
+                  ),
+                  _Row(
+                    label: 'Journal mode',
+                    value: report?.journalMode ?? '—',
+                  ),
+                  if (report?.repaired == true)
                     _Row(
-                      label: 'Integrity',
-                      value: checking
-                          ? 'Checking…'
-                          : (report?.isHealthy == true ? 'OK' : 'Problem found'),
-                      valueColor: checking
-                          ? AppTokens.textMuted
-                          : (report?.isHealthy == true
-                              ? AppTokens.success
-                              : AppTokens.danger),
+                      label: 'Repaired',
+                      value: '${report!.salvagedRowsCount} rows recovered',
+                      statusColor: z.warn,
                     ),
-                    const _Divider(),
+                  if (report?.errorMessage != null)
                     _Row(
-                      label: 'File size',
-                      // The real file, not an estimate. This tile used to
-                      // multiply the number of loaded calls by 1280 bytes and
-                      // add a constant, which produced a plausible-looking
-                      // figure that was never measured from anything.
-                      value: report == null
-                          ? '—'
-                          : Fmt.fileSize(report.fileSizeBytes),
+                      label: 'Detail',
+                      value: report!.errorMessage!,
+                      valueColor: z.danger,
                     ),
-                    const _Divider(),
-                    _Row(
-                      label: 'Rows stored',
-                      value: report == null ? '—' : '${report.totalRows}',
-                    ),
-                    const _Divider(),
-                    _Row(
-                      label: 'Journal mode',
-                      value: report?.journalMode ?? '—',
-                    ),
-                    if (report?.repaired == true) ...[
-                      const _Divider(),
-                      _Row(
-                        label: 'Repaired',
-                        value: '${report!.salvagedRowsCount} rows recovered',
-                        valueColor: AppTokens.warning,
-                      ),
-                    ],
-                    if (report?.errorMessage != null) ...[
-                      const _Divider(),
-                      _Row(label: 'Detail', value: report!.errorMessage!),
-                    ],
-                  ],
-                ),
+                ],
               );
             },
           ),
-          const SizedBox(height: 12),
-          OutlinedButton.icon(
-            onPressed: () => showModalBottomSheet<void>(
-              context: context,
-              isScrollControlled: true,
-              backgroundColor: Colors.transparent,
-              builder: (_) => DatabaseHealthSheet(
-                onRefreshFeed: () =>
-                    ref.read(callFeedProvider.notifier).refresh(),
-              ),
-            ).then((_) {
-              if (mounted) _recheck();
-            }),
-            icon: const Icon(Icons.healing_rounded, size: 18),
+          const SizedBox(height: 20),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: AppTokens.gutter),
             // The one repair a user can be talked through over the phone. It
             // moved here with the rest of the storage internals rather than
             // being dropped -- it is real recovery, not a readout.
-            label: const Text('Check and repair storage'),
-            style: OutlinedButton.styleFrom(
-              foregroundColor: AppTokens.brandElectric,
-              side: const BorderSide(color: AppTokens.borderDefault),
-              padding: const EdgeInsets.symmetric(vertical: 14),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(AppTokens.r12),
-              ),
+            child: ZButton(
+              label: 'Check and repair storage',
+              icon: Icons.healing_rounded,
+              variant: ZButtonVariant.outline,
+              onPressed: () =>
+                  showModalBottomSheet<void>(
+                    context: context,
+                    isScrollControlled: true,
+                    builder: (_) => _DatabaseHealthSheet(
+                      onRefreshFeed: () =>
+                          ref.read(callFeedProvider.notifier).refresh(),
+                    ),
+                  ).then((_) {
+                    if (mounted) _recheck();
+                  }),
             ),
           ),
         ],
@@ -260,72 +259,90 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen> {
   }
 }
 
+/// One label/value line of a [ListGroup]. The value is a right-aligned
+/// tabular readout that wraps rather than overflowing — outcomes like
+/// "Access removed – contact your admin (BLOCKED)" are long.
+///
+/// A [statusColor] marks a state (healthy, problem, warning) with a dot and
+/// the value in that colour; [valueColor] colours a plain figure.
 class _Row extends StatelessWidget {
-  const _Row({required this.label, required this.value, this.valueColor});
+  const _Row({
+    required this.label,
+    required this.value,
+    this.valueColor,
+    this.statusColor,
+  });
 
   final String label;
   final String value;
   final Color? valueColor;
+  final Color? statusColor;
 
   @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: Text(
-                label,
-                style: const TextStyle(
-                  color: AppTokens.textSecondary,
-                  fontSize: 13.5,
-                ),
+  Widget build(BuildContext context) {
+    final z = context.z;
+    final text = Text(
+      value,
+      textAlign: TextAlign.right,
+      style: _readout.copyWith(color: statusColor ?? valueColor ?? z.ink2),
+    );
+    return MergeSemantics(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 52),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppTokens.gutter,
+            vertical: 14,
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Text(label, style: AppType.small.copyWith(color: z.ink)),
               ),
-            ),
-            const SizedBox(width: 12),
-            Flexible(
-              child: Text(
-                value,
-                textAlign: TextAlign.right,
-                style: TextStyle(
-                  color: valueColor ?? Colors.white,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                ),
+              const SizedBox(width: 12),
+              Flexible(
+                child: statusColor == null
+                    ? text
+                    : Row(
+                        mainAxisSize: MainAxisSize.min,
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.only(top: 7),
+                            child: StatusDot(color: statusColor!, size: 7),
+                          ),
+                          const SizedBox(width: 6),
+                          Flexible(child: text),
+                        ],
+                      ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
-      );
-}
-
-class _Divider extends StatelessWidget {
-  const _Divider();
-
-  @override
-  Widget build(BuildContext context) => const Divider(
-        height: 1,
-        thickness: 1,
-        color: AppTokens.borderSubtle,
-        indent: 16,
-        endIndent: 16,
-      );
+      ),
+    );
+  }
 }
 
 /// Runs the SQLite integrity check and, if needed, the salvage path.
 ///
 /// Lived in Settings until the storage internals moved behind
-/// [DiagnosticsScreen]. Public only so that screen can open it.
-class DatabaseHealthSheet extends StatefulWidget {
-  const DatabaseHealthSheet({super.key, required this.onRefreshFeed});
+/// [DiagnosticsScreen].
+///
+/// The sheet's shape, colour and drag handle come from the theme; the content
+/// scrolls (it can outgrow a short phone) and pads above the system
+/// navigation bar.
+class _DatabaseHealthSheet extends StatefulWidget {
+  const _DatabaseHealthSheet({required this.onRefreshFeed});
 
   final VoidCallback onRefreshFeed;
 
   @override
-  State<DatabaseHealthSheet> createState() => DatabaseHealthSheetState();
+  State<_DatabaseHealthSheet> createState() => _DatabaseHealthSheetState();
 }
 
-class DatabaseHealthSheetState extends State<DatabaseHealthSheet> {
+class _DatabaseHealthSheetState extends State<_DatabaseHealthSheet> {
   DatabaseHealthReport? _report;
   bool _loading = true;
   bool _repairing = false;
@@ -365,202 +382,119 @@ class DatabaseHealthSheetState extends State<DatabaseHealthSheet> {
         _report = updated;
         _repairing = false;
         _repairMessage = success
-            ? 'Database repaired successfully! Integrity check: ${updated.integrityCheckResult}'
-            : 'Repair finished with warnings. Review report.';
+            ? 'Storage repaired. Integrity check: ${updated.integrityCheckResult}'
+            : 'Repair finished with warnings. See the details above.';
       });
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
-      decoration: const BoxDecoration(
-        color: AppTokens.surface1,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(AppTokens.r24)),
-      ),
+    final z = context.z;
+    const gutter = EdgeInsets.symmetric(horizontal: AppTokens.gutter);
+    return SingleChildScrollView(
+      padding: EdgeInsets.only(bottom: 24 + context.safeBottom),
       child: Column(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Center(
-            child: Container(
-              width: 40,
-              height: 4,
-              decoration: BoxDecoration(
-                color: AppTokens.textMuted.withValues(alpha: 0.3),
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              const Icon(Icons.storage_rounded, color: AppTokens.brandElectric, size: 22),
-              const SizedBox(width: 10),
-              const Text(
-                'Database Health & Diagnostics',
-                style: TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
-                  color: Colors.white,
-                ),
-              ),
-              const Spacer(),
-              IconButton(
-                icon: const Icon(Icons.refresh_rounded, color: AppTokens.textSecondary, size: 20),
-                onPressed: _loading || _repairing ? null : _loadHealth,
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          if (_loading)
-            const Center(
-              child: Padding(
-                padding: EdgeInsets.symmetric(vertical: 32),
-                child: CircularProgressIndicator(),
-              ),
-            )
-          else if (_report != null) ...[
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: _report!.isHealthy
-                    ? AppTokens.success.withValues(alpha: 0.12)
-                    : AppTokens.danger.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(AppTokens.r12),
-                border: Border.all(
-                  color: _report!.isHealthy ? AppTokens.success : AppTokens.danger,
-                ),
-              ),
-              child: Row(
-                children: [
-                  Icon(
-                    _report!.isHealthy ? Icons.check_circle_rounded : Icons.warning_amber_rounded,
-                    color: _report!.isHealthy ? AppTokens.success : AppTokens.danger,
-                    size: 24,
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          _report!.isHealthy ? 'Database Healthy' : 'Database Needs Attention',
-                          style: TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w700,
-                            color: _report!.isHealthy ? AppTokens.success : AppTokens.danger,
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          'Integrity check: ${_report!.integrityCheckResult}',
-                          style: const TextStyle(fontSize: 12.5, color: AppTokens.textSecondary),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: AppTokens.surface2,
-                borderRadius: BorderRadius.circular(AppTokens.r12),
-                border: Border.all(color: AppTokens.borderSubtle),
-              ),
-              child: Column(
-                children: [
-                  _diagRow('Database File', AppDatabase.dbFilename),
-                  const Divider(color: AppTokens.borderSubtle, height: 12),
-                  _diagRow('Journal Mode', _report!.journalMode.toUpperCase()),
-                  const Divider(color: AppTokens.borderSubtle, height: 12),
-                  _diagRow('Quick Check', _report!.quickCheckResult),
-                  const Divider(color: AppTokens.borderSubtle, height: 12),
-                  _diagRow('Foreign Key Check', _report!.foreignKeyCheckResult),
-                  const Divider(color: AppTokens.borderSubtle, height: 12),
-                  _diagRow('Total Records', '${_report!.totalRows} rows'),
-                  const Divider(color: AppTokens.borderSubtle, height: 12),
-                  _diagRow('File Size', Fmt.fileSize(_report!.fileSizeBytes)),
-                  const Divider(color: AppTokens.borderSubtle, height: 12),
-                  _diagRow('Database Path', _report!.dbPath, isLong: true),
-                ],
-              ),
-            ),
-            if (_repairMessage != null) ...[
-              const SizedBox(height: 12),
-              Text(
-                _repairMessage!,
-                style: const TextStyle(color: AppTokens.brandElectric, fontSize: 13, fontWeight: FontWeight.w500),
-              ),
-            ],
-            const SizedBox(height: 20),
-            Row(
+          Padding(
+            padding: const EdgeInsets.fromLTRB(AppTokens.gutter, 0, 10, 0),
+            child: Row(
               children: [
                 Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _repairing ? null : _loadHealth,
-                    icon: const Icon(Icons.verified_outlined, size: 18),
-                    label: const Text('Check Integrity'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.white,
-                      side: const BorderSide(color: AppTokens.borderDefault),
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                    ),
+                  child: Semantics(
+                    header: true,
+                    child: const Text('Storage check', style: AppType.heading),
                   ),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _repairing ? null : _runRepair,
-                    icon: _repairing
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                          )
-                        : const Icon(Icons.build_rounded, size: 18),
-                    label: Text(_repairing ? 'Repairing...' : 'Repair Database'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppTokens.brandElectric,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                    ),
-                  ),
+                TapIcon(
+                  icon: Icons.refresh_rounded,
+                  tooltip: 'Check again',
+                  size: 20,
+                  color: z.ink2,
+                  onTap: _loading || _repairing ? null : _loadHealth,
                 ),
               ],
             ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _diagRow(String label, String value, {bool isLong = false}) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
-      child: Row(
-        crossAxisAlignment: isLong ? CrossAxisAlignment.start : CrossAxisAlignment.center,
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Text(label, style: const TextStyle(color: AppTokens.textMuted, fontSize: 12.5)),
-          const SizedBox(width: 12),
-          Flexible(
-            child: Text(
-              value,
-              textAlign: TextAlign.end,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12.5,
-                fontWeight: FontWeight.w600,
-              ),
-              maxLines: isLong ? 2 : 1,
-              overflow: TextOverflow.ellipsis,
-            ),
           ),
+          const SizedBox(height: 12),
+          if (_loading)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 32),
+              child: Center(child: CircularProgressIndicator()),
+            )
+          else if (_report != null) ...[
+            Padding(
+              padding: gutter,
+              child: InfoBanner(
+                tone: _report!.isHealthy
+                    ? BannerTone.success
+                    : BannerTone.warning,
+                title: _report!.isHealthy
+                    ? 'Storage OK'
+                    : 'Storage needs repair',
+                message: 'Integrity check: ${_report!.integrityCheckResult}',
+              ),
+            ),
+            const SizedBox(height: 16),
+            ListGroup(
+              children: [
+                _Row(label: 'Database file', value: AppDatabase.dbFilename),
+                _Row(
+                  label: 'Journal mode',
+                  value: _report!.journalMode.toUpperCase(),
+                ),
+                _Row(label: 'Quick check', value: _report!.quickCheckResult),
+                _Row(
+                  label: 'Foreign key check',
+                  value: _report!.foreignKeyCheckResult,
+                ),
+                _Row(
+                  label: 'Total records',
+                  value: '${_report!.totalRows} rows',
+                ),
+                _Row(
+                  label: 'File size',
+                  value: Fmt.fileSize(_report!.fileSizeBytes),
+                ),
+                _Row(label: 'Database path', value: _report!.dbPath),
+              ],
+            ),
+            if (_repairMessage != null) ...[
+              const SizedBox(height: 12),
+              Padding(
+                padding: gutter,
+                child: Text(
+                  _repairMessage!,
+                  style: AppType.label.copyWith(color: z.accent),
+                ),
+              ),
+            ],
+            const SizedBox(height: 20),
+            Padding(
+              padding: gutter,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: ZButton(
+                      label: 'Check again',
+                      variant: ZButtonVariant.secondary,
+                      onPressed: _repairing ? null : _loadHealth,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: ZButton(
+                      label: _repairing ? 'Repairing…' : 'Repair storage',
+                      loading: _repairing,
+                      onPressed: _repairing ? null : _runRepair,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
     );

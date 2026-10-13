@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:dio/dio.dart';
 import 'package:uuid/uuid.dart';
@@ -7,6 +8,7 @@ import '../config/app_config.dart';
 import '../errors/api_exceptions.dart';
 import '../platform/native_call_bridge.dart';
 import '../../features/auth/data/auth_repository.dart';
+import '../../features/auth/domain/session.dart';
 import 'api_response.dart';
 
 /// Exchanges a refresh token for a new pair.
@@ -60,7 +62,11 @@ class ApiClient {
 
   Completer<bool>? _refreshCompleter;
 
-  Dio get rawDio => _dio;
+  /// When this isolate last refreshed ahead of expiry. Caps early refreshes at
+  /// one per [_earlyRefreshGap], so a handset clock far ahead of the server's
+  /// cannot turn every request into a token exchange.
+  DateTime? _lastEarlyRefresh;
+  static const _earlyRefreshGap = Duration(minutes: 5);
 
   void _setupInterceptors() {
     _dio.interceptors.add(
@@ -70,7 +76,17 @@ class ApiClient {
           options.headers['X-Request-ID'] = _uuid.v4();
 
           // Attach token if present and not an unauthenticated endpoint
-          final session = await _sessionStore.read();
+          var session = await _sessionStore.read();
+          if (session != null &&
+              !_isUnauthenticated(options.path) &&
+              _isDueForEarlyRefresh(session)) {
+            // §2.3 rule 4: refresh at ~75% of the token's life instead of
+            // waiting for the 401 and paying for a failed request and a replay.
+            _lastEarlyRefresh = DateTime.now();
+            if (await _refreshTokensSingleFlight()) {
+              session = await _sessionStore.read();
+            }
+          }
           if (session != null && session.token.isNotEmpty) {
             options.headers['Authorization'] = 'Bearer ${session.token}';
           }
@@ -78,10 +94,7 @@ class ApiClient {
         },
         onResponse: (response, handler) async {
           if (response.statusCode == 401) {
-            final path = response.requestOptions.path;
-            if (!path.contains('/auth/login') &&
-                !path.contains('/mobile/register') &&
-                !path.contains('/auth/refresh')) {
+            if (_mayRefreshFor(response.requestOptions)) {
               final refreshed = await _refreshTokensSingleFlight();
               if (refreshed) {
                 final retriedResponse = await _retryRequest(response.requestOptions);
@@ -93,10 +106,7 @@ class ApiClient {
         },
         onError: (DioException error, handler) async {
           if (error.response?.statusCode == 401) {
-            final path = error.requestOptions.path;
-            if (!path.contains('/auth/login') &&
-                !path.contains('/mobile/register') &&
-                !path.contains('/auth/refresh')) {
+            if (_mayRefreshFor(error.requestOptions)) {
               final refreshed = await _refreshTokensSingleFlight();
               if (refreshed) {
                 try {
@@ -113,6 +123,56 @@ class ApiClient {
         },
       ),
     );
+  }
+
+  /// Marks a request already replayed after a refresh. §10.1: a 401 is
+  /// refreshed and retried once. Without the mark the replay came back through
+  /// these same interceptors, and a second 401 refreshed and replayed again,
+  /// for as long as the refresher kept succeeding.
+  static const _authRetriedKey = 'zebu.authRetried';
+
+  static bool _mayRefreshFor(RequestOptions options) =>
+      !_isUnauthenticated(options.path) &&
+      options.extra[_authRetriedKey] != true;
+
+  static bool _isUnauthenticated(String path) =>
+      path.contains('/auth/login') ||
+      path.contains('/mobile/register') ||
+      path.contains('/mobile/lookup') ||
+      path.contains('/auth/refresh');
+
+  /// Whether [session]'s access token is past 75% of the lifetime it states
+  /// (`exp - iat`). False for anything unreadable, for a session with no
+  /// refresh token — refreshing that one would sign the user out early — and
+  /// within [_earlyRefreshGap] of the last early refresh. The refresh itself
+  /// goes through native, which hands back its current token without a
+  /// network call if it has already rotated past this one.
+  bool _isDueForEarlyRefresh(Session session) {
+    final refreshToken = session.refreshToken;
+    if (refreshToken == null || refreshToken.isEmpty) return false;
+    final last = _lastEarlyRefresh;
+    if (last != null && DateTime.now().difference(last) < _earlyRefreshGap) {
+      return false;
+    }
+    final claims = _jwtClaims(session.token);
+    final iat = (claims?['iat'] as num?)?.toInt();
+    final exp = (claims?['exp'] as num?)?.toInt();
+    if (iat == null || exp == null || exp <= iat) return false;
+    final refreshAtSeconds = iat + ((exp - iat) * 3 ~/ 4);
+    return DateTime.now().millisecondsSinceEpoch ~/ 1000 >= refreshAtSeconds;
+  }
+
+  static Map<String, Object?>? _jwtClaims(String token) {
+    final parts = token.split('.');
+    if (parts.length != 3) return null;
+    try {
+      final payload =
+          utf8.decode(base64Url.decode(base64Url.normalize(parts[1])));
+      final decoded = jsonDecode(payload);
+      return decoded is Map<String, Object?> ? decoded : null;
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Refreshes the access token, at most once at a time, per §2.3.
@@ -207,6 +267,7 @@ class ApiClient {
     final session = await _sessionStore.read();
     final options = Options(
       method: requestOptions.method,
+      extra: {...requestOptions.extra, _authRetriedKey: true},
       headers: {
         ...requestOptions.headers,
         if (session != null && session.token.isNotEmpty)
@@ -224,6 +285,13 @@ class ApiClient {
       queryParameters: requestOptions.queryParameters,
       options: options,
     );
+  }
+
+  /// `Retry-After` in its seconds form, which is the form the server sends.
+  static int? _retryAfterSeconds(Headers? headers) {
+    final raw = headers?.value('retry-after');
+    final seconds = raw == null ? null : int.tryParse(raw.trim());
+    return seconds == null || seconds <= 0 ? null : seconds;
   }
 
   /// Request executor with standard envelope parsing and error handling
@@ -259,6 +327,7 @@ class ApiClient {
           error: responseEnvelope.error!,
           statusCode: res.statusCode,
           meta: responseEnvelope.meta,
+          retryAfterSeconds: _retryAfterSeconds(res.headers),
         );
       }
 
@@ -275,6 +344,7 @@ class ApiClient {
             error: responseEnvelope.error!,
             statusCode: e.response?.statusCode,
             meta: responseEnvelope.meta,
+            retryAfterSeconds: _retryAfterSeconds(e.response?.headers),
           );
         }
       }

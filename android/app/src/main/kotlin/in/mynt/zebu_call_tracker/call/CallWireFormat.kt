@@ -44,11 +44,6 @@ object CallWireFormat {
         const val ENDED = "ended"
 
         const val UNKNOWN = "unknown"
-
-        val ALL = setOf(
-            RINGING, DIALING, ANSWERED, MISSED, REJECTED,
-            FAILED, CANCELLED, ENDED, UNKNOWN,
-        )
     }
 
     /** Local values from older builds that were never valid on the wire. */

@@ -188,10 +188,4 @@ abstract final class CallWireIdentity {
       keyName(externalCallId: extId, startedAtMillis: startedAtMillis),
     );
   }
-
-  /// True for an external id built by the Dart path before the two agreed.
-  ///
-  /// Used by the one-time repair in `CallsDao.repairDivergentWithheldKeys`.
-  static bool isLegacyWithheldExternalId(String? externalCallId) =>
-      externalCallId != null && externalCallId.endsWith('-null');
 }

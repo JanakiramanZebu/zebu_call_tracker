@@ -1,17 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 abstract final class _Ch {
   static const syncReminder = 'sync_reminder';
-  static const syncStatus = 'sync_status';
+
+  /// Posted to by the native workers; created here too so its name and
+  /// description match whichever side runs first. Keep the text in step with
+  /// the Kotlin side.
   static const syncProgress = 'sync_progress';
 }
 
 abstract final class _Id {
   static const reminder = 1001;
-  static const success = 1002;
-  static const progress = 1003;
 }
 
 class NotificationService {
@@ -20,8 +20,12 @@ class NotificationService {
 
   final _plugin = FlutterLocalNotificationsPlugin();
   bool _ready = false;
+  Future<void>? _initializing;
 
-  Future<void> initialize() async {
+  /// Safe to call more than once: later calls wait on the first.
+  Future<void> initialize() => _initializing ??= _initialize();
+
+  Future<void> _initialize() async {
     const android = AndroidInitializationSettings('@mipmap/ic_launcher');
     const ios = DarwinInitializationSettings(
       requestAlertPermission: false,
@@ -42,18 +46,8 @@ class NotificationService {
     await platform.createNotificationChannel(
       const AndroidNotificationChannel(
         _Ch.syncReminder,
-        'Sync reminders',
-        description: 'Reminds you to sync call data when offline.',
-        importance: Importance.low,
-        playSound: false,
-        enableVibration: false,
-      ),
-    );
-    await platform.createNotificationChannel(
-      const AndroidNotificationChannel(
-        _Ch.syncStatus,
-        'Sync status',
-        description: 'Confirms when calls and recordings are uploaded.',
+        'Unsent calls',
+        description: 'Tells you when calls are waiting for a connection.',
         importance: Importance.low,
         playSound: false,
         enableVibration: false,
@@ -62,8 +56,8 @@ class NotificationService {
     await platform.createNotificationChannel(
       const AndroidNotificationChannel(
         _Ch.syncProgress,
-        'Sync progress',
-        description: 'Displays live progress during call upload synchronization.',
+        'Sending progress',
+        description: 'Shows while calls are being sent.',
         importance: Importance.low,
         playSound: false,
         enableVibration: false,
@@ -71,61 +65,19 @@ class NotificationService {
     );
   }
 
-  Future<void> showSyncProgress({
-    required int current,
-    required int total,
-    String? statusText,
-  }) async {
-    if (!_ready) return;
-    final remaining = (total - current).clamp(0, total);
-    final percent = total > 0 ? ((current / total) * 100).toInt().clamp(0, 100) : 0;
-    final subtitle = statusText ?? '$current of $total synced ($remaining remaining)';
-
-    await _plugin.show(
-      _Id.progress,
-      'Syncing calls & recordings ($percent%)',
-      subtitle,
-      NotificationDetails(
-        android: AndroidNotificationDetails(
-          _Ch.syncProgress,
-          'Sync progress',
-          channelDescription: 'Displays live progress during call upload synchronization.',
-          importance: Importance.low,
-          priority: Priority.low,
-          showProgress: true,
-          maxProgress: total,
-          progress: current,
-          ongoing: true,
-          autoCancel: false,
-          onlyAlertOnce: true,
-          icon: '@mipmap/ic_launcher',
-          color: const Color(0xFF6750A4),
-        ),
-        iOS: const DarwinNotificationDetails(
-          presentAlert: false,
-          presentBadge: false,
-          presentSound: false,
-        ),
-      ),
-    );
-  }
-
-  Future<void> cancelSyncProgress() async {
-    if (!_ready) return;
-    await _plugin.cancel(_Id.progress);
-  }
-
   Future<void> showSyncReminder(int pendingCount) async {
     if (!_ready) return;
     await _plugin.show(
       _Id.reminder,
-      'Sync pending',
-      '$pendingCount ${pendingCount == 1 ? 'call' : 'calls'} waiting to upload — connect to sync automatically.',
+      'Waiting for internet',
+      '$pendingCount ${pendingCount == 1 ? 'call' : 'calls'} not sent yet – '
+          "they'll send when you're back online.",
       NotificationDetails(
         android: AndroidNotificationDetails(
           _Ch.syncReminder,
-          'Sync reminders',
-          channelDescription: 'Reminds you to sync call data when offline.',
+          'Unsent calls',
+          channelDescription:
+              'Tells you when calls are waiting for a connection.',
           importance: Importance.low,
           priority: Priority.low,
           onlyAlertOnce: true,
@@ -140,57 +92,4 @@ class NotificationService {
       ),
     );
   }
-
-  Future<void> showSyncSuccess({
-    required int syncedCalls,
-    required int uploadedRecordings,
-  }) async {
-    if (!_ready) return;
-    if (syncedCalls == 0 && uploadedRecordings == 0) return;
-    final body = StringBuffer();
-    if (syncedCalls > 0) {
-      body.write('$syncedCalls ${syncedCalls == 1 ? 'call' : 'calls'} uploaded');
-    }
-    if (uploadedRecordings > 0) {
-      if (body.isNotEmpty) body.write(' · ');
-      body.write('$uploadedRecordings ${uploadedRecordings == 1 ? 'recording' : 'recordings'}');
-    }
-    await _plugin.show(
-      _Id.success,
-      'Sync complete',
-      body.toString(),
-      NotificationDetails(
-        android: AndroidNotificationDetails(
-          _Ch.syncStatus,
-          'Sync status',
-          channelDescription: 'Confirms when calls and recordings are uploaded.',
-          importance: Importance.low,
-          priority: Priority.low,
-          onlyAlertOnce: true,
-          icon: '@mipmap/ic_launcher',
-          color: const Color(0xFF6750A4),
-        ),
-        iOS: const DarwinNotificationDetails(
-          presentAlert: false,
-          presentBadge: false,
-          presentSound: false,
-        ),
-      ),
-    );
-  }
-
-  Future<void> cancelSyncReminder() async {
-    if (!_ready) return;
-    await _plugin.cancel(_Id.reminder);
-  }
-
-  Future<bool> isReminderVisible() async {
-    if (!_ready) return false;
-    final active = await _plugin.getActiveNotifications();
-    return active.any((n) => n.id == _Id.reminder);
-  }
 }
-
-final notificationServiceProvider = Provider<NotificationService>(
-  (_) => NotificationService.instance,
-);

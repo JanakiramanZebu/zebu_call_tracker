@@ -13,10 +13,3 @@ final connectivityProvider = StreamProvider<bool>((ref) {
       .onConnectivityChanged
       .map((results) => results.any((r) => r != ConnectivityResult.none));
 });
-
-/// One-shot read for the current connectivity state (avoids a round of
-/// async setup in places that only need it once).
-Future<bool> checkConnectivity() async {
-  final results = await Connectivity().checkConnectivity();
-  return results.any((r) => r != ConnectivityResult.none);
-}

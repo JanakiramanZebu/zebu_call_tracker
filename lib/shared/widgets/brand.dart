@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../core/theme/design_tokens.dart';
 import 'ui_kit.dart';
 
 /// The official Call Tracker app icon glyph drawn natively in Flutter.
@@ -16,7 +17,7 @@ class ZebuMark extends StatelessWidget {
   @override
   Widget build(BuildContext context) => CustomPaint(
         size: Size(size, size),
-        painter: _ZebuMarkPainter(color ?? context.colors.primary),
+        painter: _ZebuMarkPainter(color ?? context.z.accent),
       );
 }
 
@@ -95,11 +96,16 @@ class _ZebuMarkPainter extends CustomPainter {
   bool shouldRepaint(_ZebuMarkPainter old) => old.color != color;
 }
 
-/// Mark on a brand-blue rounded tile — the official App Icon reproduced in-app.
+/// The app icon reproduced in-app: the mark on a rounded tile.
+///
+/// A solid Zebu-blue tile with a white mark. On a Zebu-blue surface (the Home
+/// summary panel, the post-call card strip) pass [inverse] for a white tile
+/// with a blue mark, so the tile does not vanish into its background.
 class ZebuAppMark extends StatelessWidget {
-  const ZebuAppMark({super.key, this.size = 72});
+  const ZebuAppMark({super.key, this.size = 72, this.inverse = false});
 
   final double size;
+  final bool inverse;
 
   @override
   Widget build(BuildContext context) => Container(
@@ -107,34 +113,12 @@ class ZebuAppMark extends StatelessWidget {
         height: size,
         alignment: Alignment.center,
         decoration: BoxDecoration(
-          color: context.colors.primary,
-          borderRadius: BorderRadius.circular(size * 0.24),
+          color: inverse ? AppTokens.onBrand : AppTokens.zebuBlue,
+          borderRadius: BorderRadius.circular(size * 0.3),
         ),
-        child: ZebuMark(size: size * 0.52, color: Colors.white),
-      );
-}
-
-/// Mark + product name, used as the login lockup header.
-class ZebuLockup extends StatelessWidget {
-  const ZebuLockup({super.key, this.markSize = 34});
-
-  final double markSize;
-
-  @override
-  Widget build(BuildContext context) => Row(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          ZebuMark(size: markSize),
-          SizedBox(width: markSize * 0.4),
-          Text(
-            'Call Tracker',
-            style: context.text.titleLarge?.copyWith(
-              fontWeight: FontWeight.w700,
-              letterSpacing: -0.4,
-              fontSize: markSize * 0.62,
-            ),
-          ),
-        ],
+        child: ZebuMark(
+          size: size * 0.54,
+          color: inverse ? AppTokens.zebuBlue : AppTokens.onBrand,
+        ),
       );
 }

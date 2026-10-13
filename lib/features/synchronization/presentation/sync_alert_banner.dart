@@ -3,11 +3,16 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../../../core/theme/design_tokens.dart';
+import '../../../shared/widgets/ui_kit.dart';
+import '../../auth/data/auth_controller.dart';
 import '../../background/data/background_service.dart';
+import '../../call_tracking/data/call_feed.dart';
+import '../../permissions/domain/permission_ask.dart';
 import '../../permissions/presentation/permission_screen.dart';
 import '../data/sync_health_provider.dart';
 import '../data/sync_service.dart';
 import '../domain/sync_health.dart';
+import 'outbox_queue_screen.dart';
 
 /// Shows what is stopping — or about to stop — synchronisation.
 ///
@@ -41,14 +46,11 @@ class SyncAlertBanner extends ConsumerWidget {
         ],
         if (hidden > 0)
           Padding(
-            padding: const EdgeInsets.only(left: 4, bottom: 8),
+            padding: const EdgeInsets.only(bottom: 8),
             child: Text(
               '$hidden more ${hidden == 1 ? 'item needs' : 'items need'} '
               'attention — see Settings.',
-              style: const TextStyle(
-                color: AppTokens.textMuted,
-                fontSize: 12,
-              ),
+              style: AppType.caption.copyWith(color: context.z.ink3),
             ),
           ),
       ],
@@ -56,22 +58,26 @@ class SyncAlertBanner extends ConsumerWidget {
   }
 }
 
+/// One alert, drawn as the shared [InfoBanner] so sync problems look like
+/// every other inline message in the app: a tinted block, the title, the
+/// explanation and — when there is something the user can do — a text
+/// action.
 class _AlertCard extends ConsumerWidget {
   const _AlertCard({required this.alert});
 
   final SyncAlert alert;
 
-  Color get _accent => switch (alert.severity) {
-        SyncAlertSeverity.critical => AppTokens.danger,
-        SyncAlertSeverity.warning => AppTokens.warning,
-        SyncAlertSeverity.info => AppTokens.brandElectric,
-      };
+  BannerTone get _tone => switch (alert.severity) {
+    SyncAlertSeverity.critical => BannerTone.danger,
+    SyncAlertSeverity.warning => BannerTone.warning,
+    SyncAlertSeverity.info => BannerTone.info,
+  };
 
   IconData get _icon => switch (alert.severity) {
-        SyncAlertSeverity.critical => Icons.error_outline_rounded,
-        SyncAlertSeverity.warning => Icons.warning_amber_rounded,
-        SyncAlertSeverity.info => Icons.info_outline_rounded,
-      };
+    SyncAlertSeverity.critical => Icons.error_outline_rounded,
+    SyncAlertSeverity.warning => Icons.warning_amber_rounded,
+    SyncAlertSeverity.info => Icons.info_outline_rounded,
+  };
 
   Future<void> _act(BuildContext context, WidgetRef ref) async {
     switch (alert.action) {
@@ -82,89 +88,81 @@ class _AlertCard extends ConsumerWidget {
       case SyncAlertAction.openBatterySettings:
         final controller = ref.read(backgroundControllerProvider.notifier);
         final opened = await controller.requestBatteryExemption();
-        if (!opened) await controller.openVendorSettings();
-      case SyncAlertAction.openDateSettings:
-        // No Flutter API opens the date screen directly; app settings is the
-        // closest reliable landing point, and the message says what to change.
+        if (!opened) await openAppSettings();
+      case SyncAlertAction.openBackgroundSettings:
+        // Already exempt from Doze yet still stopped: App info is where the
+        // remaining battery and background switches live.
         await openAppSettings();
+      case SyncAlertAction.openDateSettings:
+        // The server re-judges the clock on the way back, so the alert clears
+        // as soon as the clock is right instead of half an hour later.
+        ref.read(syncServiceProvider.notifier).requestServerCheck();
+        final opened =
+            await ref.read(nativeBridgeProvider).openDateSettings().catchError((_) => false);
+        if (!opened) await openAppSettings();
+      case SyncAlertAction.openOutbox:
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(builder: (_) => const OutboxQueueScreen()),
+        );
+        ref.invalidate(nativeSyncStatusProvider);
       case SyncAlertAction.retrySync:
-        await ref.read(syncServiceProvider.notifier).triggerSync();
+        // reviveFailed: a deliberate retry also gives calls that failed for
+        // good another chance. Without it this button left the count as it
+        // was, since FAILED rows are not touched by an ordinary sync.
+        await ref
+            .read(syncServiceProvider.notifier)
+            .triggerSync(reviveFailed: true);
+        ref.invalidate(nativeSyncStatusProvider);
+      case SyncAlertAction.enableNotifications:
+        // Same path as the Permissions card, including the jump to app
+        // settings when Android will no longer show the dialog.
+        await requestAsk(Permission.notification);
+        ref.invalidate(permissionStatusProvider);
       case SyncAlertAction.signIn:
-      // Handled by the app shell: clearing the session routes to sign-in on
-      // its own, so there is nothing useful to do from here.
+        await _signInAgain(ref);
+      case SyncAlertAction.acknowledgeForceStop:
+        await ref.read(nativeBridgeProvider).acknowledgeForceStop();
+        ref.invalidate(backgroundStatusProvider);
       case SyncAlertAction.none:
         break;
     }
   }
 
+  /// The native uploader has no usable session, though this side may.
+  ///
+  /// When native still holds tokens the status is only stale — left by a run
+  /// from before this sign-in — so a sync is all it takes to replace it.
+  /// Otherwise the session is gone for good: clearing it routes to pairing,
+  /// and the calls stay queued on the phone for the new session to send.
+  Future<void> _signInAgain(WidgetRef ref) async {
+    final native = await ref.read(nativeBridgeProvider).getAuthSession();
+    if (native != null && native.hasTokens) {
+      await ref.read(syncServiceProvider.notifier).triggerSync(afterSignIn: true);
+      ref.invalidate(nativeSyncStatusProvider);
+      return;
+    }
+    await ref.read(authControllerProvider.notifier).resetDeadSession();
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hasAction = alert.action != SyncAlertAction.none &&
-        alert.actionLabel != null &&
-        alert.action != SyncAlertAction.signIn;
+    final hasAction =
+        alert.action != SyncAlertAction.none && alert.actionLabel != null;
 
-    return Container(
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-      decoration: BoxDecoration(
-        color: _accent.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(AppTokens.r12),
-        border: Border.all(color: _accent.withValues(alpha: 0.40)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(_icon, size: 20, color: _accent),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  alert.title,
-                  style: TextStyle(
-                    color: _accent,
-                    fontSize: 13.5,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  alert.message,
-                  style: const TextStyle(
-                    color: AppTokens.textSecondary,
-                    fontSize: 12.5,
-                    height: 1.45,
-                  ),
-                ),
-                if (hasAction) ...[
-                  const SizedBox(height: 8),
-                  SizedBox(
-                    height: 32,
-                    child: OutlinedButton(
-                      onPressed: () => _act(context, ref),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: _accent,
-                        side: BorderSide(color: _accent.withValues(alpha: 0.6)),
-                        padding: const EdgeInsets.symmetric(horizontal: 14),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(AppTokens.r12),
-                        ),
-                      ),
-                      child: Text(
-                        alert.actionLabel!,
-                        style: const TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ],
-      ),
+    return InfoBanner(
+      tone: _tone,
+      icon: _icon,
+      title: alert.title,
+      message: alert.message,
+      action: hasAction
+          ? ZButton(
+              label: alert.actionLabel!,
+              variant: ZButtonVariant.text,
+              size: ZButtonSize.compact,
+              expand: false,
+              onPressed: () => _act(context, ref),
+            )
+          : null,
     );
   }
 }

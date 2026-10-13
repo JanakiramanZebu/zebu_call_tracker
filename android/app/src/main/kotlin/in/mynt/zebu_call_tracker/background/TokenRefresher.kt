@@ -1,6 +1,7 @@
 package `in`.mynt.zebu_call_tracker.background
 
 import android.content.Context
+import android.util.Base64
 import android.util.Log
 import org.json.JSONObject
 import java.io.OutputStreamWriter
@@ -105,6 +106,54 @@ object TokenRefresher {
             return performRefresh(appContext, normalizeBaseUrl(baseUrl), refreshToken)
         }
 
+    /**
+     * [token], or a newer one when [token] is past 75 % of its life (§2.3
+     * rule 4).
+     *
+     * Waiting for the 401 works, but costs a failed request and a replay at
+     * every expiry — on a weak network, in the middle of a long upload. Age is
+     * measured on the handset's own clock from when the token arrived, against
+     * the lifetime the token states (`exp − iat`), so clock skew between phone
+     * and server cannot make a fresh token look old. With no recorded arrival
+     * time or an unreadable token nothing is refreshed early and the 401 path
+     * still covers it.
+     *
+     * Never makes things worse than not calling it: any failure hands back
+     * [token] unchanged, and a refused refresh has already cleared the session
+     * exactly as a 401-driven one would.
+     */
+    fun ensureFresh(context: Context, baseUrl: String, token: String): String {
+        val appContext = context.applicationContext
+        if (IngestStore.getAuthToken(appContext) != token) return token
+        val receivedAt = IngestStore.getAccessTokenReceivedAt(appContext) ?: return token
+        val lifetime = lifetimeMillis(token) ?: return token
+        val age = System.currentTimeMillis() - receivedAt
+        // A negative age means the clock moved backwards; the token's real age
+        // is unknowable, so treat it as due rather than trust it.
+        if (age in 0 until (lifetime * REFRESH_AT_FRACTION).toLong()) return token
+
+        Log.i(TAG, "Access token past ${(REFRESH_AT_FRACTION * 100).toInt()}% of its life; refreshing early.")
+        return refresh(appContext, baseUrl, token).accessToken ?: token
+    }
+
+    /** `exp − iat` of a JWT, in millis. Null when the token is not one we can read. */
+    private fun lifetimeMillis(token: String): Long? = try {
+        val payload = token.split('.').getOrNull(1) ?: return null
+        val json = JSONObject(
+            String(
+                Base64.decode(payload, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP),
+                Charsets.UTF_8,
+            ),
+        )
+        val iat = json.optLong("iat", 0L)
+        val exp = json.optLong("exp", 0L)
+        if (iat > 0L && exp > iat) (exp - iat) * 1000L else null
+    } catch (e: Exception) {
+        null
+    }
+
+    private const val REFRESH_AT_FRACTION = 0.75
+
     private fun performRefresh(
         context: Context,
         baseUrl: String,
@@ -135,9 +184,14 @@ object TokenRefresher {
             }
 
             if (statusCode in 200..299) {
-                val tokens = JSONObject(body)
-                    .optJSONObject("data")
-                    ?.optJSONObject("tokens")
+                // `/auth/refresh` returns the pair directly under `data`;
+                // `/mobile/register` nests it under `data.tokens`. Reading only
+                // the nested shape found nothing on a successful refresh, kept
+                // the refresh token the server had just retired, and the next
+                // refresh replayed it — which revokes the whole session. That
+                // was fixed once (5cd0be1) and lost when refresh moved here.
+                val data = JSONObject(body).optJSONObject("data")
+                val tokens = data?.optJSONObject("tokens") ?: data
                 val access = tokens?.optString("access_token")?.takeIf { it.isNotBlank() }
                 val newRefresh = tokens?.optString("refresh_token")?.takeIf { it.isNotBlank() }
                 val accessExpiry =

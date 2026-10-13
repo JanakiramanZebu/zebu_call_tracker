@@ -1,16 +1,15 @@
-﻿package `in`.mynt.zebu_call_tracker.overlay
-
-import android.content.Context
+package `in`.mynt.zebu_call_tracker.overlay
 
 /**
- * Snapshot of one completed call.
- *
- * Persisted to SharedPreferences so the "View Details" tap survives the app
- * being cold-started by it, and so Flutter can pick the call up whenever its
- * engine next runs. Primitives only, for the same reason.
+ * Snapshot of one completed call, as shown on the post-call card.
  *
  * Every field defaults to a safe value: the overlay must never crash because
  * a call-log column was null (withheld number, missing duration, etc).
+ *
+ * It used to be persisted to SharedPreferences on "View Details" as well, but
+ * nothing ever read that copy back: the tap reaches Flutter through
+ * [EXTRA_OPEN_CALL] on the launch intent, and NativeBridge holds it until Dart
+ * subscribes.
  */
 data class PostCallData(
     val displayName: String,          // contact name, cached name, or the number
@@ -19,45 +18,9 @@ data class PostCallData(
     val durationSeconds: Int,         // 0 for missed / rejected calls
     val hasRecording: Boolean,        // whether a recording was detected
     val startedAtMillis: Long,        // epoch ms; 0 if unknown
+    val isContact: Boolean = false,   // displayName came from contacts / the log's cached name
 ) {
     companion object {
-        private const val KEY_DISPLAY   = "pc_display"
-        private const val KEY_NUMBER    = "pc_number"
-        private const val KEY_DIRECTION = "pc_direction"
-        private const val KEY_DURATION  = "pc_duration"
-        private const val KEY_RECORDING = "pc_recording"
-        private const val KEY_STARTED   = "pc_started"
-
-        fun fromContext(context: Context): PostCallData? {
-            val prefs = context.getSharedPreferences("post_call_data", Context.MODE_PRIVATE)
-            val started = prefs.getLong(KEY_STARTED, -1L)
-            if (started == -1L) return null   // nothing has been stored yet
-            return PostCallData(
-                displayName    = prefs.getString(KEY_DISPLAY, "Unknown") ?: "Unknown",
-                phoneNumber    = prefs.getString(KEY_NUMBER, "") ?: "",
-                direction      = prefs.getString(KEY_DIRECTION, "unknown") ?: "unknown",
-                durationSeconds= prefs.getInt(KEY_DURATION, 0),
-                hasRecording   = prefs.getBoolean(KEY_RECORDING, false),
-                startedAtMillis= started,
-            )
-        }
-
-        fun save(context: Context, data: PostCallData) {
-            context.getSharedPreferences("post_call_data", Context.MODE_PRIVATE).edit()
-                .putString(KEY_DISPLAY,   data.displayName)
-                .putString(KEY_NUMBER,    data.phoneNumber)
-                .putString(KEY_DIRECTION, data.direction)
-                .putInt(KEY_DURATION,     data.durationSeconds)
-                .putBoolean(KEY_RECORDING,data.hasRecording)
-                .putLong(KEY_STARTED,     data.startedAtMillis)
-                .apply()
-        }
-
-        fun clear(context: Context) {
-            context.getSharedPreferences("post_call_data", Context.MODE_PRIVATE)
-                .edit().clear().apply()
-        }
-
         /**
          * Set on the launcher intent when the user taps "View Details".
          *

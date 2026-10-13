@@ -22,12 +22,27 @@ data class NativeRecordingCandidate(
     val lowerDisplayName: String = displayName?.lowercase() ?: ""
 
     /**
-     * How long the dialer held the file open: DATE_ADDED is the moment
-     * recording started, DATE_MODIFIED the moment it stopped. For an intact
-     * file this reproduces the audio duration, which is why disagreement is
-     * evidence the file is truncated or still being written.
+     * DATE_MODIFIED - DATE_ADDED. What it means depends on the dialer:
+     *
+     *  - OPEN-stamped (the Samsung reference device): DATE_ADDED is when
+     *    recording started and DATE_MODIFIED when it stopped, so an intact
+     *    file's lifetime reproduces its audio duration.
+     *  - END-stamped (several other OEMs): the row is created when the file is
+     *    CLOSED, at hang-up, so both stamps sit at the end of the call and the
+     *    lifetime is about zero, or slightly negative when the media scanner
+     *    indexed it a moment after the last write.
      */
     val lifetimeSeconds: Long = dateModifiedEpochSeconds - dateAddedEpochSeconds
+
+    /**
+     * When recording started, read as an END-stamped file: the close time
+     * minus the audio. DATE_MODIFIED is the close (the file's last write)
+     * even when the row was indexed later; DATE_ADDED stands in when it is
+     * missing.
+     */
+    val endStampedStartEpochSeconds: Long =
+        (if (dateModifiedEpochSeconds > 0L) dateModifiedEpochSeconds else dateAddedEpochSeconds) -
+            Math.round(durationSeconds)
 }
 
 /**
@@ -42,10 +57,10 @@ data class NativeCallForMatching(
      * When the call was actually picked up, if the device could say.
      *
      * This is the anchor that turns matching from a duration coincidence into
-     * a statement about the same instant: an OEM dialer opens its file when
-     * the call connects, so DATE_ADDED and this value describe one event and
-     * should agree to within a second or two. Null falls back to the original
-     * heuristic scoring.
+     * a statement about the same instant: an OEM dialer starts recording when
+     * the call connects, so the recording's estimated start and this value
+     * describe one event and should agree to within a second or two. Null
+     * falls back to the original heuristic scoring.
      */
     val answeredAtEpochMillis: Long? = null,
 ) {
@@ -74,10 +89,17 @@ data class NativeMatchSignals(
     val identityScore: Double,
     val anchorScore: Double?,
     val durationDeltaSeconds: Double,
+    /** Estimated recording start − call start. */
     val ringGapSeconds: Long,
     val anchorDeltaSeconds: Long?,
     val lifetimeDeltaSeconds: Double,
     val identityMatched: Boolean,
+    /**
+     * Which reading of the file's stamps won: true when its start was taken
+     * as DATE_MODIFIED minus the audio (stamped at close), false when it was
+     * DATE_ADDED (stamped at open).
+     */
+    val endStamped: Boolean = false,
 ) {
     /** True when an answer time was known and the file lines up with it. */
     val isAnchored: Boolean get() = anchorScore != null && anchorScore > 0.0
@@ -120,6 +142,18 @@ object NativeRecordingMatcher {
 
     private const val DURATION_TOLERANCE_SECONDS = 5.0
     private const val MAX_DURATION_DELTA_SECONDS = 15.0
+
+    /**
+     * How far a long call's audio may drift from its call-log duration, as a
+     * fraction of that duration. The duration tolerance, its hard gate and
+     * the lifetime gate all widen in proportion beyond 750 s (where 2% passes
+     * 15 s): max(15 s, 2%) is 72 s on an hour-long call. A fixed 15 s rejected
+     * long recordings whose dialer paused or resampled for a few seconds per
+     * ten minutes. Cross-matching stays out of reach because the ring-gap gate
+     * does not widen, and two long calls cannot both start within it.
+     */
+    private const val DURATION_DRIFT_RATIO = 0.02
+
     private const val MAX_RING_GAP_SECONDS = 180L
     private const val MIN_RING_GAP_SECONDS = -15L
     private const val MATCH_THRESHOLD = 0.70
@@ -127,25 +161,33 @@ object NativeRecordingMatcher {
     private const val PLAUSIBILITY_FLOOR = 0.40
 
     /**
-     * How far DATE_ADDED may sit from a known answer time before the anchor
-     * scores zero. Both are whole seconds from different providers, so one
-     * second of slack is rounding and two is generous.
+     * How far the recording's estimated start may sit from a known answer
+     * time before the anchor scores zero. Both are whole seconds from
+     * different providers, so one second of slack is rounding and two is
+     * generous.
      */
     private const val ANCHOR_TOLERANCE_SECONDS = 2.0
 
     /**
      * Beyond this the candidate is rejected outright when an answer time is
-     * known. A dialer does not open its file ten seconds away from the moment
-     * the call connected; something that does belongs to a different call.
+     * known. A dialer does not start recording ten seconds away from the
+     * moment the call connected; a file that did belongs to a different call.
      */
     private const val MAX_ANCHOR_DELTA_SECONDS = 10L
 
     /**
      * How far the file's open-to-close lifetime may differ from the audio
-     * duration it contains before the file is treated as truncated or still
-     * being written.
+     * duration it contains, read as an OPEN-stamped file, before it is treated
+     * as truncated or still being written. Widened for long calls like the
+     * duration gate (see [DURATION_DRIFT_RATIO]).
      */
     private const val MAX_LIFETIME_DELTA_SECONDS = 15.0
+
+    /**
+     * A lifetime at or below this reads as END-stamped: the dialer created the
+     * row when it closed the file, so both stamps sit at hang-up.
+     */
+    private const val MAX_END_STAMP_LIFETIME_SECONDS = 5L
 
     // Heuristic weights: no answer time available. Duration dominates because
     // it is the signal that held to within ~1s across every observed pair;
@@ -177,27 +219,19 @@ object NativeRecordingMatcher {
             return NativeRecordingMatchResult(false, 0.0, null, "Call never connected (duration <= 0).")
         }
 
-        val minTime = call.startedAtEpochSeconds + MIN_RING_GAP_SECONDS
-        val maxTime = call.startedAtEpochSeconds + MAX_RING_GAP_SECONDS
-
         val scored = mutableListOf<Triple<NativeRecordingCandidate, Double, NativeMatchSignals>>()
 
         for (candidate in candidates) {
-            if (candidate.dateAddedEpochSeconds < minTime || candidate.dateAddedEpochSeconds > maxTime) {
-                continue
-            }
-
             val signals = scoreCandidate(call, candidate) ?: continue
             scored.add(Triple(candidate, weigh(signals), signals))
         }
 
         if (scored.isEmpty()) {
-            // The anchor gate is strict by design, and it assumes the dialer
-            // stamps DATE_ADDED when it OPENS the file. That holds on the
-            // devices this was derived from, but the convention is the OEM's to
-            // choose and some stamp it at close instead — on such a handset
-            // every candidate would sit a whole call-length away from the
-            // answer instant and be rejected, which is worse than the heuristic
+            // The anchor gate is strict by design. Both stamping conventions
+            // are read from the file's own lifetime now, but the answer time
+            // can still be off on a handset whose journal is wrong, or whose
+            // audio drifts from the wall clock over a long call — and then
+            // every candidate is rejected, which is worse than the heuristic
             // this replaced.
             //
             // So when the anchor eliminates EVERYTHING, it is treated as
@@ -248,7 +282,7 @@ object NativeRecordingMatcher {
             confidence = best.second,
             candidate = best.first,
             reason = if (best.third.isAnchored) {
-                "Recording opened at the moment the call was answered."
+                "Recording started at the moment the call was answered."
             } else {
                 "Matched successfully."
             },
@@ -271,35 +305,97 @@ object NativeRecordingMatcher {
                 (W_IDENTITY * s.identityScore)
         }
 
+    /**
+     * How much the duration and lifetime allowances widen for this call: 1
+     * up to 750 s, then in proportion to its length. See
+     * [DURATION_DRIFT_RATIO].
+     */
+    private fun driftScale(call: NativeCallForMatching): Double =
+        max(1.0, call.durationSeconds * DURATION_DRIFT_RATIO / MAX_DURATION_DELTA_SECONDS)
+
+    /**
+     * Scores the candidate under each stamping convention its own lifetime
+     * allows, and keeps the better reading. Null when neither survives.
+     *
+     *  - OPEN: the recording started at DATE_ADDED. Only when the lifetime
+     *    reproduces the audio duration — the lifetime check, which belongs to
+     *    this reading alone — or when there is no DATE_MODIFIED to check.
+     *  - END: the recording started at DATE_MODIFIED minus the audio. When
+     *    the lifetime is about zero (the row was made at hang-up) or clearly
+     *    shorter than the audio (the row was indexed mid-call).
+     *
+     * A file plausible both ways — a short one, or one with no DATE_MODIFIED
+     * — is scored both ways. Its best reading is still ONE candidate, so it
+     * cannot make itself ambiguous. A file held open longer than its audio by
+     * more than the tolerance fits neither: something touched it after the
+     * dialer closed it.
+     *
+     * A zero lifetime on a long file is NOT also read as open-stamped (the
+     * old rule let any lifetime of zero or less through). Its DATE_ADDED is
+     * the hang-up, which is exactly where the next call to the same person
+     * starts, so that reading turned every quick call-back into a tie.
+     *
+     * Before this, every rule measured from DATE_ADDED, so on a dialer that
+     * stamps at close a call longer than the 180 s ring gate (or, through the
+     * lifetime check, longer than about 15 s) could never be matched, anchor
+     * or not.
+     */
     private fun scoreCandidate(
         call: NativeCallForMatching,
         candidate: NativeRecordingCandidate,
     ): NativeMatchSignals? {
         if (candidate.durationMillis <= 0) return null
 
+        val scale = driftScale(call)
         val durationDelta = abs(candidate.durationSeconds - call.durationSeconds)
-        if (durationDelta > MAX_DURATION_DELTA_SECONDS) return null
+        if (durationDelta > MAX_DURATION_DELTA_SECONDS * scale) return null
 
-        val ringGap = candidate.dateAddedEpochSeconds - call.startedAtEpochSeconds
-        if (ringGap < MIN_RING_GAP_SECONDS || ringGap > MAX_RING_GAP_SECONDS) return null
+        val lifetime = candidate.lifetimeSeconds
+        val lifetimeTolerance = MAX_LIFETIME_DELTA_SECONDS * scale
+        val lifetimeDelta = abs(lifetime - candidate.durationSeconds)
 
         // A file whose open-to-close lifetime does not reproduce its own audio
-        // duration is truncated, still being written, or was copied here by
-        // something other than the dialer. Any of those makes it the wrong file
-        // to attach, and it previously scored like a perfect match.
-        val lifetimeDelta = abs(candidate.lifetimeSeconds - candidate.durationSeconds)
-        if (candidate.lifetimeSeconds > 0 && lifetimeDelta > MAX_LIFETIME_DELTA_SECONDS) {
-            return null
+        // duration is, read as open-stamped, truncated, still being written,
+        // or copied here by something other than the dialer.
+        val open = if (candidate.dateModifiedEpochSeconds <= 0L || lifetimeDelta <= lifetimeTolerance) {
+            scoreAt(call, candidate, candidate.dateAddedEpochSeconds, false, durationDelta, lifetimeDelta, scale)
+        } else {
+            null
+        }
+        val end = if (lifetime <= MAX_END_STAMP_LIFETIME_SECONDS ||
+            lifetime < candidate.durationSeconds - lifetimeTolerance
+        ) {
+            scoreAt(call, candidate, candidate.endStampedStartEpochSeconds, true, durationDelta, lifetimeDelta, scale)
+        } else {
+            null
         }
 
+        if (open == null || end == null) return open ?: end
+        // Ties go to the open reading, the convention the model was built on.
+        return if (weigh(end) > weigh(open)) end else open
+    }
+
+    /** Scores the candidate as a recording that started at [startedAtSeconds]. */
+    private fun scoreAt(
+        call: NativeCallForMatching,
+        candidate: NativeRecordingCandidate,
+        startedAtSeconds: Long,
+        endStamped: Boolean,
+        durationDelta: Double,
+        lifetimeDelta: Double,
+        scale: Double,
+    ): NativeMatchSignals? {
+        val ringGap = startedAtSeconds - call.startedAtEpochSeconds
+        if (ringGap < MIN_RING_GAP_SECONDS || ringGap > MAX_RING_GAP_SECONDS) return null
+
         // Hard anchor gate. When the answer instant is known, a file that did
-        // not open at that instant belongs to another call, however well its
-        // duration happens to line up.
+        // not start recording at that instant belongs to another call, however
+        // well its duration happens to line up.
         val anchorDelta: Long?
         val anchorScore: Double?
         val answeredAtSeconds = call.answeredAtEpochSeconds
         if (answeredAtSeconds != null) {
-            val delta = abs(candidate.dateAddedEpochSeconds - answeredAtSeconds)
+            val delta = abs(startedAtSeconds - answeredAtSeconds)
             if (delta > MAX_ANCHOR_DELTA_SECONDS) return null
             anchorDelta = delta
             anchorScore = max(0.0, 1.0 - (delta / ANCHOR_TOLERANCE_SECONDS))
@@ -308,7 +404,7 @@ object NativeRecordingMatcher {
             anchorScore = null
         }
 
-        val durationScore = max(0.0, 1.0 - (durationDelta / DURATION_TOLERANCE_SECONDS))
+        val durationScore = max(0.0, 1.0 - (durationDelta / (DURATION_TOLERANCE_SECONDS * scale)))
 
         val timingScore = when {
             ringGap < 0 -> 0.85
@@ -330,6 +426,7 @@ object NativeRecordingMatcher {
             anchorDeltaSeconds = anchorDelta,
             lifetimeDeltaSeconds = lifetimeDelta,
             identityMatched = identityMatched,
+            endStamped = endStamped,
         )
     }
 
