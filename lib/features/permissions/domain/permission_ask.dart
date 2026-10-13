@@ -105,7 +105,7 @@ List<PermissionAsk> permissionAsks(
     PermissionAsk(
       id: 'whatsapp',
       kind: AskKind.notificationListener,
-      title: 'Special access',
+      title: 'Notification access',
       // why: 'Used to log your WhatsApp calls.',
       icon: Icons.notifications_active_outlined,
       granted: perms.whatsappCalls,
