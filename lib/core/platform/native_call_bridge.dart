@@ -81,37 +81,15 @@ abstract interface class NativeCallBridge {
   /// the platform channel. Null when the file has since been deleted.
   Future<({String checksum, int bytesRead})?> hashRecording(int mediaStoreId);
 
-  /// Exports raw recording bytes via ContentResolver so the file can be stored
-  /// in a temporary location for Dio upload.
-  Future<List<int>?> exportRecordingBytes(int mediaStoreId);
-
-  /// Exports raw recording bytes natively to a destination path, bypassing
-  /// memory limits of MethodChannel that cause TransactionTooLargeException.
-  Future<bool> exportRecordingToFile(int mediaStoreId, String destinationPath);
-
   Future<Map<String, Object?>> getDeviceInfo();
   Future<CallStateJournal> readCallStateJournal();
-  Future<void> clearCallStateJournal();
 
-  /// Live call-state transitions. Foreground only — the background path is the
-  /// native CallStateReceiver.
-  Stream<CallStateEvent> callStateStream();
 
   // --- background execution ------------------------------------------------
 
   /// Whether background ingest is actually able to run, and what it last did.
   /// Cheap: reads SharedPreferences and one PowerManager flag.
   Future<BackgroundStatus> getBackgroundStatus();
-
-  /// Drains what the background worker captured while the app was closed.
-  ///
-  /// Returns the snapshots as-is; matching is applied by the Dart matcher, so
-  /// the rules live in exactly one place.
-  Future<IngestSnapshot> readIngestBatches();
-
-  /// Call only after the batches have been folded in — this is not idempotent
-  /// with respect to unprocessed data.
-  Future<void> clearIngestBatches();
 
   /// Saves active auth session and device credentials for autonomous native sync.
   ///
@@ -144,7 +122,7 @@ abstract interface class NativeCallBridge {
   /// of being silently overwritten by an older one.
   Future<NativeAuthSession?> getAuthSession();
 
-  /// Clears native auth credentials on sign out.
+  /// Clears native auth credentials once the server has refused the session.
   Future<void> clearAuthSession();
 
   /// Exchanges the stored refresh token for a new pair.
@@ -170,28 +148,51 @@ abstract interface class NativeCallBridge {
   /// so the values have to cross the channel.
   Future<bool> setSyncPolicy(String policyJson);
 
-  /// Whether the user opted in to sending recordings over mobile data.
-  Future<bool> getRecordingsOnMeteredNetworks();
-
-  Future<void> setRecordingsOnMeteredNetworks(bool allowed);
-
   /// Reads last native sync attempt status and timestamps.
   Future<Map<String, Object?>> getNativeSyncStatus();
 
+  /// Queues `PUT /devices/fcm-token` (Mobile API Guide §3.3).
+  ///
+  /// [force] after a registration: a device row the server has just created
+  /// carries no token, even if this install's token has not changed. Without
+  /// it, the token goes up only when it differs from the one last accepted.
+  Future<void> syncPushToken({bool force = false});
+
+  /// `DELETE /devices/fcm-token`, then FCM's own deleteToken (§3.3).
+  ///
+  /// Only when resetting a dead session, and BEFORE [clearAuthSession]: the
+  /// request needs whatever access token is still held.
+  Future<void> unregisterPushToken();
+
+  /// `POST /devices/heartbeat` with the outbox counts (§3.2).
+  ///
+  /// Sent natively so the foreground, background and push heartbeats share one
+  /// once-a-minute limit. True when one went out and the server took it; false
+  /// when the limit held it back or the request failed.
+  Future<bool> sendHeartbeat();
+
   /// Enqueues immediate native background sync worker.
-  Future<void> triggerNativeSync();
+  /// Queues an upload run; WorkManager starts it once there is a network.
+  ///
+  /// [reviveFailed] gives calls that failed for good another chance — for a
+  /// deliberate "Send now", not for the automatic triggers.
+  Future<void> triggerNativeSync({bool reviveFailed = false});
 
   /// Arms the periodic sweep and runs one capture now. Idempotent.
   Future<void> startBackgroundTracking({String reason = 'app-start'});
 
-  /// Cancels all scheduled ingest. Used on sign-out.
-  Future<void> stopBackgroundTracking();
-
   /// Opens the Doze exemption prompt. Returns false when no screen resolved.
   Future<bool> requestBatteryExemption();
 
-  /// Opens the OEM background-restriction screen, falling back to app info.
-  Future<bool> openVendorBackgroundSettings();
+  /// Opens the maker's Auto-start screen (App info where there is none).
+  /// False when nothing opened.
+  Future<bool> openAutostartSettings();
+
+  /// The user has seen the "app was force-stopped" alert.
+  Future<void> acknowledgeForceStop();
+
+  /// Opens Android's date & time settings, falling back to Settings.
+  Future<bool> openDateSettings();
 
   // --- post-call overlay ---------------------------------------------------
 
@@ -208,17 +209,26 @@ abstract interface class NativeCallBridge {
   /// checked via [checkOverlayPermission] after the user returns.
   Future<bool> requestOverlayPermission();
 
+  /// Opens Android's "Notification access" screen for the WhatsApp call
+  /// listener. Returns true if a settings screen opened; the grant itself is
+  /// re-read from [getPermissionStatus] (`whatsappCalls`) on resume.
+  Future<bool> requestNotificationListenerAccess();
+
   /// Emits an event when the user taps "View Details" on the post-call overlay.
   ///
   /// Each event is a `Map<String, Object?>` with `startedAtMillis` (int) —
   /// use this to find the matching call entry in the local DB and push
   /// [CallDetailScreen].
   Stream<Map<String, Object?>> overlayEventStream();
+
+  /// Fires when native code stored a call the call log will never mention —
+  /// today, a WhatsApp call rebuilt from its notifications. The feed reloads
+  /// on it; nothing else about the call travels with the event.
+  Stream<void> callsChangedStream();
 }
 
 class MethodChannelNativeCallBridge implements NativeCallBridge {
   static const _method = MethodChannel('in.mynt.zebu_call_tracker/native');
-  static const _events = EventChannel('in.mynt.zebu_call_tracker/call_state');
 
   Future<T> _invoke<T>(String name, [Map<String, Object?>? args]) async {
     try {
@@ -368,24 +378,6 @@ class MethodChannelNativeCallBridge implements NativeCallBridge {
   }
 
   @override
-  Future<List<int>?> exportRecordingBytes(int mediaStoreId) async {
-    final bytes = await _method.invokeMethod<Uint8List?>(
-      'exportRecordingBytes',
-      {'mediaStoreId': mediaStoreId},
-    );
-    return bytes;
-  }
-
-  @override
-  Future<bool> exportRecordingToFile(int mediaStoreId, String destinationPath) async {
-    final success = await _method.invokeMethod<bool>(
-      'exportRecordingToFile',
-      {'mediaStoreId': mediaStoreId, 'destinationPath': destinationPath},
-    );
-    return success ?? false;
-  }
-
-  @override
   Future<Map<String, Object?>> getDeviceInfo() async {
     final raw = await _invoke<Map<Object?, Object?>>('getDeviceInfo');
     return raw.map((k, v) => MapEntry(k! as String, v));
@@ -398,31 +390,10 @@ class MethodChannelNativeCallBridge implements NativeCallBridge {
       );
 
   @override
-  Future<void> clearCallStateJournal() async {
-    await _method.invokeMethod<void>('clearCallStateJournal');
-  }
-
-  @override
-  Stream<CallStateEvent> callStateStream() => _events
-      .receiveBroadcastStream()
-      .map((e) => CallStateEvent.fromPlatform(e as Map<Object?, Object?>));
-
-  @override
   Future<BackgroundStatus> getBackgroundStatus() async =>
       BackgroundStatus.fromPlatform(
         await _invoke<Map<Object?, Object?>>('getBackgroundStatus'),
       );
-
-  @override
-  Future<IngestSnapshot> readIngestBatches() async =>
-      IngestSnapshot.fromPlatform(
-        await _invoke<Map<Object?, Object?>>('readIngestBatches'),
-      );
-
-  @override
-  Future<void> clearIngestBatches() async {
-    await _method.invokeMethod<void>('clearIngestBatches');
-  }
 
   @override
   Future<void> setAuthSession({
@@ -482,24 +453,31 @@ class MethodChannelNativeCallBridge implements NativeCallBridge {
   }
 
   @override
-  Future<bool> getRecordingsOnMeteredNetworks() async {
-    return await _invoke<bool>('getRecordingsOnMeteredNetworks');
-  }
-
-  @override
-  Future<void> setRecordingsOnMeteredNetworks(bool allowed) async {
-    await _invoke<void>('setRecordingsOnMeteredNetworks', {'allowed': allowed});
-  }
-
-  @override
   Future<Map<String, Object?>> getNativeSyncStatus() async {
     final raw = await _invoke<Map<Object?, Object?>>('getNativeSyncStatus');
     return raw.map((k, v) => MapEntry(k! as String, v));
   }
 
   @override
-  Future<void> triggerNativeSync() async {
-    await _method.invokeMethod<void>('triggerNativeSync');
+  Future<void> syncPushToken({bool force = false}) async {
+    await _invoke<void>('syncPushToken', {'force': force});
+  }
+
+  @override
+  Future<void> unregisterPushToken() async {
+    await _invoke<void>('unregisterPushToken');
+  }
+
+  @override
+  Future<bool> sendHeartbeat() async =>
+      await _invoke<bool?>('sendHeartbeat') ?? false;
+
+  @override
+  Future<void> triggerNativeSync({bool reviveFailed = false}) async {
+    await _method.invokeMethod<void>(
+      'triggerNativeSync',
+      {'reviveFailed': reviveFailed},
+    );
   }
 
   @override
@@ -508,17 +486,18 @@ class MethodChannelNativeCallBridge implements NativeCallBridge {
   }
 
   @override
-  Future<void> stopBackgroundTracking() async {
-    await _invoke<void>('stopBackgroundTracking');
-  }
-
-  @override
   Future<bool> requestBatteryExemption() =>
       _invoke<bool>('requestBatteryExemption');
 
   @override
-  Future<bool> openVendorBackgroundSettings() =>
-      _invoke<bool>('openVendorBackgroundSettings');
+  Future<bool> openAutostartSettings() =>
+      _invoke<bool>('openAutostartSettings');
+
+  @override
+  Future<void> acknowledgeForceStop() => _invoke<void>('acknowledgeForceStop');
+
+  @override
+  Future<bool> openDateSettings() => _invoke<bool>('openDateSettings');
 
   @override
   Future<bool> checkOverlayPermission() =>
@@ -527,6 +506,10 @@ class MethodChannelNativeCallBridge implements NativeCallBridge {
   @override
   Future<bool> requestOverlayPermission() =>
       _invoke<bool>('requestOverlayPermission');
+
+  @override
+  Future<bool> requestNotificationListenerAccess() =>
+      _invoke<bool>('requestNotificationListenerAccess');
 
   static const _overlayEvents =
       EventChannel('in.mynt.zebu_call_tracker/overlay_events');
@@ -538,6 +521,13 @@ class MethodChannelNativeCallBridge implements NativeCallBridge {
           .map((e) => (e as Map<Object?, Object?>).map(
                 (k, v) => MapEntry(k! as String, v),
               ));
+
+  static const _callEvents =
+      EventChannel('in.mynt.zebu_call_tracker/call_events');
+
+  @override
+  Stream<void> callsChangedStream() =>
+      _callEvents.receiveBroadcastStream().map((_) {});
 }
 
 RecordingCandidate _candidateFromPlatform(Map<Object?, Object?> m) =>
@@ -729,6 +719,7 @@ class CallLogRow {
     required this.durationSeconds,
     required this.phoneAccountId,
     this.phoneAccountComponent,
+    this.simSlot,
     this.geocodedLocation,
     this.countryIso,
     this.features = const [],
@@ -750,6 +741,11 @@ class CallLogRow {
 
   /// Disambiguates [phoneAccountId], which is often an opaque ICCID or null.
   final String? phoneAccountComponent;
+
+  /// The 1-based SIM slot, resolved natively from the two fields above (via
+  /// Telecom on Android 11+, which also handles ICCID-form ids). Null from an
+  /// older native build or a read that does not resolve it.
+  final int? simSlot;
 
   final String? geocodedLocation;
   final String? countryIso;
@@ -802,6 +798,7 @@ class CallLogRow {
     durationSeconds: (m['durationSeconds'] as num?)?.toInt(),
     phoneAccountId: m['phoneAccountId'] as String?,
     phoneAccountComponent: m['phoneAccountComponent'] as String?,
+    simSlot: (m['simSlot'] as num?)?.toInt(),
     geocodedLocation: m['geocodedLocation'] as String?,
     countryIso: m['countryIso'] as String?,
     features:
@@ -880,8 +877,6 @@ class RecordingCapability {
   final int sdkInt;
   final List<Map<String, Object?>> oemRecordingDirs;
 
-  bool get isAvailable => verdict == RecordingVerdict.supported;
-
   factory RecordingCapability.fromPlatform(Map<Object?, Object?> m) {
     const names = <String, RecordingVerdict>{
       'SUPPORTED': RecordingVerdict.supported,
@@ -906,25 +901,20 @@ class RecordingCapability {
 class BackgroundStatus {
   const BackgroundStatus({
     required this.ignoringBatteryOptimizations,
-    required this.manufacturer,
-    required this.hasVendorSettings,
     required this.lastRunAtUtc,
     required this.lastRunStatus,
     required this.lastRunReason,
     required this.runCount,
     required this.capturedCalls,
     required this.overflowed,
+    this.autostartRelevant = false,
+    this.autostartOpened = false,
+    this.forceStoppedAt,
   });
 
   /// False means the OS may defer scheduled ingest for hours. Not fatal — the
   /// call log is durable — but a dialer recording can be rotated away first.
   final bool ignoringBatteryOptimizations;
-
-  final String manufacturer;
-
-  /// Whether an OEM background-restriction screen could be resolved, so the UI
-  /// only offers the shortcut when it leads somewhere.
-  final bool hasVendorSettings;
 
   /// Null until the worker has run at least once.
   final DateTime? lastRunAtUtc;
@@ -942,6 +932,16 @@ class BackgroundStatus {
   /// the app has been closed for a very long time.
   final bool overflowed;
 
+  /// The maker has its own Auto-start switch (Xiaomi, Oppo, Vivo, ...).
+  final bool autostartRelevant;
+
+  /// The user has been taken to that screen at least once. Android reports
+  /// nothing about the switch itself, so this is the most the app can know.
+  final bool autostartOpened;
+
+  /// The last exit was a force-stop the user has not been told about.
+  final DateTime? forceStoppedAt;
+
   bool get hasRun => lastRunAtUtc != null;
   bool get isHealthy => lastRunStatus == 'ok' || !hasRun;
 
@@ -950,8 +950,6 @@ class BackgroundStatus {
     return BackgroundStatus(
       ignoringBatteryOptimizations:
           m['ignoringBatteryOptimizations'] as bool? ?? false,
-      manufacturer: m['manufacturer'] as String? ?? '',
-      hasVendorSettings: m['hasVendorSettings'] as bool? ?? false,
       lastRunAtUtc: at == 0
           ? null
           : DateTime.fromMillisecondsSinceEpoch(at).toUtc(),
@@ -960,88 +958,14 @@ class BackgroundStatus {
       runCount: (m['runCount'] as num?)?.toInt() ?? 0,
       capturedCalls: (m['capturedCalls'] as num?)?.toInt() ?? 0,
       overflowed: m['overflowed'] as bool? ?? false,
+      autostartRelevant: m['autostartRelevant'] as bool? ?? false,
+      autostartOpened: m['autostartOpened'] as bool? ?? false,
+      forceStoppedAt: switch ((m['forceStoppedAtMillis'] as num?)?.toInt()) {
+        final ms? when ms > 0 => DateTime.fromMillisecondsSinceEpoch(ms).toUtc(),
+        _ => null,
+      },
     );
   }
-}
-
-/// One background capture: the call rows seen, plus the recordings that existed
-/// at that moment. The pairing is what makes this worth running in the
-/// background — a recording listing is perishable, a call log row is not.
-class IngestBatch {
-  const IngestBatch({
-    required this.capturedAtUtc,
-    required this.calls,
-    required this.recordings,
-  });
-
-  final DateTime capturedAtUtc;
-  final List<CallLogRow> calls;
-  final List<RecordingCandidate> recordings;
-
-  factory IngestBatch.fromPlatform(Map<Object?, Object?> m) => IngestBatch(
-    capturedAtUtc: DateTime.fromMillisecondsSinceEpoch(
-      (m['capturedAtMillis'] as num?)?.toInt() ?? 0,
-    ).toUtc(),
-    calls: (m['calls'] as List<Object?>? ?? const <Object?>[])
-        .cast<Map<Object?, Object?>>()
-        .map(CallLogRow.fromPlatform)
-        .toList(growable: false),
-    recordings: (m['recordings'] as List<Object?>? ?? const <Object?>[])
-        .cast<Map<Object?, Object?>>()
-        .map(_candidateFromPlatform)
-        .toList(growable: false),
-  );
-}
-
-class SyncedCallRecord {
-  const SyncedCallRecord({
-    required this.idempotencyKey,
-    required this.serverCallId,
-    required this.syncedAtMillis,
-  });
-
-  final String idempotencyKey;
-  final String serverCallId;
-  final int syncedAtMillis;
-
-  factory SyncedCallRecord.fromPlatform(Map<Object?, Object?> m) => SyncedCallRecord(
-    idempotencyKey: m['idempotencyKey'] as String? ?? '',
-    serverCallId: m['serverCallId'] as String? ?? '',
-    syncedAtMillis: (m['syncedAtMillis'] as num?)?.toInt() ?? 0,
-  );
-}
-
-class IngestSnapshot {
-  const IngestSnapshot({
-    required this.batches,
-    this.syncedCalls = const [],
-    required this.overflowed,
-  });
-
-  final List<IngestBatch> batches;
-  final List<SyncedCallRecord> syncedCalls;
-  final bool overflowed;
-
-  bool get isEmpty => batches.isEmpty && syncedCalls.isEmpty;
-
-  /// Every recording seen across all batches, newest capture last. Feeding the
-  /// matcher the union rather than per-batch lists means a call captured in one
-  /// run can still match a recording indexed in the next.
-  List<RecordingCandidate> get allRecordings => [
-    for (final b in batches) ...b.recordings,
-  ];
-
-  factory IngestSnapshot.fromPlatform(Map<Object?, Object?> m) => IngestSnapshot(
-    batches: (m['batches'] as List<Object?>? ?? const <Object?>[])
-        .cast<Map<Object?, Object?>>()
-        .map(IngestBatch.fromPlatform)
-        .toList(growable: false),
-    syncedCalls: (m['syncedCalls'] as List<Object?>? ?? const <Object?>[])
-        .cast<Map<Object?, Object?>>()
-        .map(SyncedCallRecord.fromPlatform)
-        .toList(growable: false),
-    overflowed: m['overflowed'] as bool? ?? false,
-  );
 }
 
 class CallStateEvent {

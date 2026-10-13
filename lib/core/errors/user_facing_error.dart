@@ -55,17 +55,16 @@ class UserFacingError {
         title: switch (error.kind) {
           NativeFailureKind.permissionDenied => 'Permission needed',
           NativeFailureKind.unsupportedPlatform => 'Not available here',
-          NativeFailureKind.platformError => 'This phone could not be read',
+          NativeFailureKind.platformError => "Couldn't read your calls",
         },
         message: switch (error.kind) {
           NativeFailureKind.permissionDenied =>
-            'This needs access that has not been granted yet. Review the app '
+            "This needs access that hasn't been allowed yet. Check the app's "
                 'permissions and try again.',
           NativeFailureKind.unsupportedPlatform =>
             'Call tracking only works on Android.',
           NativeFailureKind.platformError =>
-            'The phone reported a problem reading its call data. Try again in '
-                'a moment.',
+            "The phone couldn't read its call history. Try again in a moment.",
         },
         technical: technical,
         isRetryable: error.kind != NativeFailureKind.unsupportedPlatform,
@@ -88,17 +87,16 @@ class UserFacingError {
         lower.contains('database') ||
         lower.contains('disk image')) {
       return UserFacingError(
-        title: 'Could not read saved calls',
-        message: 'The local call store could not be opened. Nothing has been '
-            'sent to the server. Try again, and if it keeps happening use '
-            'Database Health in Settings.',
+        title: 'Saved calls unavailable',
+        message: "Couldn't open your saved calls. Try again; if it keeps "
+            'happening, contact support.',
         technical: technical,
       );
     }
 
     return UserFacingError(
       title: 'Something went wrong',
-      message: 'This did not work. Try again in a moment.',
+      message: "That didn't work. Try again in a moment.",
       technical: technical,
     );
   }
@@ -107,12 +105,12 @@ class UserFacingError {
         'NETWORK_ERROR' => 'No connection to the server',
         'DEVICE_REVOKED' ||
         'ACCOUNT_INACTIVE' =>
-          'This phone is no longer allowed to sync',
-        'DEVICE_NOT_REGISTERED' || 'DEVICE_INACTIVE' => 'Device not registered',
+          'Access removed',
+        'DEVICE_NOT_REGISTERED' || 'DEVICE_INACTIVE' => "This phone isn't set up",
         'INVALID_TOKEN' || 'UNAUTHENTICATED' => 'Signed out',
-        'RATE_LIMIT_EXCEEDED' => 'Too many requests',
+        'RATE_LIMIT_EXCEEDED' => 'Server is busy',
         'SYNC_POLICY_VIOLATION' => 'Call too old to send',
-        _ => 'The server could not complete that',
+        _ => "That didn't work",
       };
 
   static String _apiMessage(ApiException error) => switch (error.code) {
@@ -120,14 +118,14 @@ class UserFacingError {
           'Your calls are saved on this phone and will be sent automatically '
               'once the connection is back.',
         'DEVICE_REVOKED' || 'ACCOUNT_INACTIVE' =>
-          'An administrator has removed access for this device or account. '
+          'Your admin has turned off access for this phone or account. '
               'Contact them to restore it.',
         'DEVICE_NOT_REGISTERED' || 'DEVICE_INACTIVE' =>
-          'This phone needs to be registered again before calls can be sent.',
+          'Set up this phone again before calls can be sent.',
         'INVALID_TOKEN' || 'UNAUTHENTICATED' =>
-          'Your session ended. Register this device again to resume syncing.',
+          'You were signed out. Sign in again to keep sending calls.',
         'RATE_LIMIT_EXCEEDED' =>
-          'The server asked the app to slow down. It will retry shortly.',
+          'The app will try again shortly.',
         'SYNC_POLICY_VIOLATION' =>
           'The server does not accept calls this old. Check that the date and '
               'time on this phone are correct.',

@@ -5,6 +5,7 @@ import 'package:zebu_call_tracker/core/storage/app_database.dart';
 import 'package:zebu_call_tracker/core/theme/app_theme.dart';
 import 'package:zebu_call_tracker/features/synchronization/data/sync_service.dart';
 import 'package:zebu_call_tracker/features/synchronization/presentation/outbox_queue_screen.dart';
+import 'package:zebu_call_tracker/shared/widgets/ui_kit.dart';
 
 void main() {
   testWidgets('OutboxQueueScreen renders and displays pending items', (tester) async {
@@ -59,11 +60,11 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(OutboxQueueScreen), findsOneWidget);
-    expect(find.text('Call Metadata Outbox'), findsOneWidget);
+    expect(find.text('Calls not sent yet'), findsOneWidget);
     expect(find.text('Test Contact'), findsOneWidget);
     expect(find.text('+919123456789'), findsOneWidget);
-    expect(find.text('PENDING'), findsOneWidget);
-    expect(find.text('RETRYING'), findsOneWidget);
-    expect(find.text('Retry'), findsOneWidget);
+    expect(find.widgetWithText(StatusPill, 'Waiting'), findsOneWidget);
+    expect(find.widgetWithText(StatusPill, 'Will retry'), findsOneWidget);
+    expect(find.text('Try again'), findsOneWidget);
   });
 }

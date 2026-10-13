@@ -63,11 +63,6 @@ object ContactResolver {
         return out
     }
 
-    /** Dropped on sign-out: the next user must not see the previous one's names. */
-    fun clearCache() {
-        synchronized(cache) { cache.clear() }
-    }
-
     fun resolve(context: Context, number: String?): String? {
         if (number.isNullOrBlank()) return null
         if (!PermissionInspector.isGranted(context, PermissionInspector.CONTACTS)) return null

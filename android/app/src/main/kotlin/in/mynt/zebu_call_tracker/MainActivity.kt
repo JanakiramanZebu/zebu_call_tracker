@@ -17,13 +17,16 @@ class MainActivity : FlutterActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        // Starts only when a session exists -- CallTrackingService.start
-        // enforces that itself, so opening the app while signed out no longer
-        // raises a foreground service and a "tracking calls" notification for a
-        // phone that is tracking nothing.
-        CallTrackingService.start(applicationContext)
+        // The always-on tracking service runs for every signed-in handset
+        // unless the server's sync policy switches it off. reconcile starts it
+        // (only with a session) and STOPS it when the policy says off. A
+        // launch is a foreground moment, so the start is always allowed here.
+        CallTrackingService.reconcile(applicationContext)
 
-        // Re-arm on every launch.
+        // Re-arm on every launch: the hourly safety net and the content
+        // trigger. A no-op without a session -- ensurePeriodic refuses to
+        // schedule capture for a signed-out phone, and sign-in arms it through
+        // startBackgroundTracking instead.
         BackgroundScheduler.ensurePeriodic(this)
         
         // Register network restoration callback listener

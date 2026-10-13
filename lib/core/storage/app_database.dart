@@ -1,11 +1,11 @@
 import 'dart:io';
 
 import 'package:drift/drift.dart';
-import 'package:drift/native.dart';
+import 'package:drift_sqflite/drift_sqflite.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:sqlite3/sqlite3.dart' as sql;
+import 'package:sqflite/sqflite.dart' as sqf;
 
 import '../network/call_wire_format.dart';
 import 'sync_state.dart';
@@ -52,7 +52,6 @@ class DatabaseHealthReport {
     required this.dbPath,
     required this.fileSizeBytes,
     required this.totalRows,
-    this.backupPath,
     this.repaired = false,
     this.salvagedRowsCount = 0,
     this.errorMessage,
@@ -66,7 +65,6 @@ class DatabaseHealthReport {
   final String dbPath;
   final int fileSizeBytes;
   final int totalRows;
-  final String? backupPath;
   final bool repaired;
   final int salvagedRowsCount;
   final String? errorMessage;
@@ -119,6 +117,15 @@ class AppDatabase extends _$AppDatabase {
   MigrationStrategy get migration => MigrationStrategy(
         onCreate: (m) => m.createAll(),
         beforeOpen: (details) async {
+          // Wait up to 10 s for the native uploader's write lock instead of
+          // failing at once. busy_timeout returns a row, so it is run as a
+          // select — Android rejects row-returning statements as plain execs.
+          try {
+            await customSelect('PRAGMA busy_timeout=10000;').get();
+          } catch (error) {
+            debugPrint('[DB] Could not set busy_timeout: $error');
+          }
+
           // Additive columns, applied here rather than through a version bump.
           //
           // [schemaVersion] cannot move on its own — see the note on it. So a
@@ -157,26 +164,58 @@ class AppDatabase extends _$AppDatabase {
           for (final statement in CallWireStatus.normalizationStatements) {
             await customStatement(statement);
           }
+
+          // Indexes for the queries that run constantly: the analytics
+          // windows and call list (started_at), the uploader's claim
+          // (sync_state, next_attempt_at) and reconciliation
+          // (server_call_id). Without them each of those was a full scan and
+          // sort. Created here rather than in onCreate for the same reason as
+          // the columns above; Kotlin's open helper creates the identical
+          // names, and IF NOT EXISTS lets either side go first.
+          for (final statement in _indexStatements) {
+            await customStatement(statement);
+          }
         },
       );
 
+  /// Mirror of the index list in Kotlin's `ZebuDatabaseHelper.onOpen`.
+  static const _indexStatements = [
+    'CREATE INDEX IF NOT EXISTS idx_local_calls_started_at '
+        'ON local_calls(started_at);',
+    'CREATE INDEX IF NOT EXISTS idx_local_calls_sync_next '
+        'ON local_calls(sync_state, next_attempt_at);',
+    'CREATE INDEX IF NOT EXISTS idx_local_calls_server_call_id '
+        'ON local_calls(server_call_id);',
+  ];
+
   static const String dbFilename = 'zebu_calls.sqlite';
 
+  /// The app's connection, through Android's own SQLite (sqflite).
+  ///
+  /// **Why not drift's NativeDatabase.** That opened the file through the
+  /// sqlite3 library bundled into the APK, while the Kotlin side
+  /// (`ZebuDatabaseHelper`) opens the SAME file through Android's built-in
+  /// SQLite — two separate copies of SQLite, in one process, on one file.
+  /// SQLite documents exactly that as a way to corrupt a database ("Multiple
+  /// copies of SQLite linked into the same application"): each copy tracks
+  /// POSIX locks on its own, so one copy closing the file silently drops the
+  /// other's locks, and concurrent writers — the native uploader and the app —
+  /// then tear pages. On the reference SM-M356B it surfaced as
+  /// `database disk image is malformed` on the Home screen.
+  ///
+  /// With every connection on the same SQLite, the locking is shared and
+  /// correct. WAL is turned on for sqflite by the
+  /// `com.tekartik.sqflite.wal_enabled` meta-data in AndroidManifest.xml.
   static LazyDatabase _openConnection() {
     return LazyDatabase(() async {
       final file = await getDatabaseFile();
 
-      // Perform pre-open integrity check & self-healing recovery if malformed
+      // Pre-open integrity check and self-healing recovery. sqflite runs its
+      // statements on a background thread, so this no longer needs an
+      // isolate to keep the first frame smooth.
       await checkAndRepairDatabaseFile(file);
 
-      return NativeDatabase.createInBackground(
-        file,
-        setup: (db) {
-          db.execute('PRAGMA journal_mode=WAL;');
-          db.execute('PRAGMA busy_timeout=10000;');
-          db.execute('PRAGMA synchronous=NORMAL;');
-        },
-      );
+      return SqfliteQueryExecutor(path: file.path);
     });
   }
 
@@ -185,9 +224,27 @@ class AppDatabase extends _$AppDatabase {
     return File(p.join(dbFolder.path, dbFilename));
   }
 
+  /// First column of the first row, as text — the shape every PRAGMA check
+  /// returns.
+  static String _firstValue(List<Map<String, Object?>> rows, String empty) =>
+      rows.isEmpty ? empty : rows.first.values.first?.toString() ?? empty;
+
+  /// Opens [path] for inspection only.
+  ///
+  /// Always read-only: sqflite's read-only open installs an error handler
+  /// that leaves a corrupt file alone, while its read-write open keeps
+  /// Android's default handler, which DELETES the file on corruption. A health
+  /// check must never be the thing that destroys what it is checking.
+  static Future<sqf.Database> _openForInspection(String path) =>
+      sqf.openDatabase(path, readOnly: true, singleInstance: false);
+
   /// Inspects database health and returns a comprehensive [DatabaseHealthReport].
   static Future<DatabaseHealthReport> checkHealth() async {
     final file = await getDatabaseFile();
+    return _checkHealthAt(file);
+  }
+
+  static Future<DatabaseHealthReport> _checkHealthAt(File file) async {
     if (!await file.exists()) {
       return DatabaseHealthReport(
         isHealthy: true,
@@ -202,35 +259,30 @@ class AppDatabase extends _$AppDatabase {
     }
 
     final fileSize = await file.length();
-    sql.Database? rawDb;
+    sqf.Database? db;
     try {
-      rawDb = sql.sqlite3.open(file.path);
-      rawDb.execute('PRAGMA busy_timeout=5000;');
+      db = await _openForInspection(file.path);
 
-      final integrityResult = rawDb.select('PRAGMA integrity_check;');
-      final integrityStr = integrityResult.isNotEmpty ? integrityResult.first.values.first?.toString() ?? 'ok' : 'ok';
+      final integrityStr =
+          _firstValue(await db.rawQuery('PRAGMA integrity_check;'), 'ok');
+      final quickStr =
+          _firstValue(await db.rawQuery('PRAGMA quick_check;'), 'ok');
+      final fkRows = await db.rawQuery('PRAGMA foreign_key_check;');
+      final fkStr =
+          fkRows.isEmpty ? 'ok' : '${fkRows.length} foreign key violations';
+      final journalStr =
+          _firstValue(await db.rawQuery('PRAGMA journal_mode;'), 'unknown');
 
-      final quickResult = rawDb.select('PRAGMA quick_check;');
-      final quickStr = quickResult.isNotEmpty ? quickResult.first.values.first?.toString() ?? 'ok' : 'ok';
-
-      final fkResult = rawDb.select('PRAGMA foreign_key_check;');
-      final fkStr = fkResult.isEmpty ? 'ok' : '${fkResult.length} foreign key violations';
-
-      final journalResult = rawDb.select('PRAGMA journal_mode;');
-      final journalStr = journalResult.isNotEmpty ? journalResult.first.values.first?.toString() ?? 'unknown' : 'unknown';
-
-      int rowCount = 0;
+      var rowCount = 0;
       try {
-        final countResult = rawDb.select('SELECT COUNT(*) FROM local_calls;');
-        rowCount = (countResult.first.values.first as num?)?.toInt() ?? 0;
+        final count = await db.rawQuery('SELECT COUNT(*) AS c FROM local_calls;');
+        rowCount = (count.first['c'] as num?)?.toInt() ?? 0;
       } catch (_) {
         rowCount = 0;
       }
 
-      final isHealthy = integrityStr == 'ok' && quickStr == 'ok';
-
       return DatabaseHealthReport(
-        isHealthy: isHealthy,
+        isHealthy: integrityStr == 'ok' && quickStr == 'ok',
         integrityCheckResult: integrityStr,
         quickCheckResult: quickStr,
         foreignKeyCheckResult: fkStr,
@@ -252,7 +304,7 @@ class AppDatabase extends _$AppDatabase {
         errorMessage: e.toString(),
       );
     } finally {
-      rawDb?.dispose();
+      await db?.close();
     }
   }
 
@@ -263,25 +315,23 @@ class AppDatabase extends _$AppDatabase {
   static Future<bool> checkAndRepairDatabaseFile(File file) async {
     if (!await file.exists()) return true;
 
-    sql.Database? rawDb;
-    bool needsRepair = false;
-    String initialError = '';
+    sqf.Database? db;
+    var needsRepair = false;
+    var initialError = '';
 
     try {
-      rawDb = sql.sqlite3.open(file.path);
-      rawDb.execute('PRAGMA busy_timeout=5000;');
-      final integrity = rawDb.select('PRAGMA integrity_check;');
-      final statusStr = integrity.isNotEmpty ? integrity.first.values.first?.toString() ?? 'ok' : 'ok';
-
-      if (statusStr != 'ok') {
+      db = await _openForInspection(file.path);
+      final status =
+          _firstValue(await db.rawQuery('PRAGMA integrity_check;'), 'ok');
+      if (status != 'ok') {
         needsRepair = true;
-        initialError = statusStr;
+        initialError = status;
       }
     } catch (e) {
       needsRepair = true;
       initialError = e.toString();
     } finally {
-      rawDb?.dispose();
+      await db?.close();
     }
 
     if (!needsRepair) {
@@ -314,19 +364,27 @@ class AppDatabase extends _$AppDatabase {
       debugPrint('[DB_HEALTH] Warning creating backup copy: $e');
     }
 
-    // 2. Tier 1: Try WAL checkpoint + REINDEX
+    // 2. Tier 1: Try WAL checkpoint + REINDEX.
+    //
+    // The one read-write open of a file known to be damaged. If Android's
+    // default handler deletes it here, nothing is lost: the backup above is
+    // what Tier 2 salvages from.
     try {
-      final db = sql.sqlite3.open(file.path);
-      db.execute('PRAGMA busy_timeout=10000;');
-      db.execute('PRAGMA wal_checkpoint(TRUNCATE);');
-      db.execute('REINDEX;');
-      final recheck = db.select('PRAGMA integrity_check;');
-      final ok = recheck.isNotEmpty && recheck.first.values.first?.toString() == 'ok';
-      db.dispose();
-
-      if (ok) {
-        debugPrint('[DB_HEALTH] Tier 1 repair (REINDEX + WAL checkpoint) successfully restored database health!');
-        return true;
+      final db = await sqf.openDatabase(file.path, singleInstance: false);
+      try {
+        await db.rawQuery('PRAGMA wal_checkpoint(TRUNCATE);');
+        await db.execute('REINDEX;');
+        final ok = _firstValue(
+              await db.rawQuery('PRAGMA integrity_check;'),
+              '',
+            ) ==
+            'ok';
+        if (ok) {
+          debugPrint('[DB_HEALTH] Tier 1 repair (REINDEX + WAL checkpoint) successfully restored database health!');
+          return true;
+        }
+      } finally {
+        await db.close();
       }
     } catch (e) {
       debugPrint('[DB_HEALTH] Tier 1 repair encountered error: $e');
@@ -339,12 +397,11 @@ class AppDatabase extends _$AppDatabase {
 
   /// Extracts readable records row-by-row from the corrupted DB and restores them into a clean DB.
   static Future<bool> _salvageRowsIntoCleanDatabase(File file, File backupFile) async {
-    final recoveredRows = <Map<String, dynamic>>[];
-    sql.Database? corruptDb;
+    final recoveredRows = <Map<String, Object?>>[];
+    sqf.Database? corruptDb;
 
     try {
-      corruptDb = sql.sqlite3.open(backupFile.path);
-      corruptDb.execute('PRAGMA busy_timeout=10000;');
+      corruptDb = await _openForInspection(backupFile.path);
 
       // Probe every rowid in range individually, rather than asking the damaged
       // database to list them.
@@ -368,7 +425,7 @@ class AppDatabase extends _$AppDatabase {
         'SELECT MAX(rowid) AS v FROM local_calls;',
       ]) {
         try {
-          final result = corruptDb.select(probe);
+          final result = await corruptDb.rawQuery(probe);
           final value = (result.isEmpty ? null : result.first['v']) as int?;
           if (value != null && value > maxRowId) maxRowId = value;
         } catch (e) {
@@ -382,9 +439,12 @@ class AppDatabase extends _$AppDatabase {
 
       for (var rowid = 1; rowid <= maxRowId; rowid++) {
         try {
-          final row = corruptDb.select('SELECT * FROM local_calls WHERE rowid = ?;', [rowid]);
+          final row = await corruptDb.rawQuery(
+            'SELECT * FROM local_calls WHERE rowid = ?;',
+            [rowid],
+          );
           if (row.isNotEmpty) {
-            recoveredRows.add(Map<String, dynamic>.from(row.first));
+            recoveredRows.add(Map<String, Object?>.from(row.first));
           }
         } catch (e) {
           debugPrint('[DB_HEALTH] Skipped damaged rowid $rowid: $e');
@@ -394,26 +454,23 @@ class AppDatabase extends _$AppDatabase {
     } catch (e) {
       debugPrint('[DB_HEALTH] Row extraction error: $e');
     } finally {
-      corruptDb?.dispose();
+      await corruptDb?.close();
     }
 
     // Create a pristine reconstructed database
     final tempCleanFile =
         File('${file.path}.clean_${DateTime.now().millisecondsSinceEpoch}');
-    sql.Database? cleanDb;
+    sqf.Database? cleanDb;
 
     try {
       if (await tempCleanFile.exists()) {
         await tempCleanFile.delete();
       }
 
-      cleanDb = sql.sqlite3.open(tempCleanFile.path);
-      cleanDb.execute('PRAGMA journal_mode=WAL;');
-      cleanDb.execute('PRAGMA synchronous=NORMAL;');
-      cleanDb.execute('PRAGMA busy_timeout=10000;');
+      cleanDb = await sqf.openDatabase(tempCleanFile.path, singleInstance: false);
 
       // Create pristine table & indexes
-      cleanDb.execute('''
+      await cleanDb.execute('''
         CREATE TABLE local_calls (
           local_id INTEGER PRIMARY KEY AUTOINCREMENT,
           idempotency_key TEXT NOT NULL UNIQUE,
@@ -444,23 +501,27 @@ class AppDatabase extends _$AppDatabase {
         );
       ''');
 
-      // Re-insert salvaged rows
-      final stmt = cleanDb.prepare('''
-        INSERT OR IGNORE INTO local_calls (
-          idempotency_key, external_call_id, server_call_id, revision,
-          phone_number, normalized_phone_number, contact_name, direction, status,
-          started_at, answered_at, ended_at, duration_seconds, has_recording,
-          recording_path, recording_media_store_id, recording_checksum,
-          recording_upload_status, sim_slot, client_created_at, sync_state,
-          attempt_count, next_attempt_at, last_error_code, metadata_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-      ''');
+      // Both owners read user_version: drift to decide whether to run
+      // onCreate, Kotlin's SQLiteOpenHelper to decide onCreate/onUpgrade. A
+      // rebuilt file left at 0 looked brand new to both.
+      await cleanDb.execute('PRAGMA user_version = 1;');
 
+      // Re-insert salvaged rows, in one transaction.
+      final batch = cleanDb.batch();
       for (final row in recoveredRows) {
         final key = row['idempotency_key']?.toString();
         if (key == null || key.isEmpty) continue;
 
-        stmt.execute([
+        batch.rawInsert('''
+          INSERT OR IGNORE INTO local_calls (
+            idempotency_key, external_call_id, server_call_id, revision,
+            phone_number, normalized_phone_number, contact_name, direction, status,
+            started_at, answered_at, ended_at, duration_seconds, has_recording,
+            recording_path, recording_media_store_id, recording_checksum,
+            recording_upload_status, sim_slot, client_created_at, sync_state,
+            attempt_count, next_attempt_at, last_error_code, metadata_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        ''', [
           key,
           row['external_call_id'],
           row['server_call_id'],
@@ -491,13 +552,18 @@ class AppDatabase extends _$AppDatabase {
           row['metadata_json'],
         ]);
       }
-      stmt.dispose();
+      await batch.commit(noResult: true);
 
       // Check integrity of clean database
-      final check = cleanDb.select('PRAGMA integrity_check;');
-      final isCleanOk = check.isNotEmpty && check.first.values.first?.toString() == 'ok';
+      final isCleanOk = _firstValue(
+            await cleanDb.rawQuery('PRAGMA integrity_check;'),
+            '',
+          ) ==
+          'ok';
 
-      cleanDb.dispose();
+      // Closing the last connection checkpoints the WAL into the main file,
+      // so the single file renamed below is complete.
+      await cleanDb.close();
       cleanDb = null;
 
       if (isCleanOk) {
@@ -519,11 +585,17 @@ class AppDatabase extends _$AppDatabase {
       debugPrint('[DB_HEALTH] Error during row salvage migration: $e');
       return false;
     } finally {
-      cleanDb?.dispose();
-      if (await tempCleanFile.exists()) {
-        try {
-          await tempCleanFile.delete();
-        } catch (_) {}
+      await cleanDb?.close();
+      for (final leftover in [
+        tempCleanFile,
+        File('${tempCleanFile.path}-wal'),
+        File('${tempCleanFile.path}-shm'),
+      ]) {
+        if (await leftover.exists()) {
+          try {
+            await leftover.delete();
+          } catch (_) {}
+        }
       }
     }
   }

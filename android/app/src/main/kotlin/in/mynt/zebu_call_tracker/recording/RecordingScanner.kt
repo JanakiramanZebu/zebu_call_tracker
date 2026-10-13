@@ -58,10 +58,22 @@ object RecordingScanner {
      */
     private val NAME_HINTS = listOf("Call recording%", "Call %", "%callrec%")
 
+    /**
+     * RELATIVE_PATH only exists from API 29. minSdk is 24, and naming the
+     * column on an older MediaStore fails the whole query — which used to fail
+     * the whole ingest pass with it. Below Q the absolute DATA path stands in
+     * for it, both in the folder filter and in the reported path.
+     */
+    private val hasRelativePath = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+
+    @Suppress("DEPRECATION")
+    private val PATH_COLUMN =
+        if (hasRelativePath) MediaStore.MediaColumns.RELATIVE_PATH else MediaStore.MediaColumns.DATA
+
     private val PROJECTION = arrayOf(
         MediaStore.Audio.Media._ID,
         MediaStore.Audio.Media.DISPLAY_NAME,
-        MediaStore.Audio.Media.RELATIVE_PATH,
+        PATH_COLUMN,
         MediaStore.Audio.Media.DURATION,
         MediaStore.Audio.Media.SIZE,
         MediaStore.Audio.Media.DATE_ADDED,
@@ -105,8 +117,10 @@ object RecordingScanner {
 
         CALL_RECORDING_PATHS.forEachIndexed { i, p ->
             if (i > 0) where.append(" OR ")
-            where.append("${MediaStore.Audio.Media.RELATIVE_PATH} LIKE ?")
-            args += "$p%"
+            where.append("$PATH_COLUMN LIKE ?")
+            // RELATIVE_PATH starts with the folder; DATA is absolute, so the
+            // folder sits somewhere after the volume root.
+            args += if (hasRelativePath) "$p%" else "%/$p%"
         }
         NAME_HINTS.forEach { hint ->
             where.append(" OR ${MediaStore.Audio.Media.DISPLAY_NAME} LIKE ?")
@@ -162,11 +176,13 @@ object RecordingScanner {
 
     private fun mapRow(c: Cursor): Map<String, Any?> {
         val id = c.getLongOrNull(MediaStore.Audio.Media._ID)
+        val relativePath = c.getStringOrNull(PATH_COLUMN)
+            ?.let { if (hasRelativePath) it else relativeFromAbsolute(it) }
         return mapOf(
             "mediaStoreId" to id,
             // Kept for display and as ONE weak matching signal among several.
             "displayName" to c.getStringOrNull(MediaStore.Audio.Media.DISPLAY_NAME),
-            "relativePath" to c.getStringOrNull(MediaStore.Audio.Media.RELATIVE_PATH),
+            "relativePath" to relativePath,
             // Milliseconds.
             "durationMillis" to c.getLongOrNull(MediaStore.Audio.Media.DURATION),
             "sizeBytes" to c.getLongOrNull(MediaStore.Audio.Media.SIZE),
@@ -174,8 +190,21 @@ object RecordingScanner {
             "dateAddedEpochSeconds" to c.getLongOrNull(MediaStore.Audio.Media.DATE_ADDED),
             "dateModifiedEpochSeconds" to c.getLongOrNull(MediaStore.Audio.Media.DATE_MODIFIED),
             "mimeType" to c.getStringOrNull(MediaStore.Audio.Media.MIME_TYPE),
-            "source" to inferSource(c.getStringOrNull(MediaStore.Audio.Media.RELATIVE_PATH)),
+            "source" to inferSource(relativePath),
         )
+    }
+
+    /**
+     * Pre-Q only: the RELATIVE_PATH form ("Recordings/Call/") of an absolute
+     * DATA path on primary storage. Null for anything elsewhere (an SD card),
+     * which reads as an unknown source rather than a wrong one.
+     */
+    @Suppress("DEPRECATION")
+    private fun relativeFromAbsolute(absolute: String): String? {
+        val root = android.os.Environment.getExternalStorageDirectory().absolutePath + "/"
+        if (!absolute.startsWith(root)) return null
+        val dir = absolute.removePrefix(root).substringBeforeLast('/', "")
+        return if (dir.isEmpty()) null else "$dir/"
     }
 
     /** Maps the storage location onto the backend's recording `source` enum. */
@@ -220,37 +249,6 @@ object RecordingScanner {
             }
         } catch (e: java.io.FileNotFoundException) {
             null
-        }
-    }
-
-    /**
-     * Reads recording audio bytes from ContentResolver so they can be exported to temp file for upload.
-     */
-    fun exportBytes(context: Context, mediaStoreId: Long): ByteArray? {
-        if (!hasPermission(context)) throw MissingPermission()
-        return try {
-            context.contentResolver.openInputStream(uriFor(mediaStoreId))?.use { input ->
-                input.readBytes()
-            }
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    /**
-     * Streams recording audio bytes directly to a file to avoid Binder TransactionTooLargeException.
-     */
-    fun exportToFile(context: Context, mediaStoreId: Long, destinationPath: String): Boolean {
-        if (!hasPermission(context)) throw MissingPermission()
-        return try {
-            context.contentResolver.openInputStream(uriFor(mediaStoreId))?.use { input ->
-                java.io.File(destinationPath).outputStream().use { output ->
-                    input.copyTo(output)
-                }
-            }
-            true
-        } catch (e: Exception) {
-            false
         }
     }
 

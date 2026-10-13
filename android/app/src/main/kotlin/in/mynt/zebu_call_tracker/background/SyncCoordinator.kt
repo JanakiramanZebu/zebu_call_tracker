@@ -1,19 +1,18 @@
 package `in`.mynt.zebu_call_tracker.background
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.content.Context
 import android.net.Uri
-import android.os.Build
 import android.util.Log
-import androidx.core.app.NotificationCompat
 import `in`.mynt.zebu_call_tracker.call.CallWireFormat
 import `in`.mynt.zebu_call_tracker.recording.RecordingScanner
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
+import java.io.FileNotFoundException
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.io.OutputStreamWriter
@@ -67,22 +66,104 @@ object SyncCoordinator {
      * stalled everything behind it.
      */
     private const val MAX_CONSECUTIVE_NETWORK_FAILURES = 3
-    private const val CHANNEL_ID = "sync_progress"
-    // Must not collide with CallTrackingService's 1003: this coordinator calls
-    // notify()/cancel() on it around every run, and sharing the id meant each
-    // finished sync tore down the persistent service's own foreground
-    // notification — the one thing keeping that service alive.
-    private const val NOTIFY_ID = 1004
+
+    /**
+     * The id this coordinator once posted "Syncing call" and "Sync complete"
+     * under. Both are gone — the CRM is where an employee looks for their
+     * calls, and a notification per sync on top of the service's and
+     * WorkManager's own was noise — but an ongoing one left by an older build
+     * would otherwise sit in the shade until reboot, so it is cleared.
+     */
+    private const val LEGACY_PROGRESS_NOTIFY_ID = 1004
+
+    /**
+     * How long FAILED rows may go without another chance when nobody asks for
+     * one. Revival is otherwise tied to app start and sign-in; see
+     * [IngestStore.consumeFailureRevival].
+     */
+    private const val REVIVAL_MAX_AGE_MILLIS = 24L * 60L * 60L * 1000L
+
+    /**
+     * A recording at least this big is uploaded with the worker promoted to
+     * the foreground (see the `onLongUpload` hook on [runSync]).
+     *
+     * Roughly four minutes of a typical dialer's AAC, or a quarter of an hour
+     * of AMR. On a slow mobile link a 30-60 minute call's file (tens of MB)
+     * can take longer than WorkManager's ten-minute window by itself. A worker
+     * stopped mid-stream loses the transfer — the server discards a partial
+     * upload and has no resume — so the next run started from byte zero and
+     * hit the same wall, for ever. A foreground worker is exempt from that
+     * window, so the transfer runs to completion however long it takes.
+     */
+    private const val LONG_UPLOAD_BYTES = 4L * 1024L * 1024L
+
+    /**
+     * Longest the run waits in place for a [RateLimiter] slot. Anything
+     * longer ends the run, and [CallSyncWorker] books the next one for when
+     * the window reopens instead of holding a wake lock through it.
+     */
+    private const val MAX_INLINE_RATE_WAIT_MILLIS = 20_000L
+
+    /**
+     * §10.2: after this many attempts a row stops backing off on its own
+     * schedule and waits for the hourly safety net instead.
+     */
+    private const val ATTEMPTS_BEFORE_HOLD = 8
+    private const val HOLD_SECONDS = 60L * 60L
+
+    /** §9: a full server disk is backed off in minutes, not seconds. */
+    private const val INSUFFICIENT_STORAGE_MIN_SECONDS = 5L * 60L
+
+    const val STATUS_ALREADY_RUNNING = "ALREADY_RUNNING"
+
+    /** The server's rate limit is full; the next run is booked for when it reopens. */
+    const val STATUS_RATE_LIMITED = "RATE_LIMITED"
 
     private val isRunning = AtomicBoolean(false)
 
+    /** Set by [BackgroundScheduler.enqueueSync]; drained by [CallSyncWorker]. */
+    private val followUpRequested = AtomicBoolean(false)
+
+    fun requestFollowUp() = followUpRequested.set(true)
+
+    /** True once per request made since the last call. */
+    fun consumeFollowUpRequest(): Boolean = followUpRequested.getAndSet(false)
+
+    /**
+     * Whether a sync would have anything to do right now.
+     *
+     * The gate in front of every "maybe sync" trigger — the network coming
+     * back, the hourly safety net, a "Sync now" without revival — so that none
+     * of them spins up a worker, takes a wake lock and possibly the radio to
+     * claim nothing. Mirrors what [runSync] would pick up: claimable rows
+     * (cheap EXISTS over the claim predicate), plus FAILED rows that are due
+     * their daily revival, which would otherwise only ever be revived on the
+     * back of some unrelated sync.
+     */
+    fun hasWorkToSend(context: Context): Boolean {
+        val appContext = context.applicationContext
+        if (NativeCallOutboxDao.hasClaimableWork(appContext)) return true
+        return IngestStore.isFailureRevivalDue(appContext, REVIVAL_MAX_AGE_MILLIS) &&
+            NativeCallOutboxDao.hasRevivableFailures(appContext, PERMANENT_RECORD_CODES)
+    }
+
     /**
      * Executes single-threaded, sequential 1-by-1 outbox synchronization.
+     *
+     * [onLongUpload] runs once, before the first recording of at least
+     * [LONG_UPLOAD_BYTES] (or of unknown size) starts streaming. The worker
+     * uses it to go foreground, which lifts WorkManager's ten-minute limit so
+     * a long call's recording is never cut off mid-transfer. A failure inside
+     * it is the hook's own business; the upload goes ahead regardless.
      */
-    suspend fun runSync(context: Context, reason: String = "auto"): SyncOutcome = withContext(Dispatchers.IO) {
+    suspend fun runSync(
+        context: Context,
+        reason: String = "auto",
+        onLongUpload: (suspend () -> Unit)? = null,
+    ): SyncOutcome = withContext(Dispatchers.IO) {
         if (!isRunning.compareAndSet(false, true)) {
             Log.d(TAG, "SyncCoordinator execution already in progress [$reason]; skipping concurrent run.")
-            return@withContext SyncOutcome("ALREADY_RUNNING", 0, 0)
+            return@withContext SyncOutcome(STATUS_ALREADY_RUNNING, 0, 0)
         }
 
         val appContext = context.applicationContext
@@ -104,7 +185,17 @@ object SyncCoordinator {
             //    permanent set is passed in rather than duplicated in the DAO
             //    so there is one list of "the server will refuse this for ever"
             //    and both halves of the state machine read it.
-            NativeCallOutboxDao.reviveRetryableFailures(appContext, PERMANENT_RECORD_CODES)
+            //
+            //    Not on every run. Revival clears the row's backoff, so doing it
+            //    each sync turned FAILED into "retry on every trigger" — on a
+            //    revoked device, one doomed request per network handover. It
+            //    runs when the app starts or signs in (the moments the cause
+            //    is likeliest to have been fixed) and at most daily otherwise.
+            //    Transient failures never reach FAILED: they are RETRY_PENDING
+            //    and come back on their own backoff regardless.
+            if (IngestStore.consumeFailureRevival(appContext, REVIVAL_MAX_AGE_MILLIS)) {
+                NativeCallOutboxDao.reviveRetryableFailures(appContext, PERMANENT_RECORD_CODES)
+            }
 
             val rawBaseUrl = IngestStore.getApiBaseUrl(appContext)
             var currentToken = IngestStore.getAuthToken(appContext)
@@ -149,10 +240,31 @@ object SyncCoordinator {
                 timeZone = TimeZone.getTimeZone("UTC")
             }
 
-            val notificationManager = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-            ensureNotificationChannel(appContext, notificationManager)
+            try {
+                androidx.core.app.NotificationManagerCompat.from(appContext)
+                    .cancel(LEGACY_PROGRESS_NOTIFY_ID)
+            } catch (_: Exception) {}
+
+            // §5.1, before each cycle: may this handset sync, on what terms,
+            // and what audio is the server still owed. Throttled to half an
+            // hour; a push sync has just run it and is not charged twice.
+            //
+            // A block, once recorded, holds until a check-in hears ACTIVE.
+            // Without that, a revoked phone sent one doomed request for every
+            // call it captured and every network change.
+            val checkIn = NativeStatusCheckIn.runIfDue(appContext)
+            if (checkIn == NativeStatusCheckIn.Outcome.DEVICE_BLOCKED ||
+                (checkIn != NativeStatusCheckIn.Outcome.OK && NativeStatusCheckIn.isBlocked(appContext))
+            ) {
+                Log.w(TAG, "Server refuses this device; nothing sent until a check-in says ACTIVE.")
+                return@withContext SyncOutcome("BLOCKED", 0, 0, blocked = true)
+            }
 
             val policy = SyncPolicyStore.load(appContext)
+
+            // §2.3 rule 4: start the run on a token with life left in it, not
+            // one that will 401 halfway through the first batch.
+            currentToken = TokenRefresher.ensureFresh(appContext, normalizedBaseUrl, currentToken!!)
 
             // 2. Metadata, in batches.
             //
@@ -172,20 +284,27 @@ object SyncCoordinator {
                 policy = policy,
                 token = currentToken!!,
                 runStartedAt = System.currentTimeMillis(),
-                notificationManager = notificationManager,
             )
             uploadedCount += batchOutcome.uploaded
             failedCount += batchOutcome.failed
             if (batchOutcome.newToken != null) currentToken = batchOutcome.newToken
             if (batchOutcome.lastError != null) lastErrorDetail = batchOutcome.lastError
-            if (batchOutcome.fatal) {
-                IngestStore.recordSyncOutcome(
-                    appContext,
-                    "BLOCKED",
-                    uploadedCount,
-                    lastErrorDetail,
+            // Metadata hit the server's limit. Recordings have their own
+            // counter, so the per-row loop still runs; it stops at the first
+            // row that needs metadata.
+            var rateLimitedUntil = batchOutcome.rateLimitedUntil
+            batchOutcome.haltCode?.let { code ->
+                val halted = isFatal(code) || code in HALT_BUT_RETRYABLE_CODES
+                val status = if (halted) blockedStatusFor(code) else "PARTIAL"
+                val blocked = needsIntervention(code)
+                IngestStore.recordSyncOutcome(appContext, status, uploadedCount, lastErrorDetail ?: code)
+                // Blocked: nothing to retry until a person acts. Otherwise the
+                // rows are on their backoff and the worker comes back for them.
+                return@withContext SyncOutcome(
+                    status, uploadedCount, failedCount,
+                    hasMoreWork = !blocked,
+                    blocked = blocked,
                 )
-                return@withContext SyncOutcome("BLOCKED", uploadedCount, failedCount, true)
             }
 
             // 3. Everything else — recordings, and any row the batch pass left
@@ -206,15 +325,37 @@ object SyncCoordinator {
             val runStartedAt = System.currentTimeMillis()
             var consecutiveNetworkFailures = 0
             var stoppedEarly = false
+            // Set when the loop halts on a code that blocks the whole queue.
+            // Reported as the run's status in place of OK/PARTIAL, which used
+            // to overwrite it as soon as the loop ended.
+            var haltStatus: String? = null
+            var blocked = false
+            var longUploadAnnounced = false
 
             while (true) {
+                // Checked between rows only, never mid-transfer: a recording
+                // that started inside the budget always finishes, and a long
+                // one runs with the worker in the foreground (onLongUpload).
                 if (System.currentTimeMillis() - runStartedAt > RUN_BUDGET_MILLIS) {
                     Log.i(TAG, "[SYNC_BUDGET] Run budget reached after $uploadedCount uploads; yielding.")
                     stoppedEarly = true
                     break
                 }
 
-                // Claim next WAITING or ready RETRY_PENDING record (sets state to UPLOADING atomically)
+                // Both counters full for longer than is worth waiting: claiming
+                // a row only to hand it straight back would be churn.
+                val syncWait = RateLimiter.waitMillis(appContext, RateLimiter.Bucket.SYNC_CALLS)
+                val recordingWait = RateLimiter.waitMillis(appContext, RateLimiter.Bucket.RECORDING)
+                if (minOf(syncWait, recordingWait) > MAX_INLINE_RATE_WAIT_MILLIS) {
+                    rateLimitedUntil = maxOf(
+                        rateLimitedUntil,
+                        System.currentTimeMillis() + minOf(syncWait, recordingWait),
+                    )
+                    break
+                }
+
+                // Claim next WAITING or ready RETRY_PENDING record (sets state
+                // to UPLOADING atomically).
                 val call = NativeCallOutboxDao.claimNextWaitingCall(appContext) ?: break
 
                 if (!processedKeys.add(call.idempotencyKey)) {
@@ -236,15 +377,15 @@ object SyncCoordinator {
                 val maskedPhone = maskPhoneNumber(call.phoneNumber)
                 Log.i(TAG, "[OUTBOX_CLAIM] Local ID: ${call.localId}, IdempotencyKey: ${call.idempotencyKey}, Phone: $maskedPhone, HasRec: ${call.hasRecording}, RecStatus: ${call.recordingUploadStatus}")
 
-                // Post live progress notification
-                showNotification(appContext, notificationManager, "Uploading $maskedPhone...")
-
                 var confirmedServerCallId = call.serverCallId
                 var confirmedRevision = 1
                 var metadataSuccess = !confirmedServerCallId.isNullOrBlank()
                 var isRetryable = true
                 var errorCode = "UNKNOWN_ERROR"
                 var retryAfterSeconds: Long? = null
+                var serverRefusedForGood = false
+                // The server lost this call; its metadata goes up again first.
+                var requeuedForMetadata = false
 
                 // -------------------------------------------------------------
                 // STEP 1: Metadata Upload (if not already uploaded)
@@ -264,6 +405,7 @@ object SyncCoordinator {
 
                     val startedAtStr = isoFormat.format(Date(call.startedAtMillis))
                     val nowStr = isoFormat.format(Date())
+                    val createdAtStr = isoFormat.format(Date(call.clientCreatedAtMillis ?: System.currentTimeMillis()))
 
                     val callObj = JSONObject().apply {
                         put("idempotency_key", call.idempotencyKey)
@@ -286,8 +428,8 @@ object SyncCoordinator {
                         applyTimings(this, call, isoFormat)
                         put("duration_seconds", call.durationSeconds)
                         put("has_recording", call.hasRecording)
-                        put("sim_slot", call.simSlot)
-                        put("client_created_at", nowStr)
+                        call.simSlot?.let { put("sim_slot", it) }
+                        put("client_created_at", createdAtStr)
                         applyMetadata(this, call)
                     }
 
@@ -299,6 +441,13 @@ object SyncCoordinator {
                     }
 
                     Log.i(TAG, "[METADATA_UPLOAD_START] IdempotencyKey: ${call.idempotencyKey}")
+
+                    val syncSlot = acquireSlot(appContext, RateLimiter.Bucket.SYNC_CALLS, runStartedAt)
+                    if (syncSlot > 0L) {
+                        NativeCallOutboxDao.releaseClaim(appContext, call.idempotencyKey)
+                        rateLimitedUntil = maxOf(rateLimitedUntil, syncSlot)
+                        break
+                    }
 
                     val metaResult = executeMetadataUpload(
                         context = appContext,
@@ -340,10 +489,23 @@ object SyncCoordinator {
                         confirmedRevision = metaResult.revision
                         NativeCallOutboxDao.markServerCallId(appContext, call.idempotencyKey, returnedId!!, confirmedRevision)
                         Log.i(TAG, "[METADATA_UPLOAD_SUCCESS] IdempotencyKey: ${call.idempotencyKey}, ServerId: $returnedId")
+                    } else if (metaResult.errorCode == "RATE_LIMIT_EXCEEDED") {
+                        // Not this row's failure: hand it back uncounted and
+                        // stop until the server's window reopens.
+                        RateLimiter.onRateLimited(appContext, RateLimiter.Bucket.SYNC_CALLS, metaResult.retryAfterSeconds)
+                        NativeCallOutboxDao.releaseClaim(appContext, call.idempotencyKey)
+                        rateLimitedUntil = maxOf(
+                            rateLimitedUntil,
+                            RateLimiter.cooldownUntil(appContext, RateLimiter.Bucket.SYNC_CALLS),
+                        )
+                        break
                     } else {
                         metadataSuccess = false
                         errorCode = metaResult.errorCode
                         isRetryable = metaResult.isRetryable
+                        // The server's own per-call verdict, not a refusal of the
+                        // whole request: retryable:false here is final (§5.3).
+                        serverRefusedForGood = !metaResult.transportFailed && !metaResult.isRetryable
                         retryAfterSeconds = metaResult.retryAfterSeconds
                         lastErrorDetail = metaResult.errorMessage
                             ?.let { "$errorCode: $it" }
@@ -370,58 +532,57 @@ object SyncCoordinator {
                     val mediaStoreId = call.recordingMediaStoreId
                     val recordingUriStr = call.recordingPath ?: (if (mediaStoreId != null) RecordingScanner.contentUri(mediaStoreId) else null)
 
-                    // 6.5: audio waits for an unmetered network unless the user
-                    // has said otherwise. A recording is orders of magnitude
-                    // larger than the metadata beside it, and spending somebody
-                    // mobile data allowance on it uninvited is not this app
-                    // decision to make. The row stays pending and the next run
-                    // on Wi-Fi picks it up.
-                    val meteredBlocked = !recordingUploadsAllowedNow(appContext)
+                    // Over whatever network is up. The product owner's rule:
+                    // every recording reaches the CRM, on mobile data as on
+                    // Wi-Fi. Holding audio for Wi-Fi (the old default) left
+                    // recordings on the phone until it next joined one.
+                    val precheck = if (recordingUriStr.isNullOrBlank()) {
+                        null
+                    } else {
+                        precheckRecording(appContext, policy, recordingUriStr, mediaStoreId)
+                    }
 
-                    if (meteredBlocked) {
-                        Log.i(
-                            TAG,
-                            "[RECORDING_DEFERRED] ${call.idempotencyKey} held for an " +
-                                "unmetered network.",
-                        )
-                        recordingSuccess = true
-                        // The CALL is synced; only its audio is waiting. A
-                        // plain retry-pending would move the row out of
-                        // UPLOADED and report it to the user as unsent.
-                        NativeCallOutboxDao.deferRecordingUpload(
-                            appContext,
-                            call.idempotencyKey,
-                            900L,
-                        )
-                    } else if (recordingUriStr.isNullOrBlank()) {
+                    if (recordingUriStr.isNullOrBlank()) {
                         // Terminal, not a failure: there is no file to retry.
                         // Marking it FAILED would leave the row matching the
                         // recording clause of the claim query forever.
                         Log.w(TAG, "[RECORDING_MISSING] No URI found for call ${call.idempotencyKey}; marking absent.")
                         NativeCallOutboxDao.markRecordingAbsent(appContext, call.idempotencyKey, "RECORDING_PATH_NULL")
-                    } else if (
-                        rejectRecordingLocally(appContext, policy, recordingUriStr, mediaStoreId)
-                            .also { reason ->
-                                if (reason != null) {
-                                    // Sending a file the server is certain to
-                                    // refuse costs the upload twice: once in
-                                    // data, once in the retry. 6.4 says check
-                                    // the size locally; the extension list is
-                                    // the same argument.
-                                    Log.w(
-                                        TAG,
-                                        "[RECORDING_REJECTED_LOCALLY] ${call.idempotencyKey}: $reason",
-                                    )
-                                    NativeCallOutboxDao.markRecordingAbsent(
-                                        appContext, call.idempotencyKey, reason,
-                                    )
-                                }
-                            } != null
-                    ) {
-                        // Handled above: terminal for this file, not for the call.
+                    } else if (precheck?.rejection != null) {
+                        // Sending a file the server is certain to refuse costs
+                        // the upload twice: once in data, once in the retry.
+                        // 6.4 says check the size locally; the extension list
+                        // is the same argument. Terminal for this file, not
+                        // for the call.
+                        Log.w(
+                            TAG,
+                            "[RECORDING_REJECTED_LOCALLY] ${call.idempotencyKey}: ${precheck.rejection}",
+                        )
+                        NativeCallOutboxDao.markRecordingAbsent(
+                            appContext, call.idempotencyKey, precheck.rejection,
+                        )
                         recordingSuccess = true
                     } else {
-                        Log.i(TAG, "[RECORDING_UPLOAD_START] ServerId: $serverId, MediaStoreId: $mediaStoreId")
+                        val sizeBytes = precheck?.sizeBytes ?: -1L
+                        if (onLongUpload != null && !longUploadAnnounced &&
+                            (sizeBytes < 0L || sizeBytes >= LONG_UPLOAD_BYTES)
+                        ) {
+                            longUploadAnnounced = true
+                            onLongUpload()
+                        }
+                        val recordingSlot = acquireSlot(appContext, RateLimiter.Bucket.RECORDING, runStartedAt)
+                        if (recordingSlot > 0L) {
+                            // The metadata, if it went up just now, is already
+                            // recorded: the row goes back to owing only audio.
+                            NativeCallOutboxDao.releaseClaim(appContext, call.idempotencyKey)
+                            rateLimitedUntil = maxOf(rateLimitedUntil, recordingSlot)
+                            break
+                        }
+                        Log.i(TAG, "[RECORDING_UPLOAD_START] ServerId: $serverId, MediaStoreId: $mediaStoreId, Bytes: $sizeBytes")
+                        // A long upload that 401s at the end is re-sent from
+                        // byte zero; refreshing early is far cheaper here than
+                        // anywhere else.
+                        currentToken = TokenRefresher.ensureFresh(appContext, normalizedBaseUrl, currentToken!!)
                         val recResult = executeStreamingRecordingUpload(
                             context = appContext,
                             endpoint = "$normalizedBaseUrl/calls/$serverId/recording",
@@ -437,10 +598,28 @@ object SyncCoordinator {
                             currentToken = recResult.newToken
                         }
 
-                        if (recResult.isSuccess) {
+                        if (recResult.isSuccess || recResult.errorCode == "RECORDING_ALREADY_EXISTS") {
+                            // RECORDING_ALREADY_EXISTS: the server holds audio
+                            // for this call already. Filing it as "absent" said
+                            // the call had no recording when it does.
                             recordingSuccess = true
                             NativeCallOutboxDao.markRecordingUploaded(appContext, call.idempotencyKey)
-                            Log.i(TAG, "[RECORDING_UPLOAD_SUCCESS] ServerId: $serverId")
+                            Log.i(TAG, "[RECORDING_UPLOAD_SUCCESS] ServerId: $serverId (${recResult.errorCode})")
+                        } else if (recResult.errorCode == "RATE_LIMIT_EXCEEDED") {
+                            RateLimiter.onRateLimited(appContext, RateLimiter.Bucket.RECORDING, recResult.retryAfterSeconds)
+                            NativeCallOutboxDao.releaseClaim(appContext, call.idempotencyKey)
+                            rateLimitedUntil = maxOf(
+                                rateLimitedUntil,
+                                RateLimiter.cooldownUntil(appContext, RateLimiter.Bucket.RECORDING),
+                            )
+                            break
+                        } else if (recResult.errorCode == "CALL_NOT_FOUND") {
+                            // §9: the server has no such call any more. Re-post
+                            // the metadata under the same key (an upsert); the
+                            // audio follows under the id it returns.
+                            NativeCallOutboxDao.requeueMetadata(appContext, call.idempotencyKey, 30L)
+                            requeuedForMetadata = true
+                            Log.w(TAG, "[RECORDING_CALL_NOT_FOUND] $serverId unknown to the server; metadata re-queued.")
                         } else {
                             recordingSuccess = false
                             errorCode = recResult.errorCode
@@ -465,7 +644,10 @@ object SyncCoordinator {
                 // -------------------------------------------------------------
                 if (metadataSuccess) consecutiveNetworkFailures = 0
 
-                if (metadataSuccess && (recordingSuccess || !isRetryable)) {
+                if (requeuedForMetadata) {
+                    // Already back in the queue on its own short delay.
+                    stoppedEarly = true
+                } else if (metadataSuccess && (recordingSuccess || !isRetryable)) {
                     // `sync_state` tracks the CALL, not its audio. Once the
                     // server has the metadata that fact is permanent, so a
                     // recording that can never be delivered still leaves the
@@ -488,8 +670,7 @@ object SyncCoordinator {
                     if (isRetryable) {
                         // A server-supplied Retry-After wins over our own
                         // backoff — §9 requires it be honoured on a 429.
-                        val delaySeconds = retryAfterSeconds
-                            ?: (1L shl (call.attemptCount + 1).coerceIn(1, 16)).coerceIn(2L, 600L)
+                        val delaySeconds = retryDelaySeconds(errorCode, retryAfterSeconds, call.attemptCount)
                         NativeCallOutboxDao.markRetryPending(appContext, call.idempotencyKey, errorCode, call.attemptCount, delaySeconds)
                         Log.i(TAG, "[SYNC_RETRY] Scheduled retry for ${call.idempotencyKey} in ${delaySeconds}s (Error: $errorCode)")
 
@@ -506,17 +687,17 @@ object SyncCoordinator {
                             // run stops. Walking the rest of the backlog would
                             // produce the same failure once per call.
                             Log.i(TAG, "Halting run: $errorCode blocks every remaining row; queue preserved.")
-                            IngestStore.recordSyncOutcome(
-                                appContext,
-                                blockedStatusFor(errorCode),
-                                uploadedCount,
-                                lastErrorDetail ?: errorCode,
-                            )
+                            haltStatus = blockedStatusFor(errorCode)
+                            blocked = needsIntervention(errorCode)
+                            lastErrorDetail = lastErrorDetail ?: errorCode
                             stoppedEarly = true
                             break
                         }
                     } else {
-                        NativeCallOutboxDao.markFailed(appContext, call.idempotencyKey, errorCode, call.attemptCount)
+                        NativeCallOutboxDao.markFailed(
+                            appContext, call.idempotencyKey, errorCode, call.attemptCount,
+                            permanent = serverRefusedForGood || errorCode in PERMANENT_RECORD_CODES,
+                        )
                         Log.i(TAG, "[SYNC_FAILURE] Permanent failure for ${call.idempotencyKey} (Code: $errorCode)")
 
                         if (isFatal(errorCode)) {
@@ -530,12 +711,9 @@ object SyncCoordinator {
                             // they halt the run from the retryable side, with
                             // the rows preserved rather than marked FAILED.
                             Log.w(TAG, "Halting outbox processing: $errorCode is fatal for this device.")
-                            IngestStore.recordSyncOutcome(
-                                appContext,
-                                blockedStatusFor(errorCode),
-                                uploadedCount,
-                                lastErrorDetail ?: errorCode,
-                            )
+                            haltStatus = blockedStatusFor(errorCode)
+                            blocked = true
+                            lastErrorDetail = lastErrorDetail ?: errorCode
                             stoppedEarly = true
                             break
                         }
@@ -543,49 +721,36 @@ object SyncCoordinator {
                 }
             }
 
-            lastStatus = if (failedCount == 0) "OK" else "PARTIAL"
+            lastStatus = haltStatus
+                ?: if (rateLimitedUntil > 0L) STATUS_RATE_LIMITED
+                else if (failedCount == 0) "OK" else "PARTIAL"
             IngestStore.recordSyncOutcome(
                 appContext,
                 lastStatus,
                 uploadedCount,
-                if (failedCount == 0) null else lastErrorDetail,
+                if (lastStatus == "OK") null else lastErrorDetail,
             )
             Log.i(
                 TAG,
                 "[SYNC_STOP] Uploaded: $uploadedCount, Failed: $failedCount, " +
-                    "stoppedEarly: $stoppedEarly"
+                    "stoppedEarly: $stoppedEarly, blocked: $blocked"
             )
 
             // A run that stopped on its budget or on repeated network errors
             // has work left; that is reported through SyncOutcome.hasMoreWork.
+            // A blocked run does not: retrying cannot fix what stopped it.
             //
-            // Deliberately NOT re-enqueued here: this method usually runs
-            // inside CallSyncWorker, which IS the unique work named
-            // WORK_SYNC_NOW, and BackgroundScheduler.enqueueSync uses
-            // ExistingWorkPolicy.REPLACE — so enqueuing from here would cancel
-            // the very run doing the enqueuing. The worker returns
-            // Result.retry() instead, and WorkManager reschedules with backoff.
-
-            // Finalize progress notification
-            notificationManager?.let { nm ->
-                try {
-                    if (uploadedCount > 0) {
-                        val doneNotif = NotificationCompat.Builder(appContext, CHANNEL_ID)
-                            .setSmallIcon(android.R.drawable.stat_sys_upload_done)
-                            .setContentTitle("Sync complete")
-                            .setContentText("$uploadedCount calls synced successfully")
-                            .setOngoing(false)
-                            .setAutoCancel(true)
-                            .setPriority(NotificationCompat.PRIORITY_LOW)
-                            .build()
-                        nm.notify(NOTIFY_ID, doneNotif)
-                    } else {
-                        nm.cancel(NOTIFY_ID)
-                    }
-                } catch (_: Exception) {}
-            }
-
-            return@withContext SyncOutcome(lastStatus, uploadedCount, failedCount, stoppedEarly)
+            // Deliberately NOT re-enqueued here: this method runs inside
+            // CallSyncWorker, which holds one of the sync unique names, so
+            // enqueuing from here would be dropped by its KEEP policy. The
+            // worker returns Result.retry() instead, and WorkManager
+            // reschedules with backoff.
+            return@withContext SyncOutcome(
+                lastStatus, uploadedCount, failedCount,
+                hasMoreWork = stoppedEarly && !blocked && rateLimitedUntil == 0L,
+                blocked = blocked,
+                rateLimitedUntilMillis = if (blocked) 0L else rateLimitedUntil,
+            )
         } finally {
             isRunning.set(false)
         }
@@ -596,8 +761,10 @@ object SyncCoordinator {
         val failed: Int = 0,
         val newToken: String? = null,
         val lastError: String? = null,
-        /** The whole handset is blocked; stop the run. */
-        val fatal: Boolean = false,
+        /** Non-null when a whole request failed: the run stops, for this reason. */
+        val haltCode: String? = null,
+        /** Epoch millis the metadata counter reopens; 0 when it never closed. */
+        val rateLimitedUntil: Long = 0L,
     )
 
     /**
@@ -610,7 +777,7 @@ object SyncCoordinator {
      * picked up by the per-row loop for their recording, which is why this
      * never touches `recording_upload_status`.
      */
-    private fun drainMetadataBatches(
+    private suspend fun drainMetadataBatches(
         context: Context,
         baseUrl: String,
         deviceUuid: String,
@@ -618,7 +785,6 @@ object SyncCoordinator {
         policy: SyncPolicyStore.Policy,
         token: String,
         runStartedAt: Long,
-        notificationManager: NotificationManager?,
     ): BatchDrainOutcome {
         var activeToken = token
         var refreshedToken: String? = null
@@ -635,12 +801,16 @@ object SyncCoordinator {
             val batch = NativeCallOutboxDao.claimMetadataBatch(context, policy.batchSize)
             if (batch.isEmpty()) break
 
+            val slot = acquireSlot(context, RateLimiter.Bucket.SYNC_CALLS, runStartedAt)
+            if (slot > 0L) {
+                NativeCallOutboxDao.inTransaction(context) {
+                    for (call in batch) NativeCallOutboxDao.releaseClaim(context, call.idempotencyKey)
+                }
+                Log.i(TAG, "[BATCH_RATE_LIMIT] Metadata counter full; resuming at $slot.")
+                return BatchDrainOutcome(uploaded, failed, refreshedToken, lastError, null, slot)
+            }
+
             Log.i(TAG, "[BATCH_START] Posting ${batch.size} call(s) in one request.")
-            showNotification(
-                context,
-                notificationManager,
-                "Sending ${batch.size} " + (if (batch.size == 1) "call" else "calls") + "...",
-            )
 
             val nowStr = isoFormat.format(Date())
             val callsArray = JSONArray()
@@ -671,8 +841,12 @@ object SyncCoordinator {
                         applyTimings(this, call, isoFormat)
                         put("duration_seconds", call.durationSeconds)
                         put("has_recording", call.hasRecording)
-                        put("sim_slot", call.simSlot)
-                        put("client_created_at", nowStr)
+                        call.simSlot?.let { put("sim_slot", it) }
+                        // When the call was captured, not when it was sent.
+                        put(
+                            "client_created_at",
+                            isoFormat.format(Date(call.clientCreatedAtMillis ?: System.currentTimeMillis())),
+                        )
                         applyMetadata(this, call)
                     },
                 )
@@ -696,91 +870,156 @@ object SyncCoordinator {
                 refreshedToken = result.newToken
             }
 
+            // 429: nothing in this batch was judged. Hand every row back
+            // uncounted and stop sending metadata until the window reopens.
+            if (result.transportFailed && result.errorCode == "RATE_LIMIT_EXCEEDED") {
+                RateLimiter.onRateLimited(context, RateLimiter.Bucket.SYNC_CALLS, result.retryAfterSeconds)
+                NativeCallOutboxDao.inTransaction(context) {
+                    for (call in batch) NativeCallOutboxDao.releaseClaim(context, call.idempotencyKey)
+                }
+                return BatchDrainOutcome(
+                    uploaded, failed, refreshedToken, lastError, null,
+                    RateLimiter.cooldownUntil(context, RateLimiter.Bucket.SYNC_CALLS),
+                )
+            }
+
+            // One call, refused whole as invalid: that IS the per-call verdict.
+            // It used to go on a ten-minute backoff and halt the run, so a
+            // single bad row was re-sent to the same 422 for ever.
+            if (result.transportFailed && !result.isRetryable && batch.size == 1 &&
+                !isFatal(result.errorCode) && result.errorCode !in HALT_BUT_RETRYABLE_CODES
+            ) {
+                val call = batch.single()
+                NativeCallOutboxDao.markFailed(
+                    context, call.idempotencyKey, result.errorCode, call.attemptCount,
+                    permanent = result.errorCode in PERMANENT_RECORD_CODES,
+                )
+                failed++
+                lastError = result.errorMessage ?: result.errorCode
+                Log.w(TAG, "[BATCH_REJECTED_SINGLE] ${call.idempotencyKey}: ${result.errorCode}")
+                continue
+            }
+
+            // The whole request refused as invalid — one malformed call fails
+            // every call posted with it. Re-queuing the batch as a batch sent
+            // the same fifty to the same refusal every few minutes for ever,
+            // and every call synced alongside joined them. Released at once to
+            // the per-row loop below, which posts them one at a time: the bad
+            // one fails on its own (§5.3) and the rest go through.
+            if (result.transportFailed && !result.isRetryable && batch.size > 1 &&
+                !isFatal(result.errorCode) && result.errorCode !in HALT_BUT_RETRYABLE_CODES
+            ) {
+                NativeCallOutboxDao.inTransaction(context) {
+                    for (call in batch) {
+                        NativeCallOutboxDao.markRetryPending(
+                            context, call.idempotencyKey, result.errorCode, call.attemptCount, 0L,
+                        )
+                    }
+                }
+                lastError = result.errorMessage ?: result.errorCode
+                Log.w(
+                    TAG,
+                    "[BATCH_REJECTED] ${result.errorCode}; ${batch.size} call(s) handed to the " +
+                        "one-at-a-time loop to isolate the invalid one.",
+                )
+                break
+            }
+
             if (result.transportFailed) {
                 // The request never landed, so nothing in this batch was
                 // decided. Every row goes back on its own backoff rather than
-                // being judged by a response that does not exist.
-                for (call in batch) {
-                    NativeCallOutboxDao.markRetryPending(
-                        context,
-                        call.idempotencyKey,
-                        result.errorCode,
-                        call.attemptCount,
-                        backoffSeconds(call.attemptCount),
-                    )
+                // being judged by a response that does not exist — the
+                // server's Retry-After when it sent one (§9 requires it be
+                // honoured), our own backoff otherwise.
+                NativeCallOutboxDao.inTransaction(context) {
+                    for (call in batch) {
+                        NativeCallOutboxDao.markRetryPending(
+                            context,
+                            call.idempotencyKey,
+                            result.errorCode,
+                            call.attemptCount,
+                            retryDelaySeconds(result.errorCode, result.retryAfterSeconds, call.attemptCount),
+                        )
+                    }
                 }
                 failed += batch.size
                 lastError = result.errorMessage ?: result.errorCode
                 // "Stop the run", not "fail the rows" — every row in this batch
-                // was re-queued above. Tested against the halt set rather than
-                // AUTH_EXPIRED alone so a NO_SESSION or an exhausted refresh
-                // stops here too instead of grinding through the whole backlog
-                // one doomed request at a time.
-                val fatal = isFatal(result.errorCode) ||
-                    result.errorCode in HALT_BUT_RETRYABLE_CODES
+                // was re-queued above.
+                //
+                // Always a halt, whatever the code. A whole request refused —
+                // no signal, a 502 page from a proxy, a dead session — says the
+                // server is unreachable or unwilling, and the per-row loop
+                // would otherwise go on to hit it once for every recording
+                // still owed. Its own three-strikes cutoff never saw this
+                // failure, so it started counting from zero.
                 Log.w(TAG, "[BATCH_TRANSPORT_FAIL] ${result.errorCode}; ${batch.size} re-queued.")
-                return BatchDrainOutcome(uploaded, failed, refreshedToken, lastError, fatal)
+                return BatchDrainOutcome(uploaded, failed, refreshedToken, lastError, result.errorCode)
             }
 
             val byKey = batch.associateBy { it.idempotencyKey }
             val decided = mutableSetOf<String>()
 
-            // `successful` and `duplicates` are both successes (5.3): a repeat
-            // means the server already holds the record, which is precisely
-            // what the idempotency key exists to guarantee.
-            for (entry in result.accepted) {
-                val call = byKey[entry.idempotencyKey] ?: continue
-                decided += entry.idempotencyKey
-                val serverId = entry.callId
-                if (serverId.isNullOrBlank()) {
-                    // No id means no recording URL and nothing to reference
-                    // later. Re-queue rather than invent one.
-                    NativeCallOutboxDao.markRetryPending(
-                        context, call.idempotencyKey, "MISSING_SERVER_CALL_ID",
-                        call.attemptCount, 60L,
+            // All fifty verdicts in one commit rather than one each.
+            NativeCallOutboxDao.inTransaction(context) {
+                // `successful` and `duplicates` are both successes (5.3): a
+                // repeat means the server already holds the record, which is
+                // precisely what the idempotency key exists to guarantee.
+                for (entry in result.accepted) {
+                    val call = byKey[entry.idempotencyKey] ?: continue
+                    decided += entry.idempotencyKey
+                    val serverId = entry.callId
+                    if (serverId.isNullOrBlank()) {
+                        // No id means no recording URL and nothing to reference
+                        // later. Re-queue rather than invent one.
+                        NativeCallOutboxDao.markRetryPending(
+                            context, call.idempotencyKey, "MISSING_SERVER_CALL_ID",
+                            call.attemptCount, 60L,
+                        )
+                        failed++
+                        continue
+                    }
+                    // markUploaded writes server_call_id and revision itself;
+                    // a separate markServerCallId first was a second UPDATE of
+                    // the same row for nothing.
+                    NativeCallOutboxDao.markUploaded(
+                        context, call.idempotencyKey, serverId, entry.revision,
                     )
+                    uploaded++
+                }
+
+                for (entry in result.rejected) {
+                    val call = byKey[entry.idempotencyKey] ?: continue
+                    decided += entry.idempotencyKey
                     failed++
-                    continue
+                    lastError = entry.message ?: entry.code
+                    if (entry.retryable) {
+                        NativeCallOutboxDao.markRetryPending(
+                            context, call.idempotencyKey, entry.code,
+                            call.attemptCount, backoffSeconds(call.attemptCount),
+                        )
+                    } else {
+                        // 5.3: permanently rejected. Retrying forever will never
+                        // succeed and burns the battery and the data allowance.
+                        NativeCallOutboxDao.markFailed(
+                            context, call.idempotencyKey, entry.code, call.attemptCount,
+                            permanent = true,
+                        )
+                    }
                 }
-                NativeCallOutboxDao.markServerCallId(
-                    context, call.idempotencyKey, serverId, entry.revision,
-                )
-                NativeCallOutboxDao.markUploaded(
-                    context, call.idempotencyKey, serverId, entry.revision,
-                )
-                uploaded++
-            }
 
-            for (entry in result.rejected) {
-                val call = byKey[entry.idempotencyKey] ?: continue
-                decided += entry.idempotencyKey
-                failed++
-                lastError = entry.message ?: entry.code
-                if (entry.retryable) {
+                // A row the server said nothing about. Not an error, but leaving
+                // it UPLOADING strands it until the next crash-recovery pass.
+                for (call in batch) {
+                    if (call.idempotencyKey in decided) continue
+                    Log.w(
+                        TAG,
+                        "[BATCH_UNANSWERED] ${call.idempotencyKey} absent from the response; re-queued.",
+                    )
                     NativeCallOutboxDao.markRetryPending(
-                        context, call.idempotencyKey, entry.code,
-                        call.attemptCount, backoffSeconds(call.attemptCount),
-                    )
-                } else {
-                    // 5.3: permanently rejected. Retrying forever will never
-                    // succeed and burns the battery and the data allowance.
-                    NativeCallOutboxDao.markFailed(
-                        context, call.idempotencyKey, entry.code, call.attemptCount,
+                        context, call.idempotencyKey, "NO_RESULT_FOR_KEY", call.attemptCount, 60L,
                     )
                 }
-            }
-
-            // A row the server said nothing about. Not an error, but leaving it
-            // UPLOADING strands it until the next crash-recovery pass.
-            for (call in batch) {
-                if (call.idempotencyKey in decided) continue
-                Log.w(
-                    TAG,
-                    "[BATCH_UNANSWERED] ${call.idempotencyKey} absent from the response; re-queued.",
-                )
-                NativeCallOutboxDao.markRetryPending(
-                    context, call.idempotencyKey, "NO_RESULT_FOR_KEY", call.attemptCount, 60L,
-                )
             }
 
             Log.i(
@@ -790,51 +1029,35 @@ object SyncCoordinator {
             )
         }
 
-        return BatchDrainOutcome(uploaded, failed, refreshedToken, lastError, false)
+        return BatchDrainOutcome(uploaded, failed, refreshedToken, lastError, null)
     }
 
     /**
-     * Whether audio may go out over the current connection.
+     * What is known about a recording before a byte of it is sent.
      *
-     * WorkManager only guarantees CONNECTED for the sync job, so the metered
-     * check happens here rather than in the job constraint -- the same run also
-     * carries metadata, which should not be held back for a Wi-Fi network.
+     * [rejection] is why the server would refuse the file, or null when it is
+     * worth uploading. [sizeBytes] is -1 when MediaStore would not say.
      */
-    private fun recordingUploadsAllowedNow(context: Context): Boolean {
-        if (SyncPolicyStore.recordingsAllowedOnMeteredNetworks(context)) return true
-        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE)
-            as? android.net.ConnectivityManager ?: return true
-        return try {
-            val caps = cm.getNetworkCapabilities(cm.activeNetwork)
-            // Unknown means do not block: a handset whose capabilities cannot be
-            // read should still sync, and the server enforces its own limits.
-            caps == null || caps.hasCapability(
-                android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED,
-            )
-        } catch (e: Exception) {
-            Log.w(TAG, "Could not read network metering: ${e.message}")
-            true
-        }
-    }
+    private data class RecordingPrecheck(val rejection: String?, val sizeBytes: Long)
 
     /**
-     * Why the server would refuse this file, decided before a byte is sent.
+     * Reads the file's size and name, and decides whether to send it.
      *
-     * Null when it is worth uploading. Both checks mirror limits the server
-     * publishes in `policy` and this app previously ignored: a 200 MB cap
-     * (6.4) and an extension allow-list (6.3). Without them a long recording
-     * was streamed in full to earn a 413, on the user data allowance, and an
-     * exotic container earned a 415 the same way.
+     * Both checks mirror limits the server publishes in `policy` and this app
+     * previously ignored: a 200 MB cap (6.4) and an extension allow-list
+     * (6.3). Without them an oversized file was streamed in full to earn a
+     * 413, and an exotic container earned a 415 the same way. 200 MB is far
+     * beyond any call: an hour of 128 kbps AAC is about 60 MB.
      */
-    private fun rejectRecordingLocally(
+    private fun precheckRecording(
         context: Context,
         policy: SyncPolicyStore.Policy,
         uriString: String,
         mediaStoreId: Long?,
-    ): String? {
+    ): RecordingPrecheck {
+        var sizeBytes = -1L
         return try {
             val uri = Uri.parse(uriString)
-            var sizeBytes = -1L
             var displayName: String? = null
 
             context.contentResolver.query(
@@ -852,7 +1075,7 @@ object SyncCoordinator {
             }
 
             if (sizeBytes > policy.maxRecordingSizeBytes) {
-                return "PAYLOAD_TOO_LARGE"
+                return RecordingPrecheck("PAYLOAD_TOO_LARGE", sizeBytes)
             }
 
             val extension = displayName
@@ -865,13 +1088,13 @@ object SyncCoordinator {
             if (extension != null &&
                 extension !in policy.allowedRecordingExtensions
             ) {
-                return "UNSUPPORTED_MEDIA_TYPE"
+                return RecordingPrecheck("UNSUPPORTED_MEDIA_TYPE", sizeBytes)
             }
 
-            null
+            RecordingPrecheck(null, sizeBytes)
         } catch (e: Exception) {
             Log.w(TAG, "Could not pre-check recording $mediaStoreId: ${e.message}")
-            null
+            RecordingPrecheck(null, sizeBytes)
         }
     }
 
@@ -900,10 +1123,16 @@ object SyncCoordinator {
         call: CallRecord,
         isoFormat: SimpleDateFormat,
     ) {
-        call.answeredAtMillis?.let {
+        // Never earlier than started_at: the server refuses that as a
+        // validation error, and inside `POST /sync/calls` one such call fails
+        // the WHOLE batch. The recording matcher accepts a file stamped up to
+        // 15 s before the call-log start, and an open-stamped recording's
+        // DATE_ADDED then lands before it. A time that cannot be right is
+        // dropped; the server falls back to the measured duration.
+        call.answeredAtMillis?.takeIf { it >= call.startedAtMillis }?.let {
             json.put("answered_at", isoFormat.format(Date(it)))
         }
-        call.endedAtMillis?.let {
+        call.endedAtMillis?.takeIf { it >= call.startedAtMillis }?.let {
             json.put("ended_at", isoFormat.format(Date(it)))
         }
     }
@@ -927,8 +1156,53 @@ object SyncCoordinator {
         }
     }
 
-    private fun backoffSeconds(attemptCount: Int): Long =
-        (1L shl (attemptCount + 1).coerceIn(1, 16)).coerceIn(2L, 600L)
+    /**
+     * §10.2: `min(600, 2^attempt) * random(0.5, 1.5)`, so a fleet of phones
+     * that failed together does not retry together. Capped at ten minutes.
+     * After [ATTEMPTS_BEFORE_HOLD] the row waits for the hourly safety net
+     * instead of hammering on its own schedule.
+     */
+    private fun backoffSeconds(attemptCount: Int): Long {
+        if (attemptCount >= ATTEMPTS_BEFORE_HOLD) return HOLD_SECONDS
+        val base = minOf(600L, 1L shl (attemptCount + 1).coerceIn(1, 10))
+        return (base * (0.5 + Math.random())).toLong().coerceIn(2L, 600L)
+    }
+
+    /** The server's `Retry-After` when it sent one, else [backoffSeconds]. */
+    private fun retryDelaySeconds(errorCode: String?, retryAfterSeconds: Long?, attemptCount: Int): Long {
+        val delay = retryAfterSeconds ?: backoffSeconds(attemptCount)
+        return if (errorCode == "INSUFFICIENT_STORAGE") {
+            maxOf(delay, INSUFFICIENT_STORAGE_MIN_SECONDS)
+        } else {
+            delay
+        }
+    }
+
+    /**
+     * Takes a [RateLimiter] slot in [bucket], waiting in place up to
+     * [MAX_INLINE_RATE_WAIT_MILLIS] if that still fits the run's budget.
+     *
+     * Returns 0 when the request may go now, otherwise the epoch millis at
+     * which the bucket reopens: the run stops and the next is booked for then.
+     */
+    private suspend fun acquireSlot(
+        context: Context,
+        bucket: RateLimiter.Bucket,
+        runStartedAt: Long,
+    ): Long {
+        while (true) {
+            val wait = RateLimiter.waitMillis(context, bucket)
+            if (wait <= 0L) {
+                RateLimiter.record(bucket)
+                return 0L
+            }
+            val now = System.currentTimeMillis()
+            if (wait > MAX_INLINE_RATE_WAIT_MILLIS || now - runStartedAt + wait > RUN_BUDGET_MILLIS) {
+                return now + wait
+            }
+            delay(wait)
+        }
+    }
 
     /**
      * Executes metadata upload with automatic token refresh on 401.
@@ -956,6 +1230,7 @@ object SyncCoordinator {
                     setRequestProperty("Content-Type", "application/json; charset=UTF-8")
                     setRequestProperty("Accept", "application/json")
                     setRequestProperty("Authorization", "Bearer $activeToken")
+                    setRequestProperty("X-Request-ID", UUID.randomUUID().toString())
                 }
 
                 OutputStreamWriter(conn.outputStream, "UTF-8").use { writer ->
@@ -1056,7 +1331,8 @@ object SyncCoordinator {
                     Log.w(
                         TAG,
                         "[METADATA_HTTP_$statusCode] ${serverCode ?: "no error.code"} " +
-                            (serverDetail ?: "<empty body>"),
+                            (serverDetail ?: "<empty body>") +
+                            " request_id=${requestIdOf(conn, responseBody)}",
                     )
                     return MetadataUploadResult(
                         isSuccess = false,
@@ -1120,25 +1396,72 @@ object SyncCoordinator {
         // upload, non-retryably, on every attempt — so the recording is lost
         // rather than merely delayed. Reading the stream twice costs one extra
         // pass over the file and is the only answer that can succeed.
-        val checksum = storedChecksum
-            ?: (if (mediaStoreId != null) {
-                RecordingScanner.sha256(context, mediaStoreId)?.get("checksum") as? String
-            } else null)
-            ?: digestUri(context, recordingUri)
-            ?: return RecordingUploadResult(
+        //
+        // This is the normal path now — capture no longer hashes — so a media
+        // permission withdrawn since capture must not escape as an exception:
+        // it would abort the whole run and leave the row stuck in UPLOADING.
+        // Retryable, because the grant can come back and the file is fine.
+        val checksum = try {
+            storedChecksum
+                ?: (if (mediaStoreId != null) {
+                    RecordingScanner.sha256(context, mediaStoreId)?.get("checksum") as? String
+                } else null)
+                ?: digestUri(context, recordingUri)
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Recording $mediaStoreId unreadable without media permission.")
+            return RecordingUploadResult(
                 isSuccess = false,
-                errorCode = "CHECKSUM_UNAVAILABLE",
+                errorCode = "RECORDING_PERMISSION_DENIED",
+                isRetryable = true,
+                newToken = null,
+            )
+        } catch (e: FileNotFoundException) {
+            // Deleted since it was matched. Final for this file.
+            return RecordingUploadResult(
+                isSuccess = false,
+                errorCode = "FILE_NOT_FOUND",
                 isRetryable = false,
                 newToken = null,
             )
+        } catch (e: IOException) {
+            // Any other read failure. It used to escape and abort the whole
+            // run, leaving the row stuck in UPLOADING until the next one.
+            Log.w(TAG, "Recording $mediaStoreId could not be read: ${e.message}")
+            return RecordingUploadResult(
+                isSuccess = false,
+                errorCode = "RECORDING_READ_ERROR",
+                isRetryable = true,
+                newToken = null,
+            )
+        } ?: return RecordingUploadResult(
+            isSuccess = false,
+            errorCode = "CHECKSUM_UNAVAILABLE",
+            isRetryable = false,
+            newToken = null,
+        )
 
         for (attempt in 0..1) {
             var conn: HttpURLConnection? = null
             var inputStream: InputStream? = null
 
             try {
-                // Verify recording can be opened
-                inputStream = context.contentResolver.openInputStream(recordingUri)
+                // Verify recording can be opened. A file deleted since it was
+                // matched throws here; that is final, not a network error. With
+                // a stored checksum nothing earlier touched the file, so this
+                // used to come out of the catch-all below as NETWORK_ERROR and
+                // be retried for ever.
+                inputStream = try {
+                    context.contentResolver.openInputStream(recordingUri)
+                } catch (e: FileNotFoundException) {
+                    null
+                } catch (e: SecurityException) {
+                    return RecordingUploadResult(
+                        isSuccess = false,
+                        errorCode = "RECORDING_PERMISSION_DENIED",
+                        isRetryable = true,
+                        newToken = refreshedNewToken,
+                    )
+                }
                 if (inputStream == null) {
                     Log.w(TAG, "Cannot open recording input stream for URI: $recordingUri")
                     return RecordingUploadResult(
@@ -1156,6 +1479,10 @@ object SyncCoordinator {
                 val url = URL(endpoint)
                 conn = (url.openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"
+                    // Stall timeouts, not a deadline: neither bounds how long
+                    // the whole body may take, so an hour-long call's file can
+                    // trickle up over a slow mobile link for as long as bytes
+                    // keep moving. The server's proxy idles out at 300 s.
                     connectTimeout = 30000
                     readTimeout = 60000
                     doOutput = true
@@ -1166,6 +1493,7 @@ object SyncCoordinator {
                     setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
                     setRequestProperty("Authorization", "Bearer $activeToken")
                     setRequestProperty("X-Checksum-SHA256", checksum)
+                    setRequestProperty("X-Request-ID", UUID.randomUUID().toString())
                 }
 
                 // Resolve dynamic display name and mime type from MediaStore if available
@@ -1193,7 +1521,7 @@ object SyncCoordinator {
                     // 1. Write file part header
                     val fileHeader = buildString {
                         append(twoHyphens).append(boundary).append(lineEnd)
-                        append("Content-Disposition: form-data; name=\"file\"; filename=\"$filename\"").append(lineEnd)
+                        append("Content-Disposition: form-data; name=\"file\"; filename=\"${headerSafe(filename)}\"").append(lineEnd)
                         append("Content-Type: $mimeType").append(lineEnd)
                         append(lineEnd)
                     }
@@ -1262,6 +1590,11 @@ object SyncCoordinator {
                     )
                 } else {
                     val serverCode = parseErrorCode(responseBody)
+                    Log.w(
+                        TAG,
+                        "[RECORDING_HTTP_$statusCode] ${serverCode ?: "no error.code"} " +
+                            "request_id=${requestIdOf(conn, responseBody)}",
+                    )
                     return RecordingUploadResult(
                         isSuccess = false,
                         errorCode = serverCode ?: "HTTP_$statusCode",
@@ -1314,6 +1647,29 @@ object SyncCoordinator {
             Log.w(TAG, "Could not digest recording at $uri: ${e.message}")
             null
         }
+    }
+
+    /**
+     * An OEM recorder's display name made safe for a quoted header value: a
+     * `"` or a line break in it would end the part header early and corrupt
+     * the whole multipart body. The server uses the name for display only.
+     */
+    private fun headerSafe(filename: String): String =
+        filename.replace("\"", "'").replace(Regex("[\\r\\n]"), " ")
+
+    /**
+     * The server's id for a failed request, to quote against its logs (§1):
+     * `meta.request_id` from the body, else the echoed `X-Request-ID`.
+     */
+    private fun requestIdOf(conn: HttpURLConnection?, body: String?): String? {
+        val fromBody = try {
+            body?.takeIf { it.isNotBlank() }?.let {
+                JSONObject(it).optJSONObject("meta")?.optString("request_id")?.takeIf { id -> id.isNotBlank() }
+            }
+        } catch (_: Exception) {
+            null
+        }
+        return fromBody ?: conn?.getHeaderField("X-Request-ID")
     }
 
     private fun writeFormField(output: OutputStream, boundary: String, name: String, value: String) {
@@ -1416,7 +1772,8 @@ object SyncCoordinator {
         "AUTH_REFRESH_FAILED",
         "DEVICE_NOT_REGISTERED",
         "DEVICE_INACTIVE",
-        "RATE_LIMIT_EXCEEDED",
+        // RATE_LIMIT_EXCEEDED is not here: it is handled before these, per
+        // counter, by handing rows back uncounted (see RateLimiter).
         "INSUFFICIENT_STORAGE",
         "DATABASE_UNAVAILABLE",
         "SERVICE_UNAVAILABLE",
@@ -1449,6 +1806,7 @@ object SyncCoordinator {
         "CORRUPT_UPLOAD",
         "RECORDING_ALREADY_EXISTS",
         "RECORDING_NOT_FOUND",
+        "FILE_NOT_FOUND",
     )
 
     /**
@@ -1466,6 +1824,22 @@ object SyncCoordinator {
 
     /** True when the code names a condition the whole run must stop for. */
     fun isFatal(errorCode: String?): Boolean = errorCode in FATAL_CODES
+
+    /**
+     * Halts that time alone will not clear: the device is revoked or
+     * deactivated, the session is gone, or the handset must register first.
+     * Sign-in and app start re-trigger a sync once someone has acted, so the
+     * worker reports success rather than retrying into the same refusal.
+     *
+     * The rest of [HALT_BUT_RETRYABLE_CODES] — rate limiting, an unavailable
+     * server, a refresh that failed on the network — are transient, and the
+     * worker does come back for them.
+     */
+    private fun needsIntervention(errorCode: String?): Boolean =
+        isFatal(errorCode) ||
+            errorCode in AUTH_HALT_CODES ||
+            errorCode == "DEVICE_NOT_REGISTERED" ||
+            errorCode == "DEVICE_INACTIVE"
 
     /**
      * Pulls `error.code` out of the standard envelope (§1).
@@ -1537,43 +1911,23 @@ object SyncCoordinator {
         return phone.substring(0, 2) + "*****" + phone.substring(phone.length - 2)
     }
 
-    private fun ensureNotificationChannel(context: Context, notificationManager: NotificationManager?) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && notificationManager != null) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Sync Progress",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Shows live call uploading status."
-                setShowBadge(false)
-            }
-            notificationManager.createNotificationChannel(channel)
-        }
-    }
-
-    private fun showNotification(context: Context, notificationManager: NotificationManager?, statusText: String) {
-        notificationManager?.let { nm ->
-            try {
-                val notif = NotificationCompat.Builder(context, CHANNEL_ID)
-                    .setSmallIcon(android.R.drawable.stat_sys_upload)
-                    .setContentTitle("Syncing call")
-                    .setContentText(statusText)
-                    .setProgress(0, 0, true)
-                    .setOngoing(true)
-                    .setOnlyAlertOnce(true)
-                    .setPriority(NotificationCompat.PRIORITY_LOW)
-                    .build()
-                nm.notify(NOTIFY_ID, notif)
-            } catch (_: Exception) {}
-        }
-    }
-
     data class SyncOutcome(
         val status: String,
         val uploadedCount: Int,
         val failedCount: Int,
         /** The queue was not drained: the run hit its budget or gave up early. */
         val hasMoreWork: Boolean = false,
+        /**
+         * The run stopped on something only a person can fix — a revoked
+         * device, a dead session, an unregistered handset. Not "more work":
+         * retrying before then repeats the same refusal.
+         */
+        val blocked: Boolean = false,
+        /**
+         * Non-zero when the run stopped on the server's rate limit: the epoch
+         * millis its window reopens. The worker books the next run for then.
+         */
+        val rateLimitedUntilMillis: Long = 0L,
     )
 
     /**

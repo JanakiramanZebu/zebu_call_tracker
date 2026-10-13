@@ -271,6 +271,9 @@ object CallEnrichment {
             put("match_anchored", signals.isAnchored)
             put("duration_delta_seconds", round(signals.durationDeltaSeconds))
             put("ring_gap_seconds", signals.ringGapSeconds)
+            // Whether the file was read as stamped at hang-up, so its start
+            // (and ring_gap_seconds) came from date_modified minus the audio.
+            put("end_stamped", signals.endStamped)
             put("identity_matched", signals.identityMatched)
             putIfPresent(this, "anchor_delta_seconds", signals.anchorDeltaSeconds)
         }

@@ -1,7 +1,6 @@
 package `in`.mynt.zebu_call_tracker.permissions
 
 import android.content.ActivityNotFoundException
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -15,9 +14,7 @@ import android.provider.Settings
  *
  * This is not a runtime permission and cannot be requested with the normal
  * dialog, but on this fleet it decides whether background ingest happens at
- * all. Stock Doze defers a scheduled job; the OEM layers on top (Samsung's
- * "Sleeping apps", Xiaomi/Oppo/Vivo autostart managers) stop it outright, and
- * they are only reachable through a settings screen.
+ * all: Doze defers a scheduled job for hours unless the app is exempt.
  */
 object BatteryOptimization {
 
@@ -61,34 +58,8 @@ object BatteryOptimization {
         )
     }
 
-    /**
-     * Opens the OEM's own background-restriction screen, where one exists.
-     *
-     * These are undocumented, vary by firmware version and disappear without
-     * notice, so every entry is tried in turn and a total failure falls back to
-     * this app's settings page. [hasVendorSettings] lets the UI avoid offering
-     * a button that would go nowhere.
-     */
-    fun openVendorSettings(context: Context): Boolean {
-        for (intent in vendorIntents()) {
-            if (start(context, intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))) return true
-        }
-        return start(
-            context,
-            Intent(
-                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                Uri.parse("package:${context.packageName}"),
-            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-        )
-    }
-
-    fun hasVendorSettings(context: Context): Boolean =
-        vendorIntents().any { it.resolveActivity(context.packageManager) != null }
-
     fun status(context: Context): Map<String, Any?> = mapOf(
         "ignoringBatteryOptimizations" to isIgnoring(context),
-        "manufacturer" to Build.MANUFACTURER,
-        "hasVendorSettings" to hasVendorSettings(context),
     )
 
     private fun start(context: Context, intent: Intent): Boolean = try {
@@ -103,50 +74,4 @@ object BatteryOptimization {
     } catch (e: SecurityException) {
         false
     }
-
-    /** Known vendor entry points, most specific first. */
-    private fun vendorIntents(): List<Intent> = listOf(
-        // Samsung — "Sleeping apps" / "Never sleeping apps", the one that
-        // matters on the reference SM-M356B.
-        component(
-            "com.samsung.android.lool",
-            "com.samsung.android.sm.ui.battery.BatteryActivity",
-        ),
-        component(
-            "com.samsung.android.lool",
-            "com.samsung.android.sm.battery.ui.BatteryActivity",
-        ),
-        // Xiaomi / Redmi / Poco
-        component(
-            "com.miui.securitycenter",
-            "com.miui.permcenter.autostart.AutoStartManagementActivity",
-        ),
-        // Oppo / Realme
-        component(
-            "com.coloros.safecenter",
-            "com.coloros.safecenter.permission.startup.StartupAppListActivity",
-        ),
-        component(
-            "com.coloros.safecenter",
-            "com.coloros.safecenter.startupapp.StartupAppListActivity",
-        ),
-        // Vivo
-        component(
-            "com.vivo.permissionmanager",
-            "com.vivo.permissionmanager.activity.BgStartUpManagerActivity",
-        ),
-        // Huawei / Honor
-        component(
-            "com.huawei.systemmanager",
-            "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity",
-        ),
-        // OnePlus
-        component(
-            "com.oneplus.security",
-            "com.oneplus.security.chainlaunch.view.ChainLaunchAppListActivity",
-        ),
-    )
-
-    private fun component(pkg: String, cls: String) =
-        Intent().setComponent(ComponentName(pkg, cls))
 }

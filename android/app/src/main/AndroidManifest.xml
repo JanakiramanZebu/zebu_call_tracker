@@ -15,9 +15,11 @@
     <!-- Call state machine: ringing / offhook / idle transitions and, on
          API 30+, the number delivered with the state change. -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
-    <!-- Dual-SIM subscription + carrier attribution (API 26+). Optional: the
-         app degrades to single-SIM behaviour when unavailable. -->
-    <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
+    <!-- READ_PHONE_NUMBERS is deliberately NOT declared. It used to sit here
+         for dual-SIM attribution, but the subscription list that attribution
+         reads needs only READ_PHONE_STATE above; nothing ever read a line
+         number, and the ICCID it might have unlocked is blank to non-carrier
+         apps from API 29. -->
 
     <!-- Call log reconciliation. This is the authoritative source for final
          duration/status; the live state machine only supplies early signal. -->
@@ -39,10 +41,19 @@
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
-    <!-- Foreground service used ONLY while an upload batch or an active
-         recording is in flight — never as an always-on keepalive. -->
+    <!-- Foreground services.
+           - `dataSync`: WorkManager's SystemForegroundService, which runs
+             expedited ingest/sync work as a foreground service below API 31
+             and a long recording upload as a long-running worker on any
+             API; and CallTrackingService below Android 14.
+           - `specialUse`: CallTrackingService from Android 14. It runs all
+             day from boot on every signed-in handset (unless the server's
+             policy sets `keepalive_service` to false), which `dataSync`
+             cannot: Android 15 caps it at six hours a day and forbids
+             starting it from BOOT_COMPLETED. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <!-- Sync/upload status notifications (runtime-requested on API 33+). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -131,18 +142,46 @@
              own, and the service that used to be here was unstartable on every
              supported API level — see PostCallOverlayController's class doc. -->
 
-        <!-- WorkManager Foreground Service for uninterrupted data sync when app is backgrounded or closed -->
+        <!-- WorkManager's own foreground service. Expedited work (the post-call
+             ingest, "send now" syncs) runs inside it below API 31, and a sync
+             promotes itself into it before a long recording upload so
+             WorkManager's ten-minute limit cannot cut the transfer off. Both
+             use the dataSync type declared here. -->
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"
             android:foregroundServiceType="dataSync"
             android:exported="false" />
 
-        <!-- Persistent foreground service to prevent the OS from killing the app process
-             when it is swiped away from the Recent Apps list. -->
+        <!-- The always-on call-tracking service. Runs on every signed-in
+             handset unless the server's sync policy sets `keepalive_service`
+             to false: on Xiaomi, Oppo, Vivo, OnePlus and Honor builds a closed
+             app stops getting the "call ended" broadcast, and calls reached
+             the CRM days late. It complements the call-state receiver, the
+             content-URI triggers and the hourly WorkManager safety net.
+             specialUse from Android 14, dataSync below (see the permissions
+             above); the property states the use, as Android 14 requires. -->
         <service
             android:name=".background.CallTrackingService"
-            android:foregroundServiceType="dataSync"
-            android:exported="false" />
+            android:foregroundServiceType="dataSync|specialUse"
+            android:exported="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Captures the employee's work-call log and dialer recordings after each call and delivers them to the company CRM." />
+        </service>
+
+        <!-- FCM push wake-up (Mobile API Guide §3.3). The server sends a
+             data-only, high-priority SYNC_REQUEST to a phone that has gone
+             quiet or is sitting on unsynced calls; this hands it to
+             PushSyncWorker. Inert in a build without google-services.json:
+             FirebaseApp is never initialised, so nothing is delivered here.
+             No POST_NOTIFICATIONS use: the message shows nothing. -->
+        <service
+            android:name=".push.CallTrackMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
 
         <!-- Reboot and app-update recovery. Both broadcasts are explicit
              wake-ups for a stopped package, so exported="true" is required:
@@ -166,11 +205,32 @@
              receivers stopped being delivered those in Android 7 (API 24), so
              the entry that used to sit here never fired once on any supported
              device. Network recovery now has two real mechanisms:
-               - while the process is alive, the ConnectivityManager callback
+               - while the process is alive, the default-network callback
                  registered by NetworkRecoveryReceiver.registerNetworkCallback,
-               - while it is not, the NetworkType.CONNECTED constraint on the
-                 WorkManager sync jobs, which the system releases on its own
-                 once a connection exists. -->
+                 which enqueues a sync only on a real offline-to-online
+                 transition with work owed,
+               - while it is not, the CONNECTED constraint on the WorkManager
+                 sync jobs, which the system releases on its own once any
+                 connection exists. -->
+
+        <!-- WhatsApp call capture. Reads only WhatsApp's own call
+             notifications (see WhatsAppCallListener); the user grants
+             "Notification access" for it in system Settings. -->
+        <service
+            android:name=".whatsapp.WhatsAppCallListener"
+            android:exported="true"
+            android:label="Zebu Call Tracker - WhatsApp calls"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!-- WAL for sqflite's connections, matching the native helper
+             (enableWriteAheadLogging) on the same zebu_calls.sqlite file. -->
+        <meta-data
+            android:name="com.tekartik.sqflite.wal_enabled"
+            android:value="true" />
 
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
@@ -190,16 +250,9 @@
             <action android:name="android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS" />
         </intent>
 
-        <!-- OEM background-restriction managers. Package visibility on API 30+
-             makes resolveActivity() return null for a component in an
-             undeclared package, so without these the vendor shortcut would
-             silently fall through to the generic app-info screen on exactly
-             the devices that need it most. -->
-        <package android:name="com.samsung.android.lool" />
-        <package android:name="com.miui.securitycenter" />
-        <package android:name="com.coloros.safecenter" />
-        <package android:name="com.vivo.permissionmanager" />
-        <package android:name="com.huawei.systemmanager" />
-        <package android:name="com.oneplus.security" />
+        <!-- WhatsApp call capture: whether WhatsApp is installed decides
+             whether its notification-access ask is shown. -->
+        <package android:name="com.whatsapp" />
+        <package android:name="com.whatsapp.w4b" />
     </queries>
 </manifest>

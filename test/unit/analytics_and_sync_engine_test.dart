@@ -1,6 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:zebu_call_tracker/core/platform/native_call_bridge.dart';
 import 'package:zebu_call_tracker/core/storage/app_database.dart';
 import 'package:zebu_call_tracker/core/storage/sync_state.dart';
 import 'package:zebu_call_tracker/features/call_tracking/domain/call_entry.dart';
@@ -94,15 +93,6 @@ void main() {
       expect(stats.outgoingDurationSeconds, equals(180));
       expect(stats.uniqueCalls, equals(2)); // '+919876543210' and '+919123456789'
       expect(stats.recordingsMatched, equals(2));
-
-      // Only connected calls can have audio. The missed incoming and the
-      // unanswered outgoing are not coverage gaps — counting them as such
-      // (which this assertion previously did) makes recording coverage look
-      // broken on any day with a normal number of unanswered calls.
-      expect(stats.recordingsAbsent, isZero);
-      expect(stats.recordingsNotApplicable, equals(2));
-      expect(stats.recordingEligible, equals(2));
-      expect(stats.recordingCoverageRate, equals(100.0));
     });
 
     test('unique contacts ignore formatting differences', () {
@@ -221,34 +211,6 @@ void main() {
           "WHERE sync_state = 'synced';",
         ),
       );
-    });
-
-    test('IngestSnapshot parses native batches and syncedCalls properly', () {
-      final mockData = {
-        'batches': [
-          {
-            'capturedAtMillis': 1725000000000,
-            'calls': [],
-            'recordings': [],
-          }
-        ],
-        'syncedCalls': [
-          {
-            'idempotencyKey': 'zebu:call:ext-1:1725000000000',
-            'serverCallId': 'srv-101',
-            'syncedAtMillis': 1725000010000,
-          }
-        ],
-        'overflowed': false,
-      };
-
-      final snapshot = IngestSnapshot.fromPlatform(mockData);
-
-      expect(snapshot.batches.length, equals(1));
-      expect(snapshot.syncedCalls.length, equals(1));
-      expect(snapshot.syncedCalls.first.idempotencyKey, equals('zebu:call:ext-1:1725000000000'));
-      expect(snapshot.syncedCalls.first.serverCallId, equals('srv-101'));
-      expect(snapshot.isEmpty, isFalse);
     });
   });
 }

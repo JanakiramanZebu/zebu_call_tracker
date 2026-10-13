@@ -19,9 +19,17 @@ import '../../call_tracking/data/call_enrichment.dart';
 import '../../call_tracking/data/call_feed.dart';
 import '../../device/data/device_repository.dart';
 import '../../recording/domain/recording_matcher.dart';
+import 'server_snapshot.dart';
 import 'sync_repository.dart';
 
+/// The longest ring before pickup, which a call's duration (talk time) leaves
+/// out. Same value as [RecordingMatcher.maxRingGapSeconds].
+const _ringAllowanceSeconds = 180;
 
+/// Slack either side of a call's span when scanning for its recording: clock
+/// skew between the call log and MediaStore, and a media scanner that indexes
+/// the file a little after the dialer closes it. Same as the native ingester.
+const _recordingSkewSeconds = 300;
 
 // Both share the one [apiClientProvider]. They used to build an ApiClient
 // each, which meant three independent refresh queues against an endpoint that
@@ -69,7 +77,8 @@ class NativeSyncStatus {
   /// Null when the coordinator has never completed a run on this install.
   final DateTime? lastSyncAt;
 
-  /// `OK`, `PARTIAL`, `SKIPPED_NO_AUTH`, `ALREADY_RUNNING`, or null.
+  /// `OK`, `PARTIAL`, `RATE_LIMITED`, `SKIPPED_NO_AUTH`, `ALREADY_RUNNING`, or
+  /// null.
   final String? status;
 
   final int syncedCount;
@@ -91,19 +100,11 @@ class NativeSyncStatus {
 
   bool get hasRun => lastSyncAt != null;
 
-  /// True when the last run could not even start — no server or no session.
-  bool get isUnauthenticated => status == 'SKIPPED_NO_AUTH';
-
   bool get isHealthy => status == 'OK';
 
   /// The server refused this handset outright — revoked device, deactivated
   /// account, dead session. Retrying will not help; a person must intervene.
   bool get isBlocked => status == 'BLOCKED' || status == 'BLOCKED_AUTH';
-
-  /// Blocked specifically because the session is gone. Distinguished from
-  /// [isBlocked] because the remedy is different: this one the user fixes by
-  /// registering the device again, rather than by contacting an administrator.
-  bool get isBlockedByAuth => status == 'BLOCKED_AUTH';
 
   /// Human phrasing for how long ago the last run finished.
   String get lastSyncLabel {
@@ -118,15 +119,20 @@ class NativeSyncStatus {
   }
 
   /// Short description of the last outcome, for a status pill.
+  ///
+  /// Employee-facing, so an unrecognised status reads as a plain sentence
+  /// rather than echoing the coordinator's code.
   String get statusLabel => switch (status) {
-        'OK' => 'Healthy',
-        'PARTIAL' => 'Partial',
+        'OK' => 'Working',
+        'PARTIAL' => 'Some calls not sent',
         'SKIPPED_NO_AUTH' => 'Not signed in',
-        'BLOCKED' => 'Blocked by server',
+        'BLOCKED' => 'Access removed – contact your admin',
         'BLOCKED_AUTH' => 'Sign in again',
-        'ALREADY_RUNNING' => 'In progress',
-        null => 'Not run yet',
-        _ => status!,
+        'ALREADY_RUNNING' => 'Sending…',
+        // The server's per-minute limit; the next run is already booked.
+        'RATE_LIMITED' => 'Sending, continuing shortly',
+        null => 'Not sent yet',
+        _ => 'Will try again',
       };
 }
 
@@ -353,22 +359,28 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
 
         if (rows.isEmpty) break;
 
-        // Determine timestamp window for the current call batch
+        // The page's span, from the earliest START to the latest END
+        // (start + ring + talk time). A dialer that dates its file at hang-up
+        // writes it a whole call-length after the start, so a window that
+        // ended at the latest start hid a long call's recording from the
+        // matcher.
         int minMillis = rows.first.dateMillis ?? 0;
-        int maxMillis = rows.first.dateMillis ?? 0;
+        int maxEndMillis = 0;
         for (final r in rows) {
           final m = r.dateMillis;
           if (m != null) {
             if (m < minMillis) minMillis = m;
-            if (m > maxMillis) maxMillis = m;
+            final end =
+                m + (_ringAllowanceSeconds + (r.durationSeconds ?? 0)) * 1000;
+            if (end > maxEndMillis) maxEndMillis = end;
           }
         }
 
         // Bounded candidate pool for this sliding window (with ±5 minute margin)
         List<RecordingCandidate> pool = const [];
-        if (hasRecordingAccess && maxMillis > 0) {
-          final sinceSec = math.max(0, (minMillis ~/ 1000) - 300);
-          final beforeSec = (maxMillis ~/ 1000) + 300;
+        if (hasRecordingAccess && maxEndMillis > 0) {
+          final sinceSec = math.max(0, (minMillis ~/ 1000) - _recordingSkewSeconds);
+          final beforeSec = (maxEndMillis ~/ 1000) + _recordingSkewSeconds;
           try {
             pool = await bridge.scanRecordings(
               sinceEpochSeconds: sinceSec,
@@ -455,7 +467,30 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
               )
             : const <int, RecordingMatch>{};
 
-        int pageIngested = 0;
+        // One lookup for the page instead of one per row, and every write for
+        // the page in a single transaction below: drift re-runs each watched
+        // query (dashboard analytics, sync counters) once per transaction
+        // rather than three times per ingested call.
+        final pageKeys = <int, String>{
+          for (final r in rows)
+            if (r.dateMillis != null)
+              r.dateMillis!: CallWireIdentity.key(
+                startedAtMillis: r.dateMillis!,
+                rawNumber: r.number,
+              ),
+        };
+        final existingByKey = {
+          for (final c in await dao.findByIdempotencyKeys(
+            pageKeys.values.toSet().toList(),
+          ))
+            c.idempotencyKey: c,
+        };
+
+        final recordingLinks =
+            <({String key, String path, int mediaStoreId})>[];
+        final inserts = <({LocalCallsCompanion row, String? metadata})>[];
+        final seenKeys = <String>{};
+
         for (final r in rows) {
           if (r.dateMillis == null) continue;
           final date = DateTime.fromMillisecondsSinceEpoch(r.dateMillis!).toUtc();
@@ -469,15 +504,18 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
             startedAtMillis: r.dateMillis!,
             rawNumber: r.number,
           );
-          final idempotencyKey = CallWireIdentity.key(
-            startedAtMillis: r.dateMillis!,
-            rawNumber: r.number,
-          );
+          final idempotencyKey = pageKeys[r.dateMillis!]!;
+          // A second log row with the same key is the same call.
+          if (!seenKeys.add(idempotencyKey)) continue;
 
-          final existing = await dao.findByIdempotencyKey(idempotencyKey);
+          final existing = existingByKey[idempotencyKey];
           if (existing != null) {
             // Check if unlinked call can now be linked to a recording candidate
-            if ((!existing.hasRecording || existing.recordingMediaStoreId == null) &&
+            // Never linked, as in CallsDao.getCallsNeedingRecordingMatch: a
+            // row with a media id but `has_recording` off is one the
+            // coordinator gave up on, and re-linking it re-sends a refused file.
+            if (existing.recordingMediaStoreId == null &&
+                existing.recordingUploadStatus != RecordingUploadStatus.uploaded &&
                 (r.durationSeconds ?? 0) > 0) {
               final match = matchResults[r.dateMillis!];
               if (match != null &&
@@ -486,11 +524,11 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
                 try {
                   final recPath =
                       await bridge.getRecordingUri(match.candidate!.mediaStoreId);
-                  await dao.updateRecordingInfo(
-                    idempotencyKey: idempotencyKey,
-                    recordingPath: recPath,
+                  recordingLinks.add((
+                    key: idempotencyKey,
+                    path: recPath,
                     mediaStoreId: match.candidate!.mediaStoreId,
-                  );
+                  ));
                 } catch (_) {}
               }
             }
@@ -543,8 +581,8 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
             recording: matched,
           );
 
-          await dao.insertOrUpdateCall(
-            LocalCallsCompanion.insert(
+          inserts.add((
+            row: LocalCallsCompanion.insert(
               idempotencyKey: idempotencyKey,
               externalCallId: Value(extId),
               phoneNumber: CallWireIdentity.number(r.number),
@@ -572,17 +610,11 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
               ),
               recordingPath: Value(recordingPath),
               recordingMediaStoreId: Value(matched?.mediaStoreId),
-              simSlot: Value(_slotFor(r.phoneAccountId, simSlots)),
+              simSlot: Value(r.simSlot ?? _slotFor(r.phoneAccountId, simSlots)),
               clientCreatedAt: DateTime.now().toUtc(),
               syncState: const Value(CallSyncState.waiting),
             ),
-          );
-
-          // Written separately from the insert because `metadata_json` is not
-          // a declared drift column — see `AppDatabase._additiveColumns`.
-          await dao.setMetadataJson(
-            idempotencyKey: idempotencyKey,
-            json: CallEnrichment.buildMetadata(
+            metadata: CallEnrichment.buildMetadata(
               row: r.toMetadataRow(),
               times: times,
               recording: matched,
@@ -590,9 +622,36 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
               confidence: matchResults[r.dateMillis!]?.confidence,
               appBuild: appBuild,
             ),
-          );
-          pageIngested++;
+          ));
         }
+
+        if (inserts.isNotEmpty || recordingLinks.isNotEmpty) {
+          await dao.transaction(() async {
+            for (final link in recordingLinks) {
+              await dao.updateRecordingInfo(
+                idempotencyKey: link.key,
+                recordingPath: link.path,
+                mediaStoreId: link.mediaStoreId,
+              );
+            }
+            for (final insert in inserts) {
+              // Insert-or-ignore on the idempotency key: the native ingester
+              // writes this table too, and may have captured the same call
+              // since the lookup above. The upsert used before only resolved
+              // a primary-key conflict, so that race aborted the whole ingest
+              // on the unique key.
+              final inserted = await dao.insertCallIfAbsent(insert.row);
+              if (!inserted) continue;
+              // Written separately from the insert because `metadata_json` is
+              // not a declared drift column — see `AppDatabase._additiveColumns`.
+              await dao.setMetadataJson(
+                idempotencyKey: insert.row.idempotencyKey.value,
+                json: insert.metadata,
+              );
+            }
+          });
+        }
+        final pageIngested = inserts.length;
 
         totalIngested += pageIngested;
 
@@ -605,17 +664,19 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
       if (hasRecordingAccess) {
         final unlinked = await dao.getCallsNeedingRecordingMatch();
         if (unlinked.isNotEmpty) {
+          // Earliest start to latest end, as for the page scan above.
           int minEpochSec = unlinked.first.startedAt.millisecondsSinceEpoch ~/ 1000;
-          int maxEpochSec = unlinked.first.startedAt.millisecondsSinceEpoch ~/ 1000;
+          int maxEndEpochSec = 0;
           for (final c in unlinked) {
             final sec = c.startedAt.millisecondsSinceEpoch ~/ 1000;
             if (sec < minEpochSec) minEpochSec = sec;
-            if (sec > maxEpochSec) maxEpochSec = sec;
+            final end = sec + _ringAllowanceSeconds + c.durationSeconds;
+            if (end > maxEndEpochSec) maxEndEpochSec = end;
           }
 
           final retroactivePool = await bridge.scanRecordings(
-            sinceEpochSeconds: math.max(0, minEpochSec - 300),
-            beforeEpochSeconds: maxEpochSec + 300,
+            sinceEpochSeconds: math.max(0, minEpochSec - _recordingSkewSeconds),
+            beforeEpochSeconds: maxEndEpochSec + _recordingSkewSeconds,
             limit: 500,
           );
 
@@ -662,6 +723,11 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
               matcher: matcher,
             );
 
+            // Content URIs first, then every write in one transaction, so the
+            // watched queries re-run once for the pass rather than four times
+            // per linked call.
+            final retroLinks =
+                <({LocalCall call, RecordingMatch result, String path})>[];
             for (final call in unlinked) {
               final result =
                   unlinkedMatches[call.startedAt.millisecondsSinceEpoch];
@@ -669,45 +735,64 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
                   result.status == RecordingMatchStatus.matched &&
                   result.candidate != null) {
                 try {
-                  final recPath =
-                      await bridge.getRecordingUri(result.candidate!.mediaStoreId);
-                  await dao.updateRecordingInfo(
-                    idempotencyKey: call.idempotencyKey,
-                    recordingPath: recPath,
-                    mediaStoreId: result.candidate!.mediaStoreId,
-                  );
-
-                  // Finding the audio is also how a retroactively matched call
-                  // learns when it was answered: the recording's dateAdded is
-                  // the pickup and dateModified the hangup.
-                  final retroTimes = CallEnrichment.resolveTimes(
-                    direction: call.direction,
-                    durationSeconds: call.durationSeconds,
-                    window: retroWindows[call.idempotencyKey],
-                    recording: result.candidate,
-                  );
-                  await dao.fillMissingTimes(
-                    idempotencyKey: call.idempotencyKey,
-                    answeredAt: retroTimes.answeredAtUtc,
-                    endedAt: retroTimes.endedAtUtc,
-                  );
-
-                  // The row's metadata was built before this recording existed,
-                  // so it carries no `recording` object. Merged rather than
-                  // rebuilt: the call-log row behind it is long out of scope.
-                  await dao.setMetadataJson(
-                    idempotencyKey: call.idempotencyKey,
-                    json: CallEnrichment.remergeRecordingMetadata(
-                      existingJson:
-                          await dao.metadataJsonFor(call.idempotencyKey),
-                      times: retroTimes,
-                      recording: result.candidate!,
-                      signals: result.signals,
-                      confidence: result.confidence,
-                    ),
-                  );
+                  retroLinks.add((
+                    call: call,
+                    result: result,
+                    path: await bridge
+                        .getRecordingUri(result.candidate!.mediaStoreId),
+                  ));
                 } catch (_) {}
               }
+            }
+
+            if (retroLinks.isNotEmpty) {
+              await dao.transaction(() async {
+                for (final link in retroLinks) {
+                  final call = link.call;
+                  final result = link.result;
+                  try {
+                    final linked = await dao.updateRecordingInfo(
+                      idempotencyKey: call.idempotencyKey,
+                      recordingPath: link.path,
+                      mediaStoreId: result.candidate!.mediaStoreId,
+                    );
+                    // The native side linked one first; its times stand.
+                    if (!linked) continue;
+
+                    // Finding the audio is also how a retroactively matched
+                    // call learns when it was answered: on an open-stamping
+                    // dialer the recording's dateAdded is the pickup and
+                    // dateModified the hangup (see CallEnrichment).
+                    final retroTimes = CallEnrichment.resolveTimes(
+                      direction: call.direction,
+                      durationSeconds: call.durationSeconds,
+                      window: retroWindows[call.idempotencyKey],
+                      recording: result.candidate,
+                    );
+                    await dao.fillMissingTimes(
+                      idempotencyKey: call.idempotencyKey,
+                      answeredAt: retroTimes.answeredAtUtc,
+                      endedAt: retroTimes.endedAtUtc,
+                    );
+
+                    // The row's metadata was built before this recording
+                    // existed, so it carries no `recording` object. Merged
+                    // rather than rebuilt: the call-log row behind it is long
+                    // out of scope.
+                    await dao.setMetadataJson(
+                      idempotencyKey: call.idempotencyKey,
+                      json: CallEnrichment.remergeRecordingMetadata(
+                        existingJson:
+                            await dao.metadataJsonFor(call.idempotencyKey),
+                        times: retroTimes,
+                        recording: result.candidate!,
+                        signals: result.signals,
+                        confidence: result.confidence,
+                      ),
+                    );
+                  } catch (_) {}
+                }
+              });
             }
           }
         }
@@ -754,6 +839,12 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
       // §5.1 question 1: may this handset still sync at all?
       if (status.deviceStatus == 'REVOKED') {
         debugPrint('[SYNC] Device REVOKED by an administrator; sync disabled.');
+        // Recorded so the app says so. This used to stop at the debugPrint:
+        // with an empty queue the coordinator never hit DEVICE_REVOKED
+        // itself, and a revoked phone looked healthy indefinitely.
+        await ref
+            .read(serverSnapshotProvider.notifier)
+            .report(ServerSnapshot.from(status));
         return 0;
       }
 
@@ -766,11 +857,22 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
         try {
           final info = await ref.read(deviceInfoProvider.future);
           await ref.read(deviceRepositoryProvider).registerDevice(deviceInfo: info);
+          // §3.3: the FCM token goes up right after registration. The device
+          // row the server just created has none, whatever this install's
+          // token is.
+          try {
+            await ref.read(nativeBridgeProvider).syncPushToken(force: true);
+          } catch (_) {}
         } catch (e) {
           debugPrint('[SYNC] Device registration failed: $e');
           return 0;
         }
       }
+
+      // Stamped only once the server has answered and the device is known to
+      // it: an offline launch, or a failed registration, must not hold the
+      // next check back for half an hour.
+      await _stampServerCheck();
 
       // §5.1 question 4: "read these at runtime. Do not hardcode them."
       // Handed straight to the native coordinator, which is what enforces the
@@ -783,6 +885,12 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
       // policy window the server starts rejecting calls outright, and neither
       // side would otherwise know why.
       _warnOnClockSkew(status);
+
+      // The server's own counts, kept so the app can show what actually
+      // arrived rather than only what the phone believes it sent.
+      await ref.read(serverSnapshotProvider.notifier).report(
+            ServerSnapshot.from(status, clockSkewMinutes: _clockSkewMinutes),
+          );
 
       int reopened = 0;
       for (final pending in status.pendingRecordingUploads) {
@@ -857,15 +965,14 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
 
   /// Reports queue depth to the server so a handset that has stopped syncing is
   /// visible centrally rather than only when someone notices missing calls.
-  Future<void> _sendHeartbeat(Map<String, int> counters) async {
+  ///
+  /// §3.2 asks for one when the app opens and on each sync cycle while it is
+  /// open, never more than once a minute. Sent natively: the background and
+  /// push heartbeats go from there too, and only one shared clock can keep
+  /// all three inside that minute.
+  Future<void> _sendHeartbeat() async {
     try {
-      await ref.read(deviceRepositoryProvider).sendHeartbeat(
-            pendingCalls: (counters['waiting'] ?? 0) + (counters['failed'] ?? 0),
-            pendingRecordings: (await ref
-                    .read(callsDaoProvider)
-                    .getPendingRecordingUploads())
-                .length,
-          );
+      await ref.read(nativeBridgeProvider).sendHeartbeat();
     } catch (_) {
       // Telemetry, not a gate on syncing.
     }
@@ -873,9 +980,67 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
 
   bool _isProcessing = false;
 
+  /// Set when the user has gone to change something the server judges (the
+  /// phone's clock); the next sync checks with the server whatever the
+  /// interval says, so a fixed problem stops being reported straight away.
+  bool _serverCheckRequested = false;
+
+  bool get serverCheckRequested => _serverCheckRequested;
+
+  void requestServerCheck() => _serverCheckRequested = true;
+
+  /// When [reconcileWithServer] last got an answer, in epoch millis.
+  static const _serverCheckKey = 'zebu.sync.server_check_at_millis.v1';
+
+  /// How often a foreground sync may run the status check-in. Launch, resume
+  /// and reconnect each run a sync, and each one used to cost a
+  /// GET /sync/status — dozens a day for answers that barely change. The
+  /// native coordinator does the uploading either way. The heartbeat is not
+  /// held to this: §3.2 wants one per sync cycle, under its own one-minute
+  /// limit (see [_sendHeartbeat]).
+  static const _serverCheckInterval = Duration(minutes: 30);
+
+  Future<bool> _serverCheckDue() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final last = prefs.getInt(_serverCheckKey) ?? 0;
+      final elapsed = DateTime.now().millisecondsSinceEpoch - last;
+      // Negative when the clock was moved back; a check is the safe answer.
+      return elapsed < 0 || elapsed >= _serverCheckInterval.inMilliseconds;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  Future<void> _stampServerCheck() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(
+        _serverCheckKey,
+        DateTime.now().millisecondsSinceEpoch,
+      );
+    } catch (_) {}
+  }
+
   /// Triggers full sync with strict sequential one-by-one uploads (concurrency = 1)
   /// and granular server confirmation.
-  Future<SyncResultSummary> triggerSync() async {
+  ///
+  /// [reviveFailed] is for the user's own "Send now": it also gives calls
+  /// that failed for good another chance, and always checks with the server.
+  /// [afterSignIn] does the same for the first run of a new session, which
+  /// must register the device and pick up the policy straight away.
+  ///
+  /// Otherwise the server check runs at most once per [_serverCheckInterval].
+  /// The heartbeat runs on every cycle, at most once a minute. The ingest always runs: it is what makes a call
+  /// that just ended appear in the app.
+  ///
+  /// [checkServer] forces the check alone — after the user has changed
+  /// something the server judges, such as the phone's clock.
+  Future<SyncResultSummary> triggerSync({
+    bool reviveFailed = false,
+    bool afterSignIn = false,
+    bool checkServer = false,
+  }) async {
     if (_isProcessing) {
       debugPrint('[SYNC] Sync already in progress, skipping concurrent trigger.');
       return state.value ??
@@ -904,11 +1069,22 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
       debugPrint('[SYNC] SYNC START - Ingesting native call logs and triggering native SyncCoordinator...');
       final before = await ref.read(callsDaoProvider).getSyncCounters();
 
+      final runServerCheck = checkServer ||
+          _serverCheckRequested ||
+          reviveFailed ||
+          afterSignIn ||
+          await _serverCheckDue();
+
       await ingestNativeCallLogs();
       // Repair before uploading, so anything the server is missing is back in
       // the queue by the time the coordinator drains it.
-      await reconcileWithServer();
-      await ref.read(nativeBridgeProvider).triggerNativeSync();
+      if (runServerCheck) {
+        _serverCheckRequested = false;
+        await reconcileWithServer();
+      }
+      await ref
+          .read(nativeBridgeProvider)
+          .triggerNativeSync(reviveFailed: reviveFailed);
 
       // triggerNativeSync hands off to the native coordinator and returns; the
       // upload itself outlives this call and may outlive the Flutter engine.
@@ -928,7 +1104,7 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
                 'Calls will be rejected until it is corrected.',
       );
 
-      unawaited(_sendHeartbeat(counters));
+      unawaited(_sendHeartbeat());
 
       state = AsyncData(summary);
       return summary;
@@ -946,6 +1122,9 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
     } finally {
       _isProcessing = false;
       ref.invalidate(outboxItemsProvider);
+      // Drift streams only see Dart's own writes; the native coordinator's
+      // updates to the same table become visible here. Cheap: the counters
+      // are a GROUP BY, not a table read.
       ref.invalidate(syncCountersProvider);
     }
   }

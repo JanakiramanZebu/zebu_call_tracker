@@ -33,12 +33,6 @@ abstract final class CallSyncState {
   /// moves it out of here.
   static const failed = 'FAILED';
 
-  /// Rows the coordinator may claim.
-  static const claimable = [waiting, retryPending];
-
-  /// States that mean "the server has this call".
-  static const terminalSuccess = [uploaded];
-
   /// Legacy lowercase names, mapped to their current equivalent.
   ///
   /// Retained because installs from before the vocabularies were unified still

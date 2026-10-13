@@ -75,8 +75,8 @@ void main() {
     expect(find.text('Alice Smith'), findsOneWidget);
     expect(find.text('Bob Jones'), findsOneWidget);
 
-    // Verify FAB is present
-    expect(find.byType(FloatingActionButton), findsOneWidget);
+    // The dial-pad button (a custom extended button, not a stock FAB).
+    expect(find.text('Dial'), findsOneWidget);
     expect(find.byIcon(Icons.dialpad_rounded), findsOneWidget);
 
     // Call actions shouldn't be visible before expansion

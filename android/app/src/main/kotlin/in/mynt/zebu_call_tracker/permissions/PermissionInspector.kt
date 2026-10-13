@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
+import `in`.mynt.zebu_call_tracker.whatsapp.WhatsAppCallListener
 
 /**
  * Reports which of the call-tracking permissions are currently granted.
@@ -18,7 +19,11 @@ object PermissionInspector {
     const val PHONE_STATE = Manifest.permission.READ_PHONE_STATE
     const val CALL_LOG = Manifest.permission.READ_CALL_LOG
     const val CONTACTS = Manifest.permission.READ_CONTACTS
-    const val PHONE_NUMBERS = Manifest.permission.READ_PHONE_NUMBERS
+
+    // READ_PHONE_NUMBERS is gone from the manifest and from [snapshot]. It was
+    // declared for SIM attribution, which needs only READ_PHONE_STATE (the
+    // subscription list) — nothing here ever read a line number — and no Dart
+    // code read the `readPhoneNumbers` key it was reported under.
 
     /**
      * Referenced only by [in.mynt.zebu_call_tracker.recording.RecordingCapabilityProbe],
@@ -38,6 +43,9 @@ object PermissionInspector {
         "readPhoneState" to isGranted(context, PHONE_STATE),
         "readCallLog" to isGranted(context, CALL_LOG),
         "readContacts" to isGranted(context, CONTACTS),
-        "readPhoneNumbers" to isGranted(context, PHONE_NUMBERS),
+        // WhatsApp call capture: notification access, and whether there is a
+        // WhatsApp to capture from at all.
+        "whatsappCalls" to WhatsAppCallListener.isEnabled(context),
+        "whatsappInstalled" to WhatsAppCallListener.isWhatsAppInstalled(context),
     )
 }

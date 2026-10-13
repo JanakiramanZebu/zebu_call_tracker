@@ -8,6 +8,17 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+// FCM push wake-up (Mobile API Guide §3.3). google-services.json must come
+// from the same Firebase project as the server's FCM_PROJECT_ID, and is not
+// in VCS. Without it the plugin would fail the build, so it is applied only
+// when the file is there; the app then runs exactly as before, minus the push
+// (FirebaseApp is never initialised and PushTokenStore.isConfigured is false).
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
+} else {
+    logger.warn("android/app/google-services.json not found: FCM push wake-up is disabled in this build.")
+}
+
 // Release signing config, loaded from android/key.properties (kept out of VCS).
 // When the file is absent (fresh clone / CI without the secret) release builds
 // fall back to debug signing so `flutter run --release` still works locally.
@@ -93,4 +104,9 @@ dependencies {
     // world-of-root-readable plaintext XML file, which made the secure store
     // on the other side decorative.
     implementation("androidx.security:security-crypto:1.0.0")
+    // The server's SYNC_REQUEST push (Mobile API Guide §3.3): a high-priority,
+    // data-only message that wakes a handset sitting on unsynced calls. A hint
+    // on top of the safety net and the heartbeat, never a replacement for them.
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-messaging")
 }

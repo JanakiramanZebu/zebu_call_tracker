@@ -1,734 +1,400 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../app.dart';
 import '../../../core/theme/design_tokens.dart';
 import '../../../core/utils/formatters.dart';
+import '../../../shared/widgets/brand.dart';
 import '../../../shared/widgets/charts.dart';
 import '../../../shared/widgets/loaders.dart';
 import '../../../shared/widgets/ui_kit.dart';
 import '../../permissions/presentation/permission_screen.dart';
-import '../../synchronization/presentation/sync_alert_banner.dart';
 import '../../settings/presentation/settings_screen.dart';
+import '../../synchronization/data/sync_health_provider.dart';
+import '../../synchronization/data/sync_service.dart';
+import '../../synchronization/presentation/sync_alert_banner.dart';
 import '../data/call_feed.dart';
-import '../domain/call_entry.dart';
+import 'call_detail_screen.dart';
 import 'card_analytical_popup.dart';
 
 class DashboardScreen extends ConsumerStatefulWidget {
-  const DashboardScreen({
-    super.key,
-    required this.onSeeAllCalls,
-    this.pendingSyncCount = 0,
-  });
-
-  final VoidCallback onSeeAllCalls;
-  final int pendingSyncCount;
+  const DashboardScreen({super.key});
 
   @override
   ConsumerState<DashboardScreen> createState() => _DashboardScreenState();
 }
 
 class _DashboardScreenState extends ConsumerState<DashboardScreen> {
-  int _tabIndex = 0; // 0: Summary, 1: Analysis
+  // The day strip's input, rebuilt only when the period's rows change. Mapping
+  // them on every rebuild would also hand the strip a new list each time and
+  // make it re-derive its marks.
+  Object? _stripFrom;
+  List<StripCall> _stripCalls = const [];
 
-  Future<void> _refreshAnalytics() async {
+  /// Picks up calls made since the last catch-up.
+  ///
+  /// The numbers here come from the database, and new calls reach it through
+  /// ingest, which a sync runs first; the analytics streams then update the
+  /// screen on their own. Invalidating them as well only re-ran the queries.
+  Future<void> _refresh() async {
+    await ref.read(syncServiceProvider.notifier).triggerSync();
     await ref.read(callFeedProvider.notifier).refresh();
-    ref.invalidate(analyticsPeriodStatsProvider);
-    ref.invalidate(analyticsHourlyActivityProvider);
-    ref.invalidate(analyticsSparklineProvider);
   }
+
+  void _openSettings() => Navigator.of(
+    context,
+  ).push(MaterialPageRoute<void>(builder: (_) => const SettingsScreen()));
+
+  static String _greeting(DateTime now) => now.hour < 12
+      ? 'Good morning'
+      : now.hour < 17
+      ? 'Good afternoon'
+      : 'Good evening';
 
   @override
   Widget build(BuildContext context) {
-    final feed = ref.watch(callFeedProvider);
-    final period = ref.watch(dashboardPeriodProvider);
-    final rangeInfo = ref.watch(periodRangeInfoProvider);
-    final statsAsync = ref.watch(analyticsPeriodStatsProvider);
-    // The equivalent window immediately before this one. Every trend badge is
-    // derived from it; null (All time, or no prior data) hides the badge rather
-    // than inventing a number.
-    final previousStats = ref.watch(analyticsPreviousStatsProvider).value;
-    final sparklineAsync = ref.watch(analyticsSparklineProvider);
-    final activityAsync = ref.watch(analyticsHourlyActivityProvider);
-    final excludeNumbers = ref.watch(analyticsExcludeInternalProvider);
+    final z = context.z;
+    // Only whether the feed can be shown at all — not its rows. Watching the
+    // whole feed rebuilt this screen on every page the Calls tab loaded.
+    final feed = ref.watch(
+      callFeedProvider.select(
+        (f) => (
+          ready: f.hasValue,
+          blocked: f.value?.blocked ?? false,
+          error: f.hasValue ? null : f.error,
+        ),
+      ),
+    );
+    final analytics = ref.watch(analyticsPeriodProvider);
 
     return Scaffold(
-      backgroundColor: AppTokens.bgPrimary,
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        scrolledUnderElevation: 0,
-        titleSpacing: 20,
-        title: const Text(
-          'Analytics',
-          style: TextStyle(
-            fontWeight: FontWeight.w800,
-            fontSize: 24,
-            letterSpacing: -0.5,
-            color: Colors.white,
-          ),
-        ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh_rounded, color: AppTokens.textSecondary),
-            onPressed: _refreshAnalytics,
-            tooltip: 'Refresh analytics',
-          ),
-          IconButton(
-            icon: const Icon(Icons.filter_list_rounded, color: AppTokens.textSecondary),
-            onPressed: () => _showFilterOptions(context),
-            tooltip: 'Filters',
-          ),
-          PopupMenuButton<String>(
-            icon: const Icon(Icons.more_vert_rounded, color: AppTokens.textSecondary),
-            color: AppTokens.surface2,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(AppTokens.r12),
-              side: const BorderSide(color: AppTokens.borderDefault),
-            ),
-            onSelected: (value) {
-              if (value == 'settings') {
-                Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => const SettingsScreen(),
-                  ),
-                );
-              }
-            },
-            itemBuilder: (context) => [
-              const PopupMenuItem(
-                value: 'settings',
-                child: Row(
-                  children: [
-                    Icon(Icons.settings_outlined, size: 18, color: Colors.white),
-                    SizedBox(width: 10),
-                    Text('Settings', style: TextStyle(color: Colors.white)),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
+      backgroundColor: z.canvas,
+      // No AppBar and no SafeArea: the blue panel runs up under the status
+      // bar and pads its own content below it; the shell's bottom nav already
+      // handles the navigation bar.
       body: RefreshIndicator(
-        color: AppTokens.brandElectric,
-        backgroundColor: AppTokens.surface2,
-        onRefresh: _refreshAnalytics,
-        child: feed.when(
-          loading: () => const DashboardSkeleton(),
-          error: (e, _) => ErrorStateView(
-            error: e,
-            logContext: 'DASHBOARD',
-            fallbackTitle: 'Could not load analytics',
-            onRetry: _refreshAnalytics,
-          ),
-          data: (state) {
-            if (state.blocked) {
-              return EmptyState(
-                icon: Icons.lock_outline_rounded,
-                title: 'Call log access needed',
-                message:
-                    'Grant call log permission to track and analyze calls made on this device.',
-                actionLabel: 'Review permissions',
-                onAction: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => const PermissionScreen(),
-                  ),
-                ),
-              );
-            }
-
-            final CallStats stats = statsAsync.asData?.value ?? ref.watch(periodStatsProvider);
-            final sparklineData = sparklineAsync.asData?.value ?? const [0, 0, 0, 0, 0, 0, 0, 0];
-            final activityData = activityAsync.asData?.value ??
-                (
-                  incoming: List.filled(6, 0.0),
-                  outgoing: List.filled(6, 0.0),
-                  missed: List.filled(6, 0.0),
-                );
-
-            return ListView(
-              padding: const EdgeInsets.fromLTRB(16, 4, 16, 32),
-              children: [
-                // Anything stopping sync, above the numbers. Analytics that
-                // look healthy sitting on top of a revoked device is exactly
-                // the reassurance nobody should be given.
-                const SyncAlertBanner(),
-
-                // ── Filter Controls Row ──────────────────────────────────────
-                SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(
-                    children: [
-                      // 1. Filter badge pill
-                      _FilterPill(
-                        icon: Icons.tune_rounded,
-                        badgeCount: 2,
-                        label: 'Filter',
-                        onTap: () => _showFilterOptions(context),
-                      ),
-                      const SizedBox(width: 8),
-
-                      // 2. Period selector pill
-                      _DropdownPill(
-                        label: _periodLabel(period),
-                        onTap: () => _showPeriodSelector(context),
-                      ),
-                      const SizedBox(width: 8),
-
-                      // 3. Exclude Number pill
-                      _DropdownPill(
-                        label: 'Ex. No.: ${excludeNumbers ? "Yes" : "No"}',
-                        icon: excludeNumbers
-                            ? Icons.check_circle_rounded
-                            : Icons.cancel_rounded,
-                        activeColor: excludeNumbers ? AppTokens.brandElectric : null,
-                        onTap: () => ref
-                            .read(analyticsExcludeInternalProvider.notifier)
-                            .toggle(),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 12),
-
-                // ── Compact Date Range Indicator ─────────────────────────────
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: AppTokens.surface1,
-                    borderRadius: BorderRadius.circular(AppTokens.r8),
-                    border: Border.all(color: AppTokens.borderSubtle),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(
-                        Icons.calendar_month_rounded,
-                        size: 15,
-                        color: AppTokens.brandElectric,
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          rangeInfo.formattedRange,
-                          style: const TextStyle(
-                            fontSize: 12.5,
-                            fontWeight: FontWeight.w600,
-                            color: AppTokens.textSecondary,
-                            letterSpacing: -0.2,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 16),
-
-                // ── Summary vs Analysis Segmented Control ─────────────────────
-                ModernSegmentedControl<int>(
-                  segments: const {
-                    0: 'Summary',
-                    1: 'Analysis',
-                  },
-                  selected: _tabIndex,
-                  onSelected: (idx) => setState(() => _tabIndex = idx),
-                ),
-                const SizedBox(height: 16),
-
-                // ── Empty State Banner when 0 records match filter ──────────
-                if (stats.total == 0) ...[
-                  AppCard(
-                    padding: const EdgeInsets.all(16),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.info_outline_rounded, color: AppTokens.textMuted, size: 20),
-                        const SizedBox(width: 12),
-                        const Expanded(
-                          child: Text(
-                            'No calls match the selected date and filters.',
-                            style: TextStyle(color: AppTokens.textMuted, fontSize: 13),
-                          ),
-                        ),
-                        TextButton(
-                          onPressed: () => _showPeriodSelector(context),
-                          child: const Text('Change Filter', style: TextStyle(color: AppTokens.brandElectric)),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-                ],
-
-                // ── Active Tab View ──────────────────────────────────────────
-                if (_tabIndex == 0)
-                  _buildSummaryTab(
-                    context,
-                    stats,
-                    previousStats,
-                    sparklineData,
-                    activityData,
-                  )
-                else
-                  _buildAnalysisTab(context, stats),
-              ],
-            );
-          },
-        ),
+        color: z.accent,
+        backgroundColor: z.raised,
+        edgeOffset: context.safeTop,
+        onRefresh: _refresh,
+        child: _content(context, feed, analytics),
       ),
     );
   }
 
-  Widget _buildSummaryTab(
+  /// The panel's top row: the mark, the greeting and the screen's actions.
+  Widget _panelHeader() {
+    final hideInternal = ref.watch(analyticsExcludeInternalProvider);
+    return _PanelHeader(
+      greeting: _greeting(DateTime.now()),
+      // Period has its own tabs; the sheet holds the rest, and "hide
+      // internal calls" is the only one there.
+      activeFilters: hideInternal ? 1 : 0,
+      onFilter: () => _showFilterOptions(context),
+      onRefresh: _refresh,
+      onSettings: _openSettings,
+    );
+  }
+
+  Widget _content(
     BuildContext context,
-    CallStats stats,
-    CallStats? previous,
-    List<double> sparklineData,
-    ({List<double> incoming, List<double> outgoing, List<double> missed}) activityData,
+    ({bool ready, bool blocked, Object? error}) feed,
+    AsyncValue<PeriodAnalytics> analytics,
   ) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    // Every state keeps the panel's top row, so settings and refresh are
+    // always one tap away; only a loaded period gets the full summary.
+    Widget framed(Widget body) => Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // ── HERO METRIC CARD ────────────────────────────────────────────────
-        _HeroMetricCard(
-          totalCalls: stats.total,
-          talkTimeSeconds: stats.talkTimeSeconds,
-          sparklineData: sparklineData,
-          onTap: () => CardAnalyticalPopup.show(
-            context,
-            category: PopupFilterCategory.totalCalls,
-            stats: stats,
-          ),
-        ),
-        const SizedBox(height: 14),
-
-        // ── COMPACT 2x4 METRIC TILES ────────────────────────────────────────
-        Row(
-          children: [
-            Expanded(
-              child: MetricTile(
-                title: 'Incoming Calls',
-                count: '${stats.incoming}',
-                duration: Fmt.exactDuration(stats.incomingDurationSeconds),
-                icon: Icons.call_received_rounded,
-                color: AppTokens.callIncoming,
-                trend: trendLabel(stats.incoming, previous?.incoming),
-                onTap: () => CardAnalyticalPopup.show(
-                  context,
-                  category: PopupFilterCategory.incoming,
-                  stats: stats,
-                ),
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: MetricTile(
-                title: 'Outgoing Calls',
-                count: '${stats.outgoing}',
-                duration: Fmt.exactDuration(stats.outgoingDurationSeconds),
-                icon: Icons.call_made_rounded,
-                color: AppTokens.callOutgoing,
-                trend: trendLabel(stats.outgoing, previous?.outgoing),
-                onTap: () => CardAnalyticalPopup.show(
-                  context,
-                  category: PopupFilterCategory.outgoing,
-                  stats: stats,
-                ),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 10),
-
-        Row(
-          children: [
-            Expanded(
-              child: MetricTile(
-                title: 'Missed Calls',
-                count: '${stats.missed}',
-                duration: '0h  0m 0s',
-                icon: Icons.call_missed_rounded,
-                color: AppTokens.callMissed,
-                trend: trendLabel(stats.missed, previous?.missed),
-                higherIsWorse: true,
-                onTap: () => CardAnalyticalPopup.show(
-                  context,
-                  category: PopupFilterCategory.missed,
-                  stats: stats,
-                ),
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: MetricTile(
-                title: 'Rejected Calls',
-                count: '${stats.rejected}',
-                duration: '0h  0m 0s',
-                icon: Icons.phone_disabled_rounded,
-                color: AppTokens.callRejected,
-                trend: trendLabel(stats.rejected, previous?.rejected),
-                higherIsWorse: true,
-                onTap: () => CardAnalyticalPopup.show(
-                  context,
-                  category: PopupFilterCategory.rejected,
-                  stats: stats,
-                ),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 10),
-
-        Row(
-          children: [
-            Expanded(
-              child: MetricTile(
-                title: 'Incoming Not Answered',
-                count: '${stats.neverAttended}',
-                icon: Icons.phone_paused_rounded,
-                color: AppTokens.callNeverAttended,
-                trend: trendLabel(stats.neverAttended, previous?.neverAttended),
-                higherIsWorse: true,
-                onTap: () => CardAnalyticalPopup.show(
-                  context,
-                  category: PopupFilterCategory.neverAttended,
-                  stats: stats,
-                ),
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: MetricTile(
-                title: 'Outgoing Not Answered',
-                count: '${stats.notPickupByClient}',
-                icon: Icons.call_end_rounded,
-                color: AppTokens.textMuted,
-                trend: trendLabel(stats.notPickupByClient, previous?.notPickupByClient),
-                higherIsWorse: true,
-                onTap: () => CardAnalyticalPopup.show(
-                  context,
-                  category: PopupFilterCategory.notPickup,
-                  stats: stats,
-                ),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 10),
-
-        Row(
-          children: [
-            Expanded(
-              child: MetricTile(
-                title: 'Unique Calls',
-                count: '${stats.uniqueCalls}',
-                icon: Icons.contact_phone_rounded,
-                color: AppTokens.brandPurple,
-                trend: trendLabel(stats.uniqueCalls, previous?.uniqueCalls),
-                onTap: () => CardAnalyticalPopup.show(
-                  context,
-                  category: PopupFilterCategory.uniqueCalls,
-                  stats: stats,
-                ),
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: MetricTile(
-                title: 'Avg Duration',
-                count: Fmt.duration(stats.averageDurationSeconds),
-                icon: Icons.timer_outlined,
-                color: AppTokens.brandIndigo,
-                trend: trendLabel(stats.averageDurationSeconds, previous?.averageDurationSeconds),
-                onTap: () => CardAnalyticalPopup.show(
-                  context,
-                  category: PopupFilterCategory.totalCalls,
-                  stats: stats,
-                ),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 18),
-
-        // ── CALL ACTIVITY CHART ─────────────────────────────────────────────
-        AppCard(
-          padding: const EdgeInsets.all(18),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text(
-                    'Call Activity',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w700,
-                      color: Colors.white,
-                      letterSpacing: -0.3,
-                    ),
-                  ),
-                  Text(
-                    '${stats.total} total calls',
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                      color: AppTokens.textMuted,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 14),
-              CallActivityChart(
-                incomingPoints: activityData.incoming,
-                outgoingPoints: activityData.outgoing,
-                missedPoints: activityData.missed,
-                labels: const ['12A', '4A', '8A', '12P', '4P', '8P'],
-                height: 160,
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 18),
-
-        // ── INSIGHTS SECTION ────────────────────────────────────────────────
-        const SectionLabel('Call Insights'),
-        const SizedBox(height: 8),
-        _buildInsightsGrid(stats),
+        _BrandPanel(children: [_panelHeader()]),
+        Expanded(child: body),
       ],
     );
+
+    if (feed.error case final error?) {
+      return framed(
+        ErrorStateView(
+          error: error,
+          logContext: 'DASHBOARD',
+          fallbackTitle: "Couldn't load your calls",
+          onRetry: _refresh,
+        ),
+      );
+    }
+    if (feed.ready && feed.blocked) {
+      return framed(
+        EmptyState(
+          icon: Icons.lock_outline_rounded,
+          title: 'Call log access needed',
+          message:
+              'Allow access to your call log so the app can track your '
+              'calls and send them to the CRM.',
+          actionLabel: 'Review permissions',
+          onAction: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(builder: (_) => const PermissionScreen()),
+          ),
+        ),
+      );
+    }
+    if (!analytics.hasValue && analytics.error != null) {
+      return framed(
+        ErrorStateView(
+          error: analytics.error!,
+          logContext: 'DASHBOARD',
+          fallbackTitle: "Couldn't load your numbers",
+          onRetry: () => ref.invalidate(analyticsPeriodProvider),
+        ),
+      );
+    }
+    // A skeleton only before the first numbers arrive. Changing the period
+    // keeps the previous figures up until the new ones land.
+    final data = analytics.value;
+    if (!feed.ready || data == null) return framed(const DashboardSkeleton());
+    return _buildBody(context, data);
   }
 
-  Widget _buildAnalysisTab(
-    BuildContext context,
-    CallStats stats,
-  ) {
-    final answeredRate = stats.answeredRate;
-    final missedRate = stats.missedRate;
-    // Against recordable calls, not every call — see CallStats.recordingCoverageRate.
-    final recordingRate = stats.recordingCoverageRate;
+  List<StripCall> _stripCallsFor(PeriodAnalytics data) {
+    if (identical(_stripFrom, data.calls)) return _stripCalls;
+    _stripFrom = data.calls;
+    return _stripCalls = [
+      for (final c in data.calls)
+        StripCall(c.startedAt.toLocal(), c.durationSeconds),
+    ];
+  }
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+  Widget _buildBody(BuildContext context, PeriodAnalytics data) {
+    final z = context.z;
+    final stats = data.stats;
+    final period = ref.watch(dashboardPeriodProvider);
+    final rangeInfo = ref.watch(periodRangeInfoProvider);
+    // The equivalent window immediately before this one. The trend is derived
+    // from it; null (All time, or no prior data) hides it rather than
+    // inventing a number.
+    final previous = ref.watch(analyticsPreviousStatsProvider).value;
+
+    void open(PopupFilterCategory category) =>
+        CardAnalyticalPopup.show(context, category: category, stats: stats);
+    String pct(int part) =>
+        stats.total == 0 ? '0%' : '${(part / stats.total * 100).round()}%';
+
+    return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      // Inside the shell, whose bottom nav already took the system inset;
+      // scrollPadding adds whatever inset is still left, so the last row is
+      // never under the phone's navigation buttons. Ledger layout: rows run
+      // edge to edge and indent their own content.
+      padding: context.scrollPadding(top: 0, bottom: 32, horizontal: 0),
       children: [
-        // ── Answered vs Missed Breakdown Card ──
-        AppCard(
-          padding: const EdgeInsets.all(18),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Answered vs Missed Distribution',
-                style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w700,
-                  color: Colors.white,
-                ),
+        _BrandPanel(
+          children: [
+            _panelHeader(),
+            const SizedBox(height: 12),
+            UnderlineTabs<DashboardPeriod>(
+              onBrand: true,
+              padding: EdgeInsets.zero,
+              semanticLabel: 'Period',
+              segments: {
+                for (final p in DashboardPeriod.values) p: _periodLabel(p),
+              },
+              selected: period,
+              onSelected: (p) =>
+                  ref.read(dashboardPeriodProvider.notifier).select(p),
+            ),
+            const SizedBox(height: 18),
+            _Headline(
+              total: stats.total,
+              trend: trendLabel(stats.total, previous?.total),
+              previousName: _previousName(period),
+              onTap: () => open(PopupFilterCategory.totalCalls),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              stats.total == 0
+                  ? 'No calls in this period'
+                  : stats.answered == 0
+                  ? 'No talk time yet'
+                  : '${Fmt.duration(stats.talkTimeSeconds)} on calls, '
+                        '${Fmt.duration(stats.averageDurationSeconds)} average',
+              style: AppType.tabular(
+                AppType.small,
+              ).copyWith(color: AppTokens.onBrandMuted),
+            ),
+            const SizedBox(height: 22),
+            Text(
+              rangeInfo.formattedRange,
+              style: AppType.labelStrong.copyWith(color: AppTokens.onBrand),
+            ),
+            const SizedBox(height: 10),
+            // Replaces the old call-activity chart and the hero sparkline:
+            // the same calls, placed where they happened.
+            CallDayStrip(
+              calls: _stripCallsFor(data),
+              rangeStart: rangeInfo.start,
+              rangeEnd: rangeInfo.end,
+            ),
+          ],
+        ),
+
+        const _SendStatusLine(),
+        // Anything stopping sync, above the numbers. Analytics that look
+        // healthy sitting on top of a revoked device is exactly the
+        // reassurance nobody should be given.
+        const _AlertsSlot(),
+
+        if (stats.total == 0)
+          _EmptyPeriod(
+            onShowAll: period == DashboardPeriod.all
+                ? null
+                : () => ref
+                      .read(dashboardPeriodProvider.notifier)
+                      .select(DashboardPeriod.all),
+          )
+        else ...[
+          // ── Outcome ──────────────────────────────────────────────────────
+          // Every call lands in exactly one of these four. They were the
+          // Analysis tab's "Answered vs missed" card and three of the old
+          // metric tiles.
+          _Section(
+            top: 24,
+            header: SectionHeader(
+              'Outcome',
+              padding: EdgeInsets.zero,
+              trailing: Text(
+                '${stats.answeredRate.round()}% answered',
+                style: AppType.tabular(AppType.label),
               ),
-              const SizedBox(height: 12),
-              MiniBarDistribution(
-                height: 10,
+            ),
+            lead: Padding(
+              padding: const EdgeInsets.only(top: 12, bottom: 4),
+              child: MiniBarDistribution(
+                semanticLabel:
+                    '${stats.answered} answered, '
+                    '${stats.neverAttended} missed, '
+                    '${stats.notPickupByClient} not picked up, '
+                    '${stats.rejected} rejected',
                 segments: [
                   DistributionSegment(
                     label: 'Answered',
                     value: stats.answered.toDouble(),
-                    color: AppTokens.success,
+                    color: z.accent,
                   ),
                   DistributionSegment(
                     label: 'Missed',
-                    value: stats.missed.toDouble(),
-                    color: AppTokens.danger,
+                    value: stats.neverAttended.toDouble(),
+                    color: z.missed,
+                  ),
+                  DistributionSegment(
+                    label: 'Not picked up',
+                    value: stats.notPickupByClient.toDouble(),
+                    color: z.noAnswer,
                   ),
                   DistributionSegment(
                     label: 'Rejected',
                     value: stats.rejected.toDouble(),
-                    color: AppTokens.warning,
+                    color: z.rejected,
                   ),
                 ],
               ),
-              const SizedBox(height: 14),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  _AnalysisStatItem(
-                    label: 'Answered Rate',
-                    value: '${answeredRate.toStringAsFixed(1)}%',
-                    color: AppTokens.success,
-                  ),
-                  _AnalysisStatItem(
-                    label: 'Missed Rate',
-                    value: '${missedRate.toStringAsFixed(1)}%',
-                    color: AppTokens.danger,
-                  ),
-                  _AnalysisStatItem(
-                    label: 'Talk Time',
-                    value: Fmt.duration(stats.talkTimeSeconds),
-                    color: AppTokens.brandElectric,
-                  ),
-                ],
+            ),
+            rows: [
+              _LedgerRow(
+                leading: _Swatch(z.accent),
+                label: 'Answered',
+                note: pct(stats.answered),
+                value: '${stats.answered}',
+                onTap: () => open(PopupFilterCategory.answered),
+              ),
+              // One row for every incoming call nobody answered. "Missed"
+              // and "Incoming Not Answered" used to sit side by side and
+              // almost always showed the same number.
+              _LedgerRow(
+                leading: _Swatch(z.missed),
+                label: 'Missed',
+                note: pct(stats.neverAttended),
+                value: '${stats.neverAttended}',
+                onTap: () => open(PopupFilterCategory.missed),
+              ),
+              _LedgerRow(
+                leading: _Swatch(z.noAnswer),
+                label: 'Not picked up',
+                note: pct(stats.notPickupByClient),
+                value: '${stats.notPickupByClient}',
+                onTap: () => open(PopupFilterCategory.notPickup),
+              ),
+              _LedgerRow(
+                leading: _Swatch(z.rejected),
+                label: 'Rejected',
+                note: pct(stats.rejected),
+                value: '${stats.rejected}',
+                onTap: () => open(PopupFilterCategory.rejected),
               ),
             ],
           ),
-        ),
-        const SizedBox(height: 12),
 
-        // ── Call Directions Ratio ──
-        AppCard(
-          padding: const EdgeInsets.all(18),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Volume by Direction',
-                style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w700,
-                  color: Colors.white,
+          // ── Direction ────────────────────────────────────────────────────
+          _Section(
+            top: 20,
+            header: const SectionHeader('Direction', padding: EdgeInsets.zero),
+            rows: [
+              _LedgerRow(
+                leading: CallGlyph(
+                  CallGlyphKind.incoming,
+                  size: 14,
+                  color: z.incoming,
                 ),
+                label: 'Incoming',
+                note: Fmt.duration(stats.incomingDurationSeconds),
+                value: '${stats.incoming}',
+                onTap: () => open(PopupFilterCategory.incoming),
               ),
-              const SizedBox(height: 12),
-              MiniBarDistribution(
-                height: 10,
-                segments: [
-                  DistributionSegment(
-                    label: 'Incoming',
-                    value: stats.incoming.toDouble(),
-                    color: AppTokens.callIncoming,
-                  ),
-                  DistributionSegment(
-                    label: 'Outgoing',
-                    value: stats.outgoing.toDouble(),
-                    color: AppTokens.callOutgoing,
-                  ),
-                ],
+              _LedgerRow(
+                leading: CallGlyph(
+                  CallGlyphKind.outgoing,
+                  size: 14,
+                  color: z.outgoing,
+                ),
+                label: 'Outgoing',
+                note: Fmt.duration(stats.outgoingDurationSeconds),
+                value: '${stats.outgoing}',
+                onTap: () => open(PopupFilterCategory.outgoing),
               ),
-              const SizedBox(height: 14),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  _AnalysisStatItem(
-                    label: 'Incoming Volume',
-                    value: '${stats.incoming}',
-                    color: AppTokens.callIncoming,
-                  ),
-                  _AnalysisStatItem(
-                    label: 'Outgoing Volume',
-                    value: '${stats.outgoing}',
-                    color: AppTokens.callOutgoing,
-                  ),
-                  _AnalysisStatItem(
-                    label: 'Unique Contacts',
-                    value: '${stats.uniqueCalls}',
-                    color: AppTokens.brandPurple,
-                  ),
-                ],
+              _LedgerRow(
+                leading: Icon(
+                  Icons.person_outline_rounded,
+                  size: 16,
+                  color: z.ink3,
+                ),
+                label: 'People reached',
+                note: 'unique numbers',
+                value: '${stats.uniqueCalls}',
+                onTap: () => open(PopupFilterCategory.uniqueCalls),
               ),
             ],
           ),
-        ),
-        const SizedBox(height: 12),
 
-        // ── Recording Ingestion Availability ──
-        AppCard(
-          padding: const EdgeInsets.all(18),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Call recordings',
-                style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w700,
-                  color: Colors.white,
-                ),
+          // ── Timing ───────────────────────────────────────────────────────
+          // What the old "Call insights" tiles said, as two plain rows.
+          _Section(
+            top: 20,
+            header: const SectionHeader('Timing', padding: EdgeInsets.zero),
+            rows: [
+              _LedgerRow(
+                label: 'Busiest time',
+                // Computed from the period's connected calls. This used to
+                // print a fixed "10 AM – 12 PM" whatever the data said.
+                value: _peakWindowLabel(stats.peakHourStart),
               ),
-              const SizedBox(height: 12),
-              MiniBarDistribution(
-                height: 10,
-                segments: [
-                  DistributionSegment(
-                    label: 'Matched',
-                    value: stats.recordingsMatched.toDouble(),
-                    color: AppTokens.success,
-                  ),
-                  DistributionSegment(
-                    label: 'Review',
-                    value: stats.recordingsNeedReview.toDouble(),
-                    color: AppTokens.warning,
-                  ),
-                  DistributionSegment(
-                    label: 'No Audio',
-                    value: stats.recordingsAbsent.toDouble(),
-                    color: AppTokens.textDisabled,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Text(
-                stats.recordingEligible == 0
-                    ? 'No connected calls in this period.'
-                    : 'Of ${stats.recordingEligible} recordable '
-                        '${stats.recordingEligible == 1 ? "call" : "calls"}. '
-                        '${stats.recordingsNotApplicable} unanswered '
-                        '${stats.recordingsNotApplicable == 1 ? "call" : "calls"} excluded.',
-                style: const TextStyle(
-                  color: AppTokens.textMuted,
-                  fontSize: 11,
-                  height: 1.4,
-                ),
-              ),
-              const SizedBox(height: 14),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  _AnalysisStatItem(
-                    label: 'Matched Audio',
-                    value: '${stats.recordingsMatched}',
-                    color: AppTokens.success,
-                  ),
-                  _AnalysisStatItem(
-                    label: 'Needs Review',
-                    value: '${stats.recordingsNeedReview}',
-                    color: AppTokens.warning,
-                  ),
-                  _AnalysisStatItem(
-                    label: 'Matched Rate',
-                    value: '${recordingRate.toStringAsFixed(1)}%',
-                    color: AppTokens.info,
-                  ),
-                ],
+              _LedgerRow(
+                label: 'Average call',
+                value: Fmt.duration(stats.averageDurationSeconds),
               ),
             ],
           ),
-        ),
-      ],
-    );
-  }
+        ],
 
-  Widget _buildInsightsGrid(CallStats stats) {
-    final missedRate = '${stats.missedRate.toStringAsFixed(1)}%';
-
-    return Row(
-      children: [
-        Expanded(
-          child: _InsightTile(
-            icon: Icons.schedule_rounded,
-            label: 'Peak Time',
-            // Computed from the period's connected calls. This tile used to
-            // print a fixed "10 AM – 12 PM" whatever the data said.
-            value: _peakWindowLabel(stats.peakHourStart),
-            color: AppTokens.brandElectric,
-          ),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: _InsightTile(
-            icon: Icons.trending_down_rounded,
-            label: 'Missed Call Rate',
-            value: missedRate,
-            color: AppTokens.danger,
-          ),
-        ),
+        // ── Latest calls ───────────────────────────────────────────────────
+        const _RecentCalls(),
       ],
     );
   }
@@ -746,126 +412,91 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     return '${label(startHour)} – ${label(startHour + 2)}';
   }
 
-  String _periodLabel(DashboardPeriod p) => switch (p) {
-        DashboardPeriod.today => 'Today',
-        DashboardPeriod.yesterday => 'Yesterday',
-        DashboardPeriod.week => 'This Week',
-        DashboardPeriod.month => 'This Month',
-        DashboardPeriod.all => 'All Time',
-      };
+  static String _periodLabel(DashboardPeriod p) => switch (p) {
+    DashboardPeriod.today => 'Today',
+    DashboardPeriod.yesterday => 'Yesterday',
+    DashboardPeriod.week => 'This week',
+    DashboardPeriod.month => 'This month',
+    DashboardPeriod.all => 'All time',
+  };
 
-  void _showPeriodSelector(BuildContext context) {
-    final current = ref.read(dashboardPeriodProvider);
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: AppTokens.surface1,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        side: BorderSide(color: AppTokens.borderDefault),
-      ),
-      builder: (context) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 38,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: AppTokens.borderDefault,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              const SizedBox(height: 14),
-              const Text(
-                'Select Time Period',
-                style: TextStyle(
-                  fontWeight: FontWeight.w700,
-                  fontSize: 17,
-                  color: Colors.white,
-                ),
-              ),
-              const SizedBox(height: 12),
-              for (final p in DashboardPeriod.values)
-                ListTile(
-                  title: Text(
-                    _periodLabel(p),
-                    style: TextStyle(
-                      fontWeight:
-                          p == current ? FontWeight.w700 : FontWeight.w500,
-                      color: p == current ? AppTokens.brandElectric : Colors.white,
-                    ),
-                  ),
-                  trailing: p == current
-                      ? const Icon(
-                          Icons.check_rounded,
-                          color: AppTokens.brandElectric,
-                        )
-                      : null,
-                  onTap: () {
-                    ref.read(dashboardPeriodProvider.notifier).select(p);
-                    Navigator.of(context).pop();
-                  },
-                ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+  /// What the trend is measured against: the same-length window just before.
+  static String _previousName(DashboardPeriod p) => switch (p) {
+    DashboardPeriod.today => 'yesterday',
+    DashboardPeriod.yesterday => 'the day before',
+    _ => 'the period before',
+  };
 
+  /// The sheet takes its surface, top corners and drag handle from the
+  /// theme, and pads its content up from the system navigation bar.
   void _showFilterOptions(BuildContext context) {
     showModalBottomSheet<void>(
       context: context,
-      backgroundColor: AppTokens.surface1,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        side: BorderSide(color: AppTokens.borderDefault),
-      ),
-      builder: (context) => StatefulBuilder(
-        builder: (context, setModalState) {
-          final isExcluded = ref.watch(analyticsExcludeInternalProvider);
-          return SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.all(20),
+      // Its own Consumer: the sheet's switch follows the setting without the
+      // dashboard watching from inside a builder it does not own.
+      builder: (context) => Consumer(
+        builder: (context, ref, _) {
+          final z = context.z;
+          return BottomSafe(
+            child: SingleChildScrollView(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const Text(
-                    'Analytics Filters',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(
+                      AppTokens.gutter,
+                      0,
+                      AppTokens.gutter,
+                      12,
+                    ),
+                    child: Semantics(
+                      header: true,
+                      child: Text('Filters', style: AppType.heading),
                     ),
                   ),
-                  const SizedBox(height: 16),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    activeThumbColor: AppTokens.brandElectric,
-                    title: const Text(
-                      'Exclude Internal Employee Calls',
-                      style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                  DecoratedBox(
+                    decoration: BoxDecoration(
+                      border: Border.symmetric(
+                        horizontal: BorderSide(color: z.line),
+                      ),
                     ),
-                    subtitle: const Text(
-                      'Hides intra-company team calls from analytics',
-                      style: TextStyle(color: AppTokens.textMuted),
+                    child: SwitchListTile(
+                      contentPadding: const EdgeInsets.fromLTRB(
+                        AppTokens.gutter,
+                        6,
+                        12,
+                        6,
+                      ),
+                      title: Text(
+                        'Hide internal calls',
+                        style: AppType.bodyMedium.copyWith(color: z.ink),
+                      ),
+                      subtitle: Text(
+                        'Leaves out calls to office extensions (numbers of 4 '
+                        'digits or fewer).',
+                        style: AppType.label.copyWith(
+                          color: z.ink3,
+                          fontWeight: FontWeight.w400,
+                        ),
+                      ),
+                      value: ref.watch(analyticsExcludeInternalProvider),
+                      onChanged: (val) => ref
+                          .read(analyticsExcludeInternalProvider.notifier)
+                          .set(val),
                     ),
-                    value: isExcluded,
-                    onChanged: (val) {
-                      ref.read(analyticsExcludeInternalProvider.notifier).set(val);
-                      setModalState(() {});
-                    },
                   ),
-                  const SizedBox(height: 16),
-                  SizedBox(
-                    width: double.infinity,
-                    height: 48,
-                    child: FilledButton(
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(
+                      AppTokens.gutter,
+                      20,
+                      AppTokens.gutter,
+                      0,
+                    ),
+                    child: ZButton(
+                      label: 'Done',
+                      size: ZButtonSize.large,
                       onPressed: () => Navigator.of(context).pop(),
-                      child: const Text('Apply Filters'),
                     ),
                   ),
                 ],
@@ -878,269 +509,153 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   }
 }
 
-// ── Hero Metric Card ─────────────────────────────────────────────────────────
-class _HeroMetricCard extends StatelessWidget {
-  const _HeroMetricCard({
-    required this.totalCalls,
-    required this.talkTimeSeconds,
-    required this.sparklineData,
-    this.onTap,
+// ── Brand panel ──────────────────────────────────────────────────────────────
+
+/// The one bold element on Home: a full-bleed Zebu-blue panel from the top
+/// of the screen. Blue in both themes, so the status-bar icons over it are
+/// always light.
+class _BrandPanel extends StatelessWidget {
+  const _BrandPanel({required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) => AnnotatedRegion<SystemUiOverlayStyle>(
+    value: const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      statusBarIconBrightness: Brightness.light,
+      statusBarBrightness: Brightness.dark,
+    ),
+    child: ColoredBox(
+      color: AppTokens.zebuBlue,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          AppTokens.gutter,
+          context.safeTop + 12,
+          AppTokens.gutter,
+          20,
+        ),
+        child: DefaultTextStyle.merge(
+          style: const TextStyle(color: AppTokens.onBrand),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: children,
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+class _PanelHeader extends StatelessWidget {
+  const _PanelHeader({
+    required this.greeting,
+    required this.activeFilters,
+    required this.onFilter,
+    required this.onRefresh,
+    required this.onSettings,
   });
 
-  final int totalCalls;
-  final int talkTimeSeconds;
-  final List<double> sparklineData;
-  final VoidCallback? onTap;
+  final String greeting;
+
+  /// Filters switched on in the sheet. The badge shows only when one is.
+  final int activeFilters;
+  final VoidCallback onFilter;
+  final VoidCallback onRefresh;
+  final VoidCallback onSettings;
 
   @override
   Widget build(BuildContext context) {
-    return AppCard(
-      padding: const EdgeInsets.fromLTRB(20, 18, 20, 12),
-      onTap: onTap,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    final filtered = activeFilters > 0;
+    return Row(
+      children: [
+        const ZebuAppMark(size: 32, inverse: true),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
             children: [
-              const Text(
-                'Total Phone Calls',
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.8,
-                  color: AppTokens.textMuted,
-                ),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                  color: AppTokens.success.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(
-                    color: AppTokens.success.withValues(alpha: 0.3),
+              Semantics(
+                header: true,
+                child: Text(
+                  'Call Tracker',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppType.bodyStrong.copyWith(
+                    color: AppTokens.onBrand,
+                    fontSize: 16,
                   ),
                 ),
-                child: const Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      Icons.arrow_upward_rounded,
-                      size: 12,
-                      color: AppTokens.success,
-                    ),
-                    SizedBox(width: 3),
-                    Text(
-                      '+12% vs last period',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w700,
-                        color: AppTokens.success,
+              ),
+              Text(
+                greeting,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AppType.label.copyWith(
+                  color: AppTokens.onBrandMuted,
+                  fontWeight: FontWeight.w400,
+                ),
+              ),
+            ],
+          ),
+        ),
+        // The icons' 44px hit areas overhang the gutter so the glyphs line up
+        // with the panel's right edge.
+        Transform.translate(
+          offset: const Offset(10, 0),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  TapIcon(
+                    icon: Icons.tune_rounded,
+                    tooltip: filtered
+                        ? 'Filters, $activeFilters on'
+                        : 'Filters',
+                    color: AppTokens.onBrand,
+                    onTap: onFilter,
+                  ),
+                  if (filtered)
+                    Positioned(
+                      top: 6,
+                      right: 4,
+                      child: IgnorePointer(
+                        child: Container(
+                          width: 16,
+                          height: 16,
+                          alignment: Alignment.center,
+                          decoration: const BoxDecoration(
+                            color: AppTokens.onBrand,
+                            shape: BoxShape.circle,
+                          ),
+                          child: Text(
+                            '$activeFilters',
+                            style: AppType.tabular(
+                              AppType.micro,
+                            ).copyWith(color: AppTokens.zebuBlue, height: 1),
+                          ),
+                        ),
                       ),
                     ),
-                  ],
-                ),
+                ],
+              ),
+              TapIcon(
+                icon: Icons.refresh_rounded,
+                tooltip: 'Refresh',
+                color: AppTokens.onBrand,
+                onTap: onRefresh,
+              ),
+              TapIcon(
+                icon: Icons.settings_outlined,
+                tooltip: 'Settings',
+                color: AppTokens.onBrand,
+                onTap: onSettings,
               ),
             ],
-          ),
-          const SizedBox(height: 8),
-
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.baseline,
-            textBaseline: TextBaseline.alphabetic,
-            children: [
-              Text(
-                '$totalCalls',
-                style: const TextStyle(
-                  fontSize: 34,
-                  fontWeight: FontWeight.w900,
-                  color: Colors.white,
-                  letterSpacing: -0.6,
-                  fontFeatures: [FontFeature.tabularFigures()],
-                ),
-              ),
-              const SizedBox(width: 12),
-              Text(
-                '· ${Fmt.exactDuration(talkTimeSeconds)} total duration',
-                style: const TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w500,
-                  color: AppTokens.textSecondary,
-                  fontFeatures: [FontFeature.tabularFigures()],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-
-          // Mini Area Sparkline chart
-          MiniSparkline(
-            data: sparklineData,
-            height: 48,
-            lineColor: AppTokens.brandElectric,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ── Filter Pill Components ───────────────────────────────────────────────────
-class _FilterPill extends StatelessWidget {
-  const _FilterPill({
-    required this.icon,
-    required this.badgeCount,
-    required this.label,
-    required this.onTap,
-  });
-
-  final IconData icon;
-  final int badgeCount;
-  final String label;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(AppTokens.r20),
-        child: Ink(
-          height: 36,
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          decoration: BoxDecoration(
-            color: AppTokens.surface1,
-            borderRadius: BorderRadius.circular(AppTokens.r20),
-            border: Border.all(color: AppTokens.borderDefault),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, size: 15, color: Colors.white),
-              const SizedBox(width: 6),
-              Container(
-                width: 16,
-                height: 16,
-                decoration: const BoxDecoration(
-                  color: AppTokens.brandElectric,
-                  shape: BoxShape.circle,
-                ),
-                alignment: Alignment.center,
-                child: Text(
-                  '$badgeCount',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 9.5,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 6),
-              Text(
-                label,
-                style: const TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
-                  color: Colors.white,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _DropdownPill extends StatelessWidget {
-  const _DropdownPill({
-    required this.label,
-    required this.onTap,
-    this.icon,
-    this.activeColor,
-  });
-
-  final String label;
-  final VoidCallback onTap;
-  final IconData? icon;
-  final Color? activeColor;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(AppTokens.r20),
-        child: Ink(
-          height: 36,
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          decoration: BoxDecoration(
-            color: AppTokens.surface1,
-            borderRadius: BorderRadius.circular(AppTokens.r20),
-            border: Border.all(
-              color: activeColor?.withValues(alpha: 0.5) ?? AppTokens.borderDefault,
-            ),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (icon != null) ...[
-                Icon(icon, size: 14, color: activeColor ?? AppTokens.textSecondary),
-                const SizedBox(width: 6),
-              ],
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
-                  color: activeColor ?? Colors.white,
-                ),
-              ),
-              const SizedBox(width: 4),
-              Icon(
-                Icons.keyboard_arrow_down_rounded,
-                size: 16,
-                color: activeColor ?? AppTokens.textMuted,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _AnalysisStatItem extends StatelessWidget {
-  const _AnalysisStatItem({
-    required this.label,
-    required this.value,
-    required this.color,
-  });
-
-  final String label;
-  final String value;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          label,
-          style: const TextStyle(fontSize: 11.5, color: AppTokens.textMuted),
-        ),
-        const SizedBox(height: 3),
-        Text(
-          value,
-          style: TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.w800,
-            color: color,
-            letterSpacing: -0.3,
-            fontFeatures: const [FontFeature.tabularFigures()],
           ),
         ),
       ],
@@ -1148,54 +663,437 @@ class _AnalysisStatItem extends StatelessWidget {
   }
 }
 
-class _InsightTile extends StatelessWidget {
-  const _InsightTile({
-    required this.icon,
-    required this.label,
-    required this.value,
-    required this.color,
+/// The period's call count, large, with the trend against the window before
+/// it at the right. Tapping opens the list of every call.
+class _Headline extends StatelessWidget {
+  const _Headline({
+    required this.total,
+    required this.trend,
+    required this.previousName,
+    required this.onTap,
   });
 
-  final IconData icon;
-  final String label;
-  final String value;
-  final Color color;
+  final int total;
+
+  /// From [trendLabel]; null hides it.
+  final String? trend;
+  final String previousName;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return AppCard(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      child: Row(
-        children: [
-          IconChip(icon: icon, color: color, size: 32, iconSize: 16),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  label,
-                  style: const TextStyle(
-                    fontSize: 11.5,
-                    color: AppTokens.textMuted,
-                  ),
+    final trend = this.trend;
+    return Semantics(
+      button: true,
+      label:
+          '$total ${total == 1 ? 'call' : 'calls'}'
+          '${trend == null ? '' : trend == 'New' ? ', none $previousName' : ', $trend vs $previousName'}'
+          '. Show all calls',
+      excludeSemantics: true,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(AppTokens.r8),
+        splashColor: AppTokens.onBrand.withValues(alpha: 0.16),
+        highlightColor: Colors.transparent,
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Expanded(
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.bottomLeft,
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    Text(
+                      '$total',
+                      maxLines: 1,
+                      style: AppType.display.copyWith(color: AppTokens.onBrand),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      total == 1 ? 'call' : 'calls',
+                      style: AppType.barTitle.copyWith(
+                        color: AppTokens.onBrandMuted,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  value,
-                  style: const TextStyle(
-                    fontSize: 13.5,
-                    fontWeight: FontWeight.w700,
-                    color: Colors.white,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            // Measured against the previous window of the same length. This
+            // used to read "+12% vs last period", in green, always.
+            if (trend != null) ...[
+              const SizedBox(width: 12),
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      trend,
+                      style: AppType.tabular(
+                        AppType.bodyStrong,
+                      ).copyWith(color: AppTokens.onBrand, fontSize: 16),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      trend == 'New'
+                          ? 'none $previousName'
+                          : 'vs $previousName',
+                      style: AppType.caption.copyWith(
+                        color: AppTokens.onBrandMuted,
+                      ),
+                    ),
+                  ],
                 ),
-              ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Status and alerts ────────────────────────────────────────────────────────
+
+/// One line saying whether the CRM has every call, and a way to the Sync tab.
+///
+/// Its own widget, selecting just the numbers it shows, so queue changes
+/// rebuild this line and nothing else on the dashboard.
+class _SendStatusLine extends ConsumerWidget {
+  const _SendStatusLine();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final z = context.z;
+    final counts = ref.watch(
+      syncCountersProvider.select((a) {
+        final c = a.value;
+        if (c == null) return null;
+        return (
+          waiting: c['waiting'] ?? 0,
+          uploading: c['uploading'] ?? 0,
+          failed: c['failed'] ?? 0,
+        );
+      }),
+    );
+    if (counts == null) return const SizedBox.shrink();
+
+    String calls(int n) => n == 1 ? '1 call' : '$n calls';
+    final (Color color, bool pulse, String title, String subtitle) =
+        counts.failed > 0
+        ? (
+            z.danger,
+            false,
+            "${calls(counts.failed)} couldn't be sent",
+            'Open Sync to see why and send again',
+          )
+        : counts.uploading > 0
+        ? (
+            z.accent,
+            true,
+            'Sending ${calls(counts.uploading + counts.waiting)} to Zebu CRM',
+            'This takes a few seconds',
+          )
+        : counts.waiting > 0
+        ? (
+            z.warn,
+            false,
+            '${calls(counts.waiting)} waiting to send',
+            'Goes out automatically when online',
+          )
+        : (
+            z.ok,
+            false,
+            'All calls sent to Zebu CRM',
+            'Nothing is waiting on this phone',
+          );
+
+    return Material(
+      color: z.raised,
+      child: InkWell(
+        onTap: () => ref.read(homeTabProvider.notifier).show(HomeTab.sync),
+        child: Container(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppTokens.gutter,
+            vertical: 14,
+          ),
+          decoration: BoxDecoration(
+            border: Border(bottom: BorderSide(color: z.line)),
+          ),
+          child: Row(
+            children: [
+              StatusDot(color: color, size: 10, pulse: pulse),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: AppType.tabular(
+                        AppType.bodyStrong,
+                      ).copyWith(color: z.ink),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      style: AppType.label.copyWith(
+                        color: z.ink3,
+                        fontWeight: FontWeight.w400,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Icon(Icons.chevron_right_rounded, size: 20, color: z.ink3),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// [SyncAlertBanner] in the gutter, taking no space when there is nothing
+/// to say.
+class _AlertsSlot extends ConsumerWidget {
+  const _AlertsSlot();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final none = ref.watch(syncAlertsProvider.select((a) => a.isEmpty));
+    if (none) return const SizedBox.shrink();
+    return const Padding(
+      padding: EdgeInsets.fromLTRB(AppTokens.gutter, 16, AppTokens.gutter, 0),
+      child: SyncAlertBanner(),
+    );
+  }
+}
+
+// ── Sections and rows ────────────────────────────────────────────────────────
+
+/// A content section inside the gutter: a heading, an optional lead (the
+/// share bar), and ruled rows.
+class _Section extends StatelessWidget {
+  const _Section({
+    required this.top,
+    required this.header,
+    required this.rows,
+    this.lead,
+  });
+
+  final double top;
+  final Widget header;
+  final Widget? lead;
+  final List<Widget> rows;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: EdgeInsets.fromLTRB(AppTokens.gutter, top, AppTokens.gutter, 0),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        header,
+        if (lead != null) lead! else const SizedBox(height: 4),
+        for (var i = 0; i < rows.length; i++) ...[
+          if (i > 0) const Divider(height: 1),
+          rows[i],
+        ],
+      ],
+    ),
+  );
+}
+
+/// A 10px rounded colour swatch naming an outcome in the share bar.
+class _Swatch extends StatelessWidget {
+  const _Swatch(this.color);
+
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: 10,
+    height: 10,
+    decoration: BoxDecoration(
+      color: color,
+      borderRadius: BorderRadius.circular(3),
+    ),
+  );
+}
+
+/// One ruled figure row: optional mark, label, a muted note (a share or a
+/// duration), the figure right-aligned, and a chevron when it opens a list.
+class _LedgerRow extends StatelessWidget {
+  const _LedgerRow({
+    required this.label,
+    required this.value,
+    this.leading,
+    this.note,
+    this.onTap,
+  });
+
+  final Widget? leading;
+  final String label;
+  final String? note;
+  final String value;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final z = context.z;
+    return MergeSemantics(
+      child: Semantics(
+        button: onTap != null,
+        child: InkWell(
+          onTap: onTap,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 48),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Row(
+                children: [
+                  if (leading != null) ...[
+                    SizedBox(width: 16, child: Center(child: leading)),
+                    const SizedBox(width: 10),
+                  ],
+                  Expanded(
+                    child: Text(
+                      label,
+                      style: AppType.body.copyWith(color: z.ink),
+                    ),
+                  ),
+                  if (note != null) ...[
+                    const SizedBox(width: 12),
+                    Text(
+                      note!,
+                      style: AppType.tabular(
+                        AppType.label,
+                      ).copyWith(color: z.ink3, fontWeight: FontWeight.w400),
+                    ),
+                  ],
+                  const SizedBox(width: 12),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(minWidth: 44),
+                    child: Text(
+                      value,
+                      textAlign: TextAlign.right,
+                      style: AppType.tabular(
+                        AppType.bodyStrong,
+                      ).copyWith(color: z.ink),
+                    ),
+                  ),
+                  if (onTap != null) ...[
+                    const SizedBox(width: 6),
+                    Icon(Icons.chevron_right_rounded, size: 18, color: z.ink3),
+                  ],
+                ],
+              ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// No calls in the selected period: say so, and offer the widest one.
+class _EmptyPeriod extends StatelessWidget {
+  const _EmptyPeriod({required this.onShowAll});
+
+  /// Null when the period is already All time.
+  final VoidCallback? onShowAll;
+
+  @override
+  Widget build(BuildContext context) {
+    final z = context.z;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AppTokens.gutter,
+        28,
+        AppTokens.gutter,
+        4,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('No calls in this period', style: AppType.heading),
+          const SizedBox(height: 6),
+          Text(
+            'Calls you make or receive appear here a few seconds after they '
+            'end. Pick another period above to look further back.',
+            style: AppType.small.copyWith(color: z.ink2),
+          ),
+          if (onShowAll != null) ...[
+            const SizedBox(height: 8),
+            ZButton(
+              label: 'Show all time',
+              variant: ZButtonVariant.text,
+              size: ZButtonSize.compact,
+              expand: false,
+              onPressed: onShowAll,
+            ),
+          ],
         ],
       ),
+    );
+  }
+}
+
+// ── Latest calls ─────────────────────────────────────────────────────────────
+/// The latest few calls, with a jump to the Calls tab.
+///
+/// Its own widget selecting only the feed's row list — which keeps its
+/// identity while the Calls tab shows its load-more spinner — so the rest of
+/// the dashboard still never rebuilds for feed changes.
+class _RecentCalls extends ConsumerWidget {
+  const _RecentCalls();
+
+  static const _count = 3;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final entries = ref.watch(callFeedProvider.select((f) => f.value?.entries));
+    if (entries == null || entries.isEmpty) return const SizedBox.shrink();
+    final recent = entries.take(_count).toList(growable: false);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 16),
+        SectionHeader(
+          'Latest calls',
+          padding: const EdgeInsets.fromLTRB(AppTokens.gutter, 0, 8, 0),
+          trailing: ZButton(
+            label: 'View all',
+            variant: ZButtonVariant.text,
+            size: ZButtonSize.small,
+            expand: false,
+            onPressed: () =>
+                ref.read(homeTabProvider.notifier).show(HomeTab.calls),
+          ),
+        ),
+        const SizedBox(height: 4),
+        for (var i = 0; i < recent.length; i++)
+          CardListSlice(
+            first: i == 0,
+            last: i == recent.length - 1,
+            child: CallRowTile(
+              entry: recent[i],
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => CallDetailScreen(entry: recent[i]),
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

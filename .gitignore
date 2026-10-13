@@ -69,3 +69,13 @@ android/key.properties
 *.m4a
 *.aac
 *.amr
+
+# Firebase service-account keys: server-only secrets, never commit
+*-firebase-adminsdk*.json
+zebu-calltraker-*.json
+
+# Firebase client config: kept out of this public repo, supplied at build time
+android/app/google-services.json
+
+# Claude Code design-skill packs: local tooling, third-party content
+.claude/skills/

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,6 +10,7 @@ import 'core/network/api_client_provider.dart';
 import 'core/network/connectivity_service.dart';
 import 'core/notifications/notification_service.dart';
 import 'core/theme/app_theme.dart';
+import 'core/theme/appearance.dart';
 import 'core/theme/design_tokens.dart';
 import 'features/auth/data/auth_controller.dart';
 import 'features/auth/presentation/login_screen.dart';
@@ -22,17 +25,20 @@ import 'features/permissions/presentation/permission_onboarding_screen.dart';
 import 'features/post_call/data/post_call_event_provider.dart';
 import 'features/synchronization/data/sync_service.dart';
 import 'features/synchronization/presentation/sync_screen.dart';
+import 'shared/widgets/ui_kit.dart';
 
-class CallTrackerApp extends StatelessWidget {
+class CallTrackerApp extends ConsumerWidget {
   const CallTrackerApp({super.key});
 
   @override
-  Widget build(BuildContext context) => MaterialApp(
+  Widget build(BuildContext context, WidgetRef ref) => MaterialApp(
         title: AppConfig.appName,
         debugShowCheckedModeBanner: false,
         theme: AppTheme.light(),
         darkTheme: AppTheme.dark(),
-        themeMode: ThemeMode.dark, // Dark-first 2026 intelligence UI
+        // Settings → Appearance. System by default, so the app follows the
+        // phone's own dark-mode switch.
+        themeMode: ref.watch(appearanceProvider).themeMode,
         home: const AppGate(),
       );
 }
@@ -114,14 +120,23 @@ class AppGate extends ConsumerWidget {
       },
     );
 
+    final dark = context.z.isDark;
+
     return AnnotatedRegion<SystemUiOverlayStyle>(
-      value: const SystemUiOverlayStyle(
+      // Edge to edge: both system bars are transparent and the app draws
+      // behind them. Every screen pads itself clear of them (SafeAreaX in
+      // ui_kit.dart), so no content sits under the status bar or nav buttons.
+      // Icons follow the theme; the Home summary panel, which is brand blue in
+      // both themes, sets light icons over itself.
+      value: SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
-        statusBarIconBrightness: Brightness.light,
-        statusBarBrightness: Brightness.dark,
-        systemNavigationBarColor: AppTokens.bgPrimary,
-        systemNavigationBarIconBrightness: Brightness.light,
+        statusBarIconBrightness: dark ? Brightness.light : Brightness.dark,
+        statusBarBrightness: dark ? Brightness.dark : Brightness.light,
+        systemNavigationBarColor: Colors.transparent,
+        systemNavigationBarIconBrightness:
+            dark ? Brightness.light : Brightness.dark,
         systemNavigationBarDividerColor: Colors.transparent,
+        systemNavigationBarContrastEnforced: false,
       ),
       child: AnimatedSwitcher(
         duration: const Duration(milliseconds: 220),
@@ -130,6 +145,24 @@ class AppGate extends ConsumerWidget {
     );
   }
 }
+
+/// The tabs of [HomeShell], in display order.
+enum HomeTab { home, calls, sync }
+
+/// Which [HomeShell] tab is showing.
+///
+/// A provider rather than shell-local state so screens pushed on top of the
+/// shell (Settings, a call's details) can send the user to a tab: pop back to
+/// the root, then `ref.read(homeTabProvider.notifier).show(HomeTab.sync)`.
+class HomeTabController extends Notifier<HomeTab> {
+  @override
+  HomeTab build() => HomeTab.home;
+
+  void show(HomeTab tab) => state = tab;
+}
+
+final homeTabProvider =
+    NotifierProvider<HomeTabController, HomeTab>(HomeTabController.new);
 
 /// Three-tab shell with modern navigation bar.
 class HomeShell extends ConsumerStatefulWidget {
@@ -141,27 +174,46 @@ class HomeShell extends ConsumerStatefulWidget {
 
 class _HomeShellState extends ConsumerState<HomeShell>
     with WidgetsBindingObserver {
-  int _index = 0;
+  /// A resume sooner than this after the last catch-up skips the heavy work.
+  /// The native side ingests and syncs on its own schedule; resume only has to
+  /// bring the screens up to date, not race it.
+  static const _catchUpInterval = Duration(seconds: 60);
+
   bool? _wasConnected;
+
+  /// Set on a real `paused`. `inactive` alone (notification shade, the recents
+  /// switcher, an incoming-call heads-up) does not leave the app, so a resume
+  /// from it has nothing new to fetch.
+  bool _wasPaused = false;
+  DateTime? _lastCatchUp;
+  Future<void>? _catchUpInFlight;
+
+  /// Native's "a call row appeared" pings (WhatsApp calls). The call-log
+  /// observer never fires for those, and a resume can land before the
+  /// tracker has finished writing the row.
+  StreamSubscription<void>? _callsChanged;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _callsChanged = ref
+        .read(nativeBridgeProvider)
+        .callsChangedStream()
+        .listen(
+          (_) {
+            if (mounted) ref.read(callFeedProvider.notifier).refresh();
+          },
+          // No engine, or not Android: there is nothing to listen to.
+          onError: (Object _) {},
+        );
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
 
-      await NotificationService.instance.initialize();
-
-      final background = ref.read(backgroundControllerProvider.notifier);
-      await background.start();
-      await background.drain();
-      // triggerSync ingests before it hands off, and drain() already folded in
-      // whatever the background worker captured. A third standalone ingest here
-      // only re-walked the same call log.
-      await ref.read(syncServiceProvider.notifier).triggerSync();
-      ref.invalidate(syncCountersProvider);
+      await ref.read(backgroundControllerProvider.notifier).start();
+      await _catchUp(force: true);
+      if (!mounted) return;
 
       ref.listenManual<AsyncValue<bool>>(
         connectivityProvider,
@@ -180,8 +232,47 @@ class _HomeShellState extends ConsumerState<HomeShell>
 
   @override
   void dispose() {
+    _callsChanged?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  /// Ingests and hands off to the native uploader, then refreshes the call
+  /// list — once.
+  ///
+  /// The single owner of this sequence. Launch, resume and reconnect each used
+  /// to run their own copy, and a resume ran three ingests back to back, each
+  /// one rewriting the table every watched query reads from.
+  Future<void> _catchUp({bool force = false}) {
+    final inFlight = _catchUpInFlight;
+    if (inFlight != null) return inFlight;
+
+    final last = _lastCatchUp;
+    if (!force &&
+        last != null &&
+        DateTime.now().difference(last) < _catchUpInterval) {
+      return Future.value();
+    }
+
+    return _catchUpInFlight = () async {
+      try {
+        // triggerSync ingests before it hands off to the native coordinator.
+        await ref.read(syncServiceProvider.notifier).triggerSync();
+        if (!mounted) return;
+        await ref.read(callFeedProvider.notifier).refresh();
+        if (!mounted) return;
+        // What native last did — its capture run, its upload — is read on
+        // demand, and both have usually moved on by the time this returns.
+        // Without it a stale "tracking paused" or "blocked" alert outlived
+        // the run that fixed it until the next resume.
+        ref
+          ..invalidate(backgroundStatusProvider)
+          ..invalidate(nativeSyncStatusProvider);
+      } finally {
+        _lastCatchUp = DateTime.now();
+        _catchUpInFlight = null;
+      }
+    }();
   }
 
   void _onConnectivityChanged(
@@ -195,18 +286,10 @@ class _HomeShellState extends ConsumerState<HomeShell>
     _wasConnected = isConnected;
 
     if (isConnected && wasConnected == false) {
-      _triggerAutoSync();
+      if (mounted) _catchUp();
     } else if (!isConnected) {
       _maybeShowOfflineReminder();
     }
-  }
-
-  Future<void> _triggerAutoSync() async {
-    if (!mounted) return;
-    await ref.read(backgroundControllerProvider.notifier).drain();
-    await ref.read(syncServiceProvider.notifier).ingestNativeCallLogs();
-    await ref.read(syncServiceProvider.notifier).triggerSync();
-    ref.invalidate(syncCountersProvider);
   }
 
   Future<void> _maybeShowOfflineReminder() async {
@@ -223,11 +306,6 @@ class _HomeShellState extends ConsumerState<HomeShell>
 
     final entries =
         ref.read(callFeedProvider).value?.entries ?? const <CallEntry>[];
-    if (entries.isEmpty) {
-      setState(() => _index = 1);
-      return;
-    }
-
     final match = entries.cast<CallEntry?>().firstWhere(
           (e) => e!.row.dateMillis == event.startedAtMillis,
           orElse: () => null,
@@ -240,108 +318,258 @@ class _HomeShellState extends ConsumerState<HomeShell>
         ),
       );
     } else {
-      setState(() => _index = 1);
+      ref.read(homeTabProvider.notifier).show(HomeTab.calls);
     }
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
-    if (state == AppLifecycleState.resumed && mounted) {
-      // Android gives no broadcast when a permission is revoked, so resume is
-      // the only reliable moment to re-read. Without this the snapshot stayed
-      // as it was at launch: a user could turn call-log access off in Android
-      // Settings, come straight back, and the app would carry on showing a
-      // healthy dashboard that was no longer recording anything.
-      //
-      // Both consumers depend on it — the gate in AppGate, which diverts to the
-      // recovery walkthrough, and the alert banner.
-      ref
-        ..invalidate(permissionStatusProvider)
-        ..invalidate(backgroundStatusProvider);
-
-      ref.read(backgroundControllerProvider.notifier).drain().then((_) {
+    switch (state) {
+      case AppLifecycleState.resumed:
         if (!mounted) return;
-        ref.read(syncServiceProvider.notifier).ingestNativeCallLogs().then((_) {
-          if (!mounted) return;
-          ref.read(syncServiceProvider.notifier).triggerSync().then((_) {
-            if (mounted) ref.invalidate(syncCountersProvider);
-          });
-        });
-      });
-    } else if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive ||
-        state == AppLifecycleState.detached) {
-      // Trigger native expedited worker so upload continues uninterrupted when closed/backgrounded
-      try {
-        ref.read(nativeBridgeProvider).triggerNativeSync();
-      } catch (_) {}
+        // Android gives no broadcast when a permission is revoked, so resume
+        // is the only reliable moment to re-read. Without this the snapshot
+        // stayed as it was at launch: a user could turn call-log access off in
+        // Android Settings, come straight back, and the app would carry on
+        // showing a healthy dashboard that was no longer recording anything.
+        //
+        // Both consumers depend on it — the gate in AppGate, which diverts to
+        // the recovery walkthrough, and the alert banner.
+        ref
+          ..invalidate(permissionStatusProvider)
+          ..invalidate(backgroundStatusProvider);
+
+        if (_wasPaused) {
+          _wasPaused = false;
+          // Back from a settings screen the alert sent them to: check now,
+          // not after the usual interval.
+          _catchUp(
+            force: ref.read(syncServiceProvider.notifier).serverCheckRequested,
+          );
+        }
+      case AppLifecycleState.paused:
+        _wasPaused = true;
+        // Hand the queue to the native worker so uploads carry on once the
+        // app is backgrounded. Not on `inactive`: that fires for a pulled-down
+        // notification shade, and each enqueue there replaced the upload
+        // already running.
+        //
+        // Only when something is queued. Every pause used to wake the
+        // coordinator, which spends a network round-trip finding an empty
+        // queue. The counters are live (the Sync tab icon watches them); an
+        // unknown value still hands off, since skipping a real backlog costs
+        // more than one wasted run.
+        final counters = ref.read(syncCountersProvider).value;
+        final queued = counters == null ||
+            (counters['waiting'] ?? 0) +
+                    (counters['failed'] ?? 0) +
+                    (counters['uploading'] ?? 0) >
+                0;
+        if (queued) {
+          ref.read(nativeBridgeProvider).triggerNativeSync().ignore();
+        }
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.detached:
+        break;
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final countersAsync = ref.watch(syncCountersProvider);
-    final waiting = countersAsync.asData?.value['waiting'] ?? 0;
+    final tab = ref.watch(homeTabProvider);
 
     return Scaffold(
-      backgroundColor: AppTokens.bgPrimary,
       body: IndexedStack(
-        index: _index,
+        index: tab.index,
         children: [
-          DashboardScreen(
-            onSeeAllCalls: () => setState(() => _index = 1),
-            pendingSyncCount: waiting,
+          // TickerMode stops hidden tabs' animations (skeleton shimmer,
+          // spinners) from running every frame behind the visible one.
+          TickerMode(
+            enabled: tab == HomeTab.home,
+            child: const DashboardScreen(),
           ),
-          const CallHistoryScreen(),
-          const SyncScreen(),
+          TickerMode(
+            enabled: tab == HomeTab.calls,
+            child: const CallHistoryScreen(),
+          ),
+          TickerMode(
+            enabled: tab == HomeTab.sync,
+            child: const SyncScreen(),
+          ),
         ],
       ),
-      bottomNavigationBar: Container(
-        decoration: const BoxDecoration(
-          color: AppTokens.bgPrimary,
-          border: Border(
-            top: BorderSide(color: AppTokens.borderSubtle, width: 1),
-          ),
-        ),
-        child: NavigationBar(
-          selectedIndex: _index,
-          onDestinationSelected: (i) => setState(() => _index = i),
-          backgroundColor: AppTokens.bgPrimary,
-          elevation: 0,
-          indicatorColor: AppTokens.brandElectric.withValues(alpha: 0.16),
-          destinations: [
-            const NavigationDestination(
-              icon: Icon(Icons.analytics_outlined),
-              selectedIcon: Icon(Icons.analytics_rounded, color: AppTokens.brandElectric),
-              label: 'Analytics',
+      bottomNavigationBar: _HomeNavBar(
+        selected: tab,
+        onSelected: (t) => ref.read(homeTabProvider.notifier).show(t),
+      ),
+    );
+  }
+}
+
+/// The shell's bottom navigation.
+///
+/// Custom rather than [NavigationBar] for two reasons: the Material 3 bar
+/// paints a pressed state layer over the destination (the app uses a ripple
+/// only), and it sized its safe-area padding from a MediaQuery the app's own
+/// edge-to-edge setup had already consumed on some launchers. This bar adds
+/// the system navigation inset itself, so its labels always sit above the
+/// gesture pill / three-button bar.
+///
+/// The selected tab is marked by a short accent rule along the bar's top edge
+/// plus a heavier label — position and weight, not colour alone.
+class _HomeNavBar extends StatelessWidget {
+  const _HomeNavBar({required this.selected, required this.onSelected});
+
+  final HomeTab selected;
+  final ValueChanged<HomeTab> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final z = context.z;
+    final bottom = MediaQuery.viewPaddingOf(context).bottom;
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: z.navBg,
+        border: Border(top: BorderSide(color: z.line)),
+      ),
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(8, 0, 8, 4 + bottom),
+        child: Row(
+          children: [
+            _NavItem(
+              label: 'Home',
+              icon: Icons.home_outlined,
+              selectedIcon: Icons.home_rounded,
+              selected: selected == HomeTab.home,
+              onTap: () => onSelected(HomeTab.home),
             ),
-            const NavigationDestination(
-              icon: Icon(Icons.call_outlined),
-              selectedIcon: Icon(Icons.call_rounded, color: AppTokens.brandElectric),
+            _NavItem(
               label: 'Calls',
+              icon: Icons.format_list_bulleted_rounded,
+              selectedIcon: Icons.format_list_bulleted_rounded,
+              selected: selected == HomeTab.calls,
+              onTap: () => onSelected(HomeTab.calls),
             ),
-            NavigationDestination(
-              icon: Badge(
-                isLabelVisible: waiting > 0,
-                backgroundColor: AppTokens.warning,
-                textColor: Colors.black,
-                textStyle: const TextStyle(fontWeight: FontWeight.w800, fontSize: 10),
-                label: Text(waiting > 999 ? '999+' : '$waiting'),
-                child: const Icon(Icons.sync_rounded),
-              ),
-              selectedIcon: Badge(
-                isLabelVisible: waiting > 0,
-                backgroundColor: AppTokens.warning,
-                textColor: Colors.black,
-                textStyle: const TextStyle(fontWeight: FontWeight.w800, fontSize: 10),
-                label: Text(waiting > 999 ? '999+' : '$waiting'),
-                child: const Icon(Icons.sync_rounded, color: AppTokens.brandElectric),
-              ),
+            _NavItem(
               label: 'Sync',
+              iconBuilder: (sel) => _SyncTabIcon(selected: sel),
+              selected: selected == HomeTab.sync,
+              onTap: () => onSelected(HomeTab.sync),
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _NavItem extends StatelessWidget {
+  const _NavItem({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    this.icon,
+    this.selectedIcon,
+    this.iconBuilder,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  final IconData? icon;
+  final IconData? selectedIcon;
+  final Widget Function(bool selected)? iconBuilder;
+
+  @override
+  Widget build(BuildContext context) {
+    final z = context.z;
+    final color = selected ? z.ink : z.ink3;
+
+    return Expanded(
+      child: Semantics(
+        button: true,
+        selected: selected,
+        label: '$label tab',
+        excludeSemantics: true,
+        child: InkResponse(
+          onTap: onTap,
+          highlightColor: Colors.transparent,
+          splashColor: z.accent.withValues(alpha: 0.14),
+          radius: 40,
+          child: SizedBox(
+            height: 62,
+            child: Stack(
+              alignment: Alignment.topCenter,
+              children: [
+                AnimatedContainer(
+                  duration: AppTokens.fast,
+                  curve: AppTokens.ease,
+                  width: 28,
+                  height: 3,
+                  decoration: BoxDecoration(
+                    color: selected ? z.accent : Colors.transparent,
+                    borderRadius: const BorderRadius.vertical(
+                      bottom: Radius.circular(3),
+                    ),
+                  ),
+                ),
+                Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    IconTheme(
+                      data: IconThemeData(color: color, size: 22),
+                      child: iconBuilder?.call(selected) ??
+                          Icon(selected ? selectedIcon : icon),
+                    ),
+                    const SizedBox(height: 4),
+                    AnimatedDefaultTextStyle(
+                      duration: AppTokens.fast,
+                      style: AppType.caption.copyWith(
+                        fontWeight:
+                            selected ? FontWeight.w600 : FontWeight.w500,
+                        color: color,
+                      ),
+                      child: Text(label),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The Sync tab icon, badged only when calls could not be sent.
+///
+/// Its own widget so a change in the queue rebuilds this icon and nothing
+/// else. A badge on every waiting call lit up after every single call — that
+/// is the queue working normally, not something the user has to act on.
+class _SyncTabIcon extends ConsumerWidget {
+  const _SyncTabIcon({required this.selected});
+
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final z = context.z;
+    final failed = ref.watch(
+      syncCountersProvider.select((a) => a.value?['failed'] ?? 0),
+    );
+    return Badge(
+      isLabelVisible: failed > 0,
+      backgroundColor: z.danger,
+      textColor: Colors.white,
+      textStyle: AppType.micro.copyWith(fontWeight: FontWeight.w700),
+      label: Text(failed > 99 ? '99+' : '$failed'),
+      child: Icon(
+        Icons.sync_rounded,
+        color: selected ? z.ink : z.ink3,
       ),
     );
   }

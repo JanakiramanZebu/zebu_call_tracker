@@ -56,39 +56,16 @@ abstract final class AppConfig {
   /// offline state rather than a silent failure loop.
   static bool get hasServer => apiBaseUrl.isNotEmpty;
 
-  /// One line a person can act on, for the sign-in and settings screens.
-  static String? get problemMessage => switch (problem) {
-        ConfigProblem.missingServerUrl =>
-          'This build has no server address. It was compiled without '
-              'API_BASE_URL and cannot sync. Ask for a correctly built app.',
-        ConfigProblem.malformedServerUrl =>
-          'This build has an invalid server address and cannot sync. '
-              'Ask for a correctly built app.',
-        ConfigProblem.insecureServerUrl =>
-          'This build points at an insecure (http) server address, which '
-              'release builds refuse to contact. Ask for a correctly built app.',
-        null => null,
-      };
+  /// One line a person can act on, for the sign-in screen and the alert banner.
+  ///
+  /// The same words whichever way the build is wrong: the employee can do
+  /// nothing about any of them except get a new install. Which way it is wrong
+  /// is on the support-only Technical details screen.
+  static String? get problemMessage => problem == null
+      ? null
+      : 'This copy of the app is set up wrongly. Ask IT for a fresh install.';
 
   static const appName = 'Zebu Call Tracker';
-
-  /// Shown under the sign-in form so a tester can tell at a glance which build
-  /// they are holding. Version comes from `AppVersion`, which reads the real
-  /// package metadata rather than a constant somebody has to remember to bump.
-  static String buildLabel(String version) {
-    final message = switch (problem) {
-      ConfigProblem.missingServerUrl => 'no server configured',
-      ConfigProblem.malformedServerUrl => 'invalid server address',
-      ConfigProblem.insecureServerUrl => 'insecure server address',
-      null => null,
-    };
-    if (message != null) return 'v$version · $message';
-
-    final uri = Uri.tryParse(apiBaseUrl);
-    final host = uri?.host ?? '';
-    final port = (uri != null && uri.hasPort) ? ':${uri.port}' : '';
-    return 'v$version · $host$port';
-  }
 
   static final _Resolved _resolved = _resolve(_rawApiBaseUrl);
 

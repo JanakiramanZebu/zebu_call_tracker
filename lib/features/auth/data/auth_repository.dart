@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/config/app_config.dart';
 import '../../../core/errors/api_exceptions.dart';
@@ -11,6 +12,13 @@ import '../../device/data/device_uuid_store.dart';
 import '../domain/session.dart';
 
 abstract interface class AuthRepository {
+  /// What the server holds for [employeeCode], to fill the form before
+  /// registering. Throws [AuthFailure].
+  Future<EmployeeLookup> lookupEmployee({
+    required String pairingWord,
+    required String employeeCode,
+  });
+
   Future<Session> signInWithPairingWord({
     required String pairingWord,
     required String employeeCode,
@@ -29,7 +37,10 @@ abstract interface class AuthRepository {
     required String mobileUniqueId,
   });
   Future<Session?> restore();
-  Future<void> signOut();
+
+  /// Drops the stored session. Local only: the app has no sign-out, and this
+  /// runs only once the server has already refused the session.
+  Future<void> clearLocalSession();
 }
 
 abstract interface class SessionStore {
@@ -62,31 +73,66 @@ class SecureSessionStore implements SessionStore {
   Future<void> clear() => _storage.delete(key: _key);
 }
 
-class InMemorySessionStore implements SessionStore {
-  Session? _session;
+/// The employee code this phone last registered with.
+///
+/// Kept after a sign-out or a revoked session so the setup screen can offer it
+/// again (Mobile login flow §6). Not a secret — and the setup code, which is,
+/// is never stored.
+abstract final class LastEmployeeCode {
+  static const _key = 'zebu.last_employee_code.v1';
 
-  @override
-  Future<Session?> read() async => _session;
+  static Future<String?> read() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final v = prefs.getString(_key);
+      return (v != null && v.isNotEmpty) ? v : null;
+    } catch (_) {
+      return null;
+    }
+  }
 
-  @override
-  Future<void> write(Session session) async => _session = session;
-
-  @override
-  Future<void> clear() async => _session = null;
+  static Future<void> write(String code) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_key, code);
+    } catch (_) {}
+  }
 }
 
 class RemoteAuthRepository implements AuthRepository {
   RemoteAuthRepository({
     required ApiClient apiClient,
     required SessionStore store,
-    DeviceUuidStore? deviceUuidStore,
   })  : _apiClient = apiClient,
-        _store = store,
-        _deviceUuidStore = deviceUuidStore ?? const DeviceUuidStore();
+        _store = store;
 
   final ApiClient _apiClient;
   final SessionStore _store;
-  final DeviceUuidStore _deviceUuidStore;
+  static const _deviceUuidStore = DeviceUuidStore();
+
+  @override
+  Future<EmployeeLookup> lookupEmployee({
+    required String pairingWord,
+    required String employeeCode,
+  }) async {
+    try {
+      final response = await _apiClient.post<Map<String, dynamic>>(
+        ApiEndpoints.lookupEmployee,
+        data: {'pairing_word': pairingWord, 'employee_code': employeeCode},
+      );
+      return EmployeeLookup.fromJson(response.data ?? const {}, employeeCode);
+    } on ApiException catch (e) {
+      throw _translateApiException(e);
+    } on AuthFailure {
+      rethrow;
+    } catch (_) {
+      throw const AuthFailure(
+        AuthFailureKind.network,
+        "Couldn't check your employee code.",
+      );
+    }
+  }
+
   @override
   Future<Session> signInWithPairingWord({
     required String pairingWord,
@@ -110,9 +156,14 @@ class RemoteAuthRepository implements AuthRepository {
           ? mobileUniqueId
           : await _deviceUuidStore.getOrCreateUuid();
 
-      final formattedPhone = phone.startsWith('+')
+      // Empty means "keep the number on file" (Mobile login flow §3.2). This
+      // used to become a bare "+91", which overwrote it.
+      final digits = phone.replaceAll(RegExp(r'\D'), '');
+      final formattedPhone = phone.trim().isEmpty
+          ? ''
+          : phone.startsWith('+')
           ? phone
-          : '+91${phone.replaceAll(RegExp(r'\D'), '')}';
+          : '+91$digits';
 
       final response = await _apiClient.post<Map<String, dynamic>>(
         ApiEndpoints.registerMobile,
@@ -150,8 +201,8 @@ class RemoteAuthRepository implements AuthRepository {
         // user apparently signed in and permanently unable to sync.
         throw const AuthFailure(
           AuthFailureKind.server,
-          'Registration did not return a session token. '
-          'Check the pairing word with your administrator and try again.',
+          "Registration didn't finish. Check the setup code with your admin "
+          'and try again.',
         );
       }
       final refreshToken = (tokensMap['refresh_token'] as String?) ??
@@ -186,32 +237,80 @@ class RemoteAuthRepository implements AuthRepository {
       );
 
       await _store.write(session);
+      await LastEmployeeCode.write(session.employeeId);
       return session;
     } on ApiException catch (e) {
       throw _translateApiException(e);
-    } catch (e) {
-      throw AuthFailure(AuthFailureKind.unknown, e.toString());
+    } on AuthFailure {
+      // Already worded for the user. The catch-all below used to swallow it
+      // and show "AuthFailure(server: …)" instead.
+      rethrow;
+    } catch (_) {
+      throw const AuthFailure(
+        AuthFailureKind.unknown,
+        "Couldn't register this phone. Check your connection and try again.",
+      );
     }
   }
   AuthFailure _translateApiException(ApiException e) {
-    if (e.code == 'INVALID_CREDENTIALS' || e.statusCode == 401) {
+    // `error.code` first — it is the contract (Mobile API Guide §1). The
+    // status fallbacks below remain for codes this build does not know.
+    switch (e.code) {
+      case 'INVALID_PAIRING_WORD':
+        return const AuthFailure(
+          AuthFailureKind.invalidCredentials,
+          "That setup code isn't right. Check it with your admin.",
+        );
+      case 'PAIRING_NOT_CONFIGURED':
+        return const AuthFailure(
+          AuthFailureKind.accountDisabled,
+          "Phone setup isn't turned on yet. Contact your admin.",
+        );
+      case 'ACCOUNT_INACTIVE':
+        return const AuthFailure(
+          AuthFailureKind.accountDisabled,
+          'This account is not active. Contact your admin.',
+        );
+      case 'DEVICE_REVOKED':
+        return const AuthFailure(
+          AuthFailureKind.accountDisabled,
+          'This phone has been blocked. Contact your admin.',
+        );
+      case 'DEVICE_OWNED_BY_ANOTHER_USER':
+        return const AuthFailure(
+          AuthFailureKind.accountDisabled,
+          'This phone is set up for another employee. Ask your admin to '
+          'release it.',
+        );
+      case 'RATE_LIMIT_EXCEEDED':
+        // Registration allows 5 a minute per network address, so a team
+        // setting up phones on one office Wi-Fi can reach it together.
+        final wait = e.retryAfterSeconds;
+        return AuthFailure(
+          AuthFailureKind.server,
+          wait == null
+              ? 'Too many attempts. Wait a minute and try again.'
+              : 'Too many attempts. Try again in $wait seconds.',
+          code: 'RATE_LIMIT_EXCEEDED',
+          retryAfterSeconds: wait,
+        );
+      case 'VALIDATION_ERROR':
+        return AuthFailure(
+          AuthFailureKind.unknown,
+          "Some of your details weren't accepted. Check them and try again.",
+          field: _firstInvalidField(e.details),
+        );
+    }
+    if (e.statusCode == 401) {
       return const AuthFailure(
         AuthFailureKind.invalidCredentials,
-        'Invalid Employee ID, password or pairing word.',
+        "That setup code isn't right. Check it with your admin.",
       );
     }
-    if (e.code == 'DEVICE_OWNED_BY_ANOTHER_USER' || e.statusCode == 409) {
-      return AuthFailure(
+    if (e.statusCode == 403) {
+      return const AuthFailure(
         AuthFailureKind.accountDisabled,
-        e.message.isNotEmpty
-            ? e.message
-            : 'This device belongs to another employee. Contact an administrator.',
-      );
-    }
-    if (e.code == 'DEVICE_REVOKED' || e.code == 'ACCOUNT_LOCKED' || e.code == 'ACCOUNT_INACTIVE' || e.statusCode == 403) {
-      return AuthFailure(
-        AuthFailureKind.accountDisabled,
-        e.message.isNotEmpty ? e.message : 'Access denied by administrator.',
+        'Your admin has turned off access. Contact them to restore it.',
       );
     }
     if (e.statusCode != null && e.statusCode! >= 500) {
@@ -226,7 +325,27 @@ class RemoteAuthRepository implements AuthRepository {
         'No connection. Check your network and try again.',
       );
     }
-    return AuthFailure(AuthFailureKind.unknown, e.message);
+    return AuthFailure(
+      AuthFailureKind.unknown,
+      e.message.isNotEmpty
+          ? e.message
+          : "Couldn't register this phone. Check your connection and try again.",
+    );
+  }
+
+  /// The first field named in a `VALIDATION_ERROR`'s `details.fields`, which
+  /// may be a list of `{field|loc, message}` or a map keyed by field name.
+  static String? _firstInvalidField(dynamic details) {
+    final fields = details is Map ? details['fields'] : null;
+    Object? first;
+    if (fields is List && fields.isNotEmpty) {
+      final item = fields.first;
+      first = item is Map ? (item['field'] ?? item['loc']) : item;
+    } else if (fields is Map && fields.isNotEmpty) {
+      first = fields.keys.first;
+    }
+    if (first is List && first.isNotEmpty) first = first.last;
+    return first is String ? first : null;
   }
 
   @override
@@ -241,27 +360,20 @@ class RemoteAuthRepository implements AuthRepository {
   }
 
   @override
-  Future<void> signOut() async {
-    final session = await _store.read();
-    if (session != null && session.refreshToken != null) {
-      try {
-        await _apiClient.post<dynamic>(
-          ApiEndpoints.logout,
-          data: {
-            'refresh_token': session.refreshToken,
-            'all_sessions': false,
-          },
-        );
-      } catch (_) {}
-    }
-    await _store.clear();
-  }
+  Future<void> clearLocalSession() => _store.clear();
 }
 
 class LocalAuthRepository implements AuthRepository {
   const LocalAuthRepository(this._store);
 
   final SessionStore _store;
+
+  @override
+  Future<EmployeeLookup> lookupEmployee({
+    required String pairingWord,
+    required String employeeCode,
+  }) async =>
+      EmployeeLookup(employeeCode: employeeCode, exists: false, canRegister: true);
   @override
   Future<Session> signInWithPairingWord({
     required String pairingWord,
@@ -298,7 +410,7 @@ class LocalAuthRepository implements AuthRepository {
   Future<Session?> restore() => _store.read();
 
   @override
-  Future<void> signOut() => _store.clear();
+  Future<void> clearLocalSession() => _store.clear();
 }
 
 /// Builds the repository around an [ApiClient] the caller owns.

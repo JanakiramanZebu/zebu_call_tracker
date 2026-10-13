@@ -7,8 +7,10 @@ import android.provider.Settings
 import android.telephony.TelephonyManager
 import android.util.Log
 import `in`.mynt.zebu_call_tracker.background.BackgroundScheduler
+import `in`.mynt.zebu_call_tracker.background.IngestStore
 import `in`.mynt.zebu_call_tracker.overlay.PostCallData
 import `in`.mynt.zebu_call_tracker.overlay.PostCallOverlayController
+import `in`.mynt.zebu_call_tracker.recording.RecordingScanner
 
 /**
  * Background call-state entry point.
@@ -36,15 +38,34 @@ class CallStateReceiver : BroadcastReceiver() {
         if (intent.action != TelephonyManager.ACTION_PHONE_STATE_CHANGED) return
         val state = intent.getStringExtra(TelephonyManager.EXTRA_STATE) ?: return
 
+        val normalised = state.lowercase()
+        val now = System.currentTimeMillis()
+
+        // From API 29 an app holding READ_CALL_LOG receives every transition
+        // twice — once with the number extra and once without. Without this
+        // each call ended with two immediate ingests, two sets of delayed
+        // passes and two journal entries. A genuine repeat of the same state
+        // cannot happen this quickly: another transition always comes between.
+        if (normalised == lastState && now - lastStateAtMillis < DUPLICATE_WINDOW_MILLIS) {
+            return
+        }
+        lastState = normalised
+        lastStateAtMillis = now
+
         // Never log the number — privacy requirement, and it is unused here.
         Log.i(TAG, "phone state -> $state")
-        val normalised = state.lowercase()
-        CallStateJournal.record(context, normalised, System.currentTimeMillis())
+        CallStateJournal.record(context, normalised, now)
 
         // IDLE is the transition that matters: the call has finished, so the
         // log row and — critically — the dialer's recording file now exist.
         // Capturing on RINGING/OFFHOOK would run before either is written.
-        if (normalised == "idle") {
+        //
+        // Only for a signed-in handset. A call taken while signed out belongs
+        // to no employee; the call log is durable, so the cursor picks it up
+        // after sign-in if it should be captured at all. (BackgroundScheduler
+        // enforces the same rule; checked here too so a signed-out phone does
+        // not even wake WorkManager.)
+        if (normalised == "idle" && IngestStore.hasSession(context)) {
             // WorkManager, not a direct service start. The class comment above
             // is the reason: from Android 12 a background broadcast may not
             // start a foreground service, and this receiver runs with the app
@@ -55,13 +76,48 @@ class CallStateReceiver : BroadcastReceiver() {
             // capture silently fell back to the delayed passes below.
             BackgroundScheduler.enqueueNow(context, BackgroundScheduler.REASON_CALL_ENDED)
 
-            // Queue delayed ingest passes to capture late MediaStore indexing by OEM dialers
-            BackgroundScheduler.enqueueDelayedIngest(context, 10L, "call_ended_delay_10s")
-            BackgroundScheduler.enqueueDelayedIngest(context, 30L, "call_ended_delay_30s")
+            // One delayed pass, as a fallback for a dialer that indexes its
+            // recording after the call-log row. There used to be two (10 s and
+            // 30 s) on every call; the MediaStore content trigger now links
+            // the file within seconds of it appearing, so this only covers a
+            // trigger the system dropped or deferred. 30 s lands it inside the
+            // 45 s hold on the call's sync, so the audio still rides with the
+            // metadata.
+            //
+            // Not queued when it cannot find anything: a call that never went
+            // off-hook (missed, rejected) has no recording, and without the
+            // media permission nothing can be read. The worker also skips it
+            // if, by the time it runs, no captured call is still waiting.
+            if (connectedThisCall(context) && RecordingScanner.hasPermission(context)) {
+                BackgroundScheduler.enqueueDelayedIngest(
+                    context,
+                    RECORDING_FALLBACK_DELAY_SECONDS,
+                    "${BackgroundScheduler.REASON_RECORDING_PASS_PREFIX}${RECORDING_FALLBACK_DELAY_SECONDS}s",
+                )
+            }
+        }
 
+        if (normalised == "idle") {
             showPostCallOverlay(context)
+        } else {
+            // A new call is ringing or being dialled. The post-call card stays
+            // up until the user closes it, so without this it would sit over
+            // the dialer's in-call screen — TYPE_APPLICATION_OVERLAY draws above
+            // ordinary activities, the incoming-call screen included.
+            PostCallOverlayController.dismiss()
         }
     }
+
+    /**
+     * Whether the call that just ended ever went off-hook, per the journal.
+     *
+     * Off-hook is the only transition that can precede a recording: it is the
+     * pickup for an incoming call and the dial for an outgoing one. A call
+     * that only rang was missed or rejected. Reads the small journal blob
+     * that [CallStateJournal.record] has just written — no other I/O.
+     */
+    private fun connectedThisCall(context: Context): Boolean =
+        entriesForLatestCall(journalEntries(context)).any { it.first == "offhook" }
 
     /**
      * Hands the just-ended call to [PostCallOverlayController].
@@ -122,16 +178,8 @@ class CallStateReceiver : BroadcastReceiver() {
     }
 
     /** The journal as (state, atMillis) pairs, oldest first. */
-    private fun journalEntries(context: Context): List<Pair<String, Long>> {
-        val journal = CallStateJournal.read(context)
-        @Suppress("UNCHECKED_CAST")
-        val raw = (journal["entries"] as? List<Map<String, Any?>>).orEmpty()
-        return raw.mapNotNull { entry ->
-            val state = entry["state"] as? String ?: return@mapNotNull null
-            val at = entry["atMillis"] as? Long ?: return@mapNotNull null
-            state to at
-        }
-    }
+    private fun journalEntries(context: Context): List<Pair<String, Long>> =
+        CallStateJournal.snapshot(context)
 
     /**
      * The tail of [entries] belonging to the call that has just finished.
@@ -151,5 +199,19 @@ class CallStateReceiver : BroadcastReceiver() {
 
     companion object {
         private const val TAG = "CallStateReceiver"
+
+        /** Long enough to swallow the API 29+ double delivery, far shorter than any call. */
+        private const val DUPLICATE_WINDOW_MILLIS = 2_000L
+
+        /**
+         * The fallback recording pass. Kept under the sync's
+         * [BackgroundScheduler.SYNC_AFTER_RECORDING_DELAY_SECONDS] hold.
+         */
+        private const val RECORDING_FALLBACK_DELAY_SECONDS = 30L
+
+        // Process-wide: the system creates a new receiver instance per
+        // broadcast. onReceive always runs on the main thread, so no locking.
+        private var lastState: String? = null
+        private var lastStateAtMillis = 0L
     }
 }

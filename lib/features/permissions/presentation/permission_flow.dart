@@ -12,7 +12,9 @@ import '../domain/permission_ask.dart';
 ///
 ///  * **Permanently denied.** Android drops the dialog silently after the
 ///    second refusal, so a naive "request again" button appears to do nothing.
-///    The outcome is remembered and the card switches to *Open settings*.
+///    [requestAsk] checks for that first and opens app settings in the same
+///    tap; a refusal made in this session also turns the card to *Open
+///    settings*, so the user can see why the next tap goes there.
 ///  * **Coming back from Settings.** There is no permission-changed broadcast,
 ///    so the only reliable moment to re-read is when the app resumes. Screens
 ///    that mix this in refresh themselves on resume rather than leaving a
@@ -54,6 +56,17 @@ mixin PermissionFlowMixin<T extends ConsumerStatefulWidget>
       ..invalidate(backgroundStatusProvider);
   }
 
+  /// The ask list as this screen shows it, with the inputs that live outside
+  /// [PermissionSnapshot] read in one place.
+  List<PermissionAsk> watchAsks(
+    PermissionSnapshot perms, {
+    bool includeNotifications = true,
+  }) => permissionAsks(
+    perms,
+    background: ref.watch(backgroundStatusProvider).value,
+    includeNotifications: includeNotifications,
+  );
+
   /// Grants [ask], by whichever route it actually has.
   Future<void> request(PermissionAsk ask) async {
     if (_inFlight != null) return;
@@ -65,6 +78,13 @@ mixin PermissionFlowMixin<T extends ConsumerStatefulWidget>
           await _requestBackground();
         case AskKind.overlayWindow:
           await _requestOverlay();
+        case AskKind.notificationListener:
+          // Settings screen; the lifecycle observer re-reads on return.
+          await ref.read(nativeBridgeProvider).requestNotificationListenerAccess();
+        case AskKind.autostart:
+          // Recorded as done natively once the screen opens; the observer
+          // re-reads the background status on return.
+          await ref.read(nativeBridgeProvider).openAutostartSettings();
         case AskKind.runtime:
           await _requestRuntime(ask);
       }
@@ -76,7 +96,9 @@ mixin PermissionFlowMixin<T extends ConsumerStatefulWidget>
   Future<void> _requestBackground() async {
     final controller = ref.read(backgroundControllerProvider.notifier);
     final opened = await controller.requestBatteryExemption();
-    if (!opened) await controller.openVendorSettings();
+    // App info, where battery usage can still be set to Unrestricted, when
+    // Android's own prompt cannot open.
+    if (!opened) await openAppSettings();
   }
 
   Future<void> _requestOverlay() async {
@@ -86,20 +108,23 @@ mixin PermissionFlowMixin<T extends ConsumerStatefulWidget>
   }
 
   Future<void> _requestRuntime(PermissionAsk ask) async {
-    if (_blocked.contains(ask.id)) {
-      await openAppSettings();
-      // Status is re-read on resume by the observer above.
-      return;
-    }
+    final permission = ask.permission;
+    if (permission == null) return;
 
-    final outcome = await requestAsk(ask);
+    // Opens app settings itself when Android will not show the dialog; the
+    // status is then re-read on resume by the observer above.
+    final outcome = await requestAsk(permission);
     if (!mounted) return;
 
     setState(() {
-      if (outcome == AskOutcome.permanentlyDenied) {
-        _blocked.add(ask.id);
-      } else if (outcome == AskOutcome.granted) {
-        _blocked.remove(ask.id);
+      switch (outcome) {
+        case AskOutcome.permanentlyDenied:
+        case AskOutcome.openedSettings:
+          _blocked.add(ask.id);
+        case AskOutcome.granted:
+          _blocked.remove(ask.id);
+        case AskOutcome.denied:
+          break;
       }
     });
 

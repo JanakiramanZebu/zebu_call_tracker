@@ -37,7 +37,13 @@ class DeviceUuidStore {
   static String? _cached;
 
   /// The stable installation UUID, creating one on first run.
-  Future<String> getOrCreateUuid() async {
+  ///
+  /// [preferred] — the handset's `ANDROID_ID` — becomes the identity when one
+  /// is first created, which the server asks for (Mobile login flow §3) and
+  /// which survives a reinstall where a random UUID does not. It is ignored
+  /// once an identity exists: changing a registered device's id would orphan
+  /// it on the server.
+  Future<String> getOrCreateUuid({String? preferred}) async {
     if (_cached != null) return _cached!;
 
     final secure = await _readSecure();
@@ -56,12 +62,21 @@ class DeviceUuidStore {
       return fallback;
     }
 
-    final created = const Uuid().v4();
+    final created = _usable(preferred) ?? const Uuid().v4();
     _cached = created;
     // Written to both, because either may be the one that survives.
     await _writeSecure(created);
     await _writePrefs(created);
     return created;
+  }
+
+  /// The server takes 8–128 characters. `9774d56d682e549c` is the ANDROID_ID
+  /// a batch of old Android 2.2 handsets all shared, so it identifies nothing.
+  static String? _usable(String? id) {
+    final v = id?.trim();
+    if (v == null || v.length < 8 || v.length > 128) return null;
+    if (v == '9774d56d682e549c') return null;
+    return v;
   }
 
   Future<String?> _readSecure() async {
@@ -97,7 +112,4 @@ class DeviceUuidStore {
       }
     } catch (_) {}
   }
-
-  /// Test seam: forget the in-process cache.
-  static void resetCacheForTesting() => _cached = null;
 }

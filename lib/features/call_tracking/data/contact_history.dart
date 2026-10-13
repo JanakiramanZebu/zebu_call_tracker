@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../recording/domain/recording_matcher.dart';
@@ -22,7 +24,8 @@ final contactHistoryProvider = FutureProvider.autoDispose
       final bridge = ref.watch(nativeBridgeProvider);
       final matcher = ref.watch(recordingMatcherProvider);
       final perms = await ref.watch(permissionStatusProvider.future);
-      if (!perms.canTrack) return const [];
+      // Reading history needs only the call log; see CallFeed._load.
+      if (!perms.readCallLog) return const [];
 
       final rows = await bridge.readCallLogForNumber(number, limit: _limit);
       if (rows.isEmpty) return const [];
@@ -34,8 +37,34 @@ final contactHistoryProvider = FutureProvider.autoDispose
           : const <String, String>{};
       final name = names[number];
 
-      final pool = perms.readMediaAudio
-          ? await bridge.scanRecordings(sinceEpochSeconds: 0, limit: _poolSize)
+      // Only the stretch of time these calls cover is scanned. This ran a scan
+      // of the newest 400 recordings on the device on every detail open, most
+      // of them for other people, and for an older contact still missed the
+      // files that mattered.
+      //
+      // From the earliest START to the latest END (start + ring + talk time):
+      // a dialer that dates its file at hang-up writes it a whole call-length
+      // after the start, so stopping at the latest start hid the newest long
+      // call's recording. The margin covers clock skew and a late media scan.
+      final connected = [
+        for (final r in rows)
+          if (r.dateMillis != null && (r.durationSeconds ?? 0) > 0) r,
+      ];
+      final pool = perms.readRecordings && connected.isNotEmpty
+          ? await bridge.scanRecordings(
+              sinceEpochSeconds: connected
+                      .map((r) => r.dateMillis! ~/ 1000)
+                      .reduce(math.min) -
+                  _marginSeconds,
+              beforeEpochSeconds: connected
+                      .map((r) =>
+                          r.dateMillis! ~/ 1000 +
+                          _ringAllowanceSeconds +
+                          r.durationSeconds!)
+                      .reduce(math.max) +
+                  _marginSeconds,
+              limit: _poolSize,
+            )
           : const <RecordingCandidate>[];
 
       return [
@@ -61,6 +90,11 @@ final contactHistoryProvider = FutureProvider.autoDispose
 /// screen into an unbounded query.
 const _limit = 100;
 const _poolSize = 400;
+const _marginSeconds = 5 * 60;
+
+/// The longest ring before pickup, which a call's duration (talk time) leaves
+/// out. Same value as [RecordingMatcher.maxRingGapSeconds].
+const _ringAllowanceSeconds = 180;
 
 /// Aggregates for a number's history header.
 ///

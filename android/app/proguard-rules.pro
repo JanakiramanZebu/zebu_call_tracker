@@ -26,3 +26,14 @@
 # Without this a crash report from a fleet handset is unmappable.
 -keepattributes SourceFile,LineNumberTable
 -renamesourcefileattribute SourceFile
+
+# --- logging -----------------------------------------------------------------
+# Verbose, debug and info logs are stripped from release builds: the ingest and
+# sync paths log every claim, match and batch, which on a fleet handset is log
+# spam the user pays for in battery and that can carry call metadata into
+# logcat. Warnings and errors stay, since they are what a field report needs.
+-assumenosideeffects class android.util.Log {
+    public static int v(...);
+    public static int d(...);
+    public static int i(...);
+}

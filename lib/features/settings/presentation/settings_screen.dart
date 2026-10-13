@@ -2,21 +2,25 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../../../app.dart';
 import '../../../core/config/app_config.dart';
 import '../../../core/config/app_version.dart';
-import '../../../core/storage/database_providers.dart';
+import '../../../core/theme/appearance.dart';
 import '../../../core/theme/design_tokens.dart';
+import '../../../shared/widgets/brand.dart';
 import '../../../shared/widgets/ui_kit.dart';
 import '../../auth/data/auth_controller.dart';
 import '../../auth/domain/session.dart';
 import '../../background/data/background_service.dart';
 import '../../call_tracking/data/call_feed.dart';
+import '../../permissions/domain/permission_ask.dart';
 import '../../permissions/presentation/permission_screen.dart';
-import '../../synchronization/data/sync_service.dart';
-import 'diagnostics_screen.dart';
 import '../../synchronization/data/sync_health_provider.dart';
+import '../../synchronization/data/sync_service.dart';
+import '../../synchronization/domain/sync_health.dart';
 import '../../synchronization/presentation/outbox_queue_screen.dart';
 import '../../synchronization/presentation/sync_alert_banner.dart';
+import 'diagnostics_screen.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -50,57 +54,88 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
 
   @override
   Widget build(BuildContext context) {
+    final z = context.z;
     final session = ref.watch(authControllerProvider).value;
-    final meteredAllowed =
-        ref.watch(recordingsOnMeteredProvider).value ?? false;
     final background = ref.watch(backgroundStatusProvider).value;
     final perms = ref.watch(permissionStatusProvider).value;
     final counters = ref.watch(syncCountersProvider).value ?? const {};
+    final appearance = ref.watch(appearanceProvider);
 
-    // Counted the same way the Permissions screen counts, including the
-    // background-activity card, so the two screens cannot disagree.
+    // Counted from the very list the Permissions screen renders, so the two
+    // cannot disagree — the card set varies by handset (the WhatsApp card
+    // only exists where WhatsApp is installed), so a fixed total cannot.
     final canTrack = perms?.canTrack ?? false;
-    final permissionsGranted = perms?.grantedCount(
-      ignoringBatteryOptimizations:
-          background?.ignoringBatteryOptimizations ?? false,
-    );
+    final asks = perms == null
+        ? null
+        : permissionAsks(perms, background: background);
+    final permissionsGranted = asks?.grantedCount;
+    final permissionsTotal = asks?.length ?? 0;
 
     final pendingCount = counters['waiting'] ?? 0;
+    final backgroundOn = background?.ignoringBatteryOptimizations == true;
 
     return Scaffold(
-      backgroundColor: AppTokens.bgPrimary,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
-        elevation: 0,
-        scrolledUnderElevation: 0,
-        title: const Text(
-          'Settings',
-          style: TextStyle(
-            fontWeight: FontWeight.w800,
-            fontSize: 24,
-            letterSpacing: -0.5,
-            color: Colors.white,
-          ),
-        ),
+        title: const Text('Settings'),
       ),
+      // A pushed screen with no bottom bar: scrollPadding adds the system
+      // navigation bar's height so the footer clears the nav buttons. Rows run
+      // edge to edge, so there is no side padding; each row indents itself.
       body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 40),
+        padding: context.scrollPadding(top: 4, bottom: 32, horizontal: 0),
         children: [
           // Every outstanding problem, not just the top two the compact
           // banners on Dashboard and Sync have room for — those point here
           // when they run out of space.
-          const SyncAlertBanner(maxAlerts: 99),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: AppTokens.gutter),
+            child: SyncAlertBanner(maxAlerts: 99),
+          ),
 
-          // ── PROFILE SUMMARY HERO ───────────────────────────────────────────
-          _ProfileHeroCard(session: session),
-          const SizedBox(height: 20),
+          // ── Profile ──
+          _ProfileSummary(
+            session: session,
+            onTap: () => _showProfileDialog(context, session),
+          ),
 
-          // ── ACCOUNT ────────────────────────────────────────────────────────
-          const _SettingsSectionHeader('Account'),
-          _SettingsGroup(
+          // ── Appearance ──
+          const SectionLabel('Appearance'),
+          DecoratedBox(
+            decoration: BoxDecoration(
+              color: z.raised,
+              border: Border.symmetric(horizontal: BorderSide(color: z.line)),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: AppTokens.gutter,
+                vertical: 12,
+              ),
+              child: Semantics(
+                label: 'Theme',
+                container: true,
+                child: SegmentedPicker<Appearance>(
+                  segments: {
+                    for (final a in const [
+                      Appearance.dark,
+                      Appearance.light,
+                      Appearance.system,
+                    ])
+                      a: a.label,
+                  },
+                  selected: appearance,
+                  onSelected: (value) =>
+                      ref.read(appearanceProvider.notifier).select(value),
+                ),
+              ),
+            ),
+          ),
+
+          // ── Account ──
+          const SectionLabel('Account'),
+          ListGroup(
             children: [
-              _SettingsTile(
-                icon: Icons.person_outline_rounded,
+              ListRow(
                 title: 'Profile',
                 subtitle: session?.displayName ?? 'Not signed in',
                 value: session != null ? session.employeeId : '—',
@@ -108,155 +143,106 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               ),
             ],
           ),
-          const SizedBox(height: 18),
 
-          // ── CALL TRACKING ──────────────────────────────────────────────────
-          const _SettingsSectionHeader('Tracking'),
-          _SettingsGroup(
+          // ── Tracking ──
+          const SectionLabel('Tracking'),
+          ListGroup(
             children: [
-              _SettingsTile(
-                icon: Icons.autorenew_rounded,
+              // Not a switch: "On" is the system's battery exemption, which
+              // only Android settings can grant or take back. The row opens
+              // that request while it is still limited.
+              ListRow(
                 title: 'Background activity',
-                subtitle: background?.ignoringBatteryOptimizations == true
-                    ? 'Running continuously in background'
-                    : 'Battery optimization is restricting tracking',
-                valueWidget: StatusPill(
-                  label: background?.ignoringBatteryOptimizations == true
-                      ? 'Active'
-                      : 'Restricted',
-                  color: background?.ignoringBatteryOptimizations == true
-                      ? AppTokens.success
-                      : AppTokens.warning,
-                ),
-                onTap: background?.ignoringBatteryOptimizations != true
+                subtitle: backgroundOn
+                    ? 'Tracks calls even when the app is closed'
+                    : 'Battery saver may delay tracking – tap to allow',
+                value: backgroundOn ? 'On' : 'Limited',
+                valueColor: backgroundOn ? z.ok : z.warn,
+                onTap: !backgroundOn
                     ? () => ref
-                        .read(backgroundControllerProvider.notifier)
-                        .requestBatteryExemption()
+                          .read(backgroundControllerProvider.notifier)
+                          .requestBatteryExemption()
                     : null,
               ),
-              _SettingsTile(
-                icon: Icons.radar_rounded,
-                title: 'Look for new calls now',
-                subtitle: 'Checks the call log straight away',
-                value: 'Run Scan',
-                valueColor: AppTokens.brandElectric,
-                onTap: () async {
-                  await ref
+              ListRow(
+                title: 'Check for new calls',
+                subtitle: 'Looks through your call history now',
+                onTap: () {
+                  // Said up front: the check runs in the background and has
+                  // no "done" moment worth waiting on.
+                  showToast(context, 'Checking for new calls…');
+                  ref
                       .read(backgroundControllerProvider.notifier)
                       .start(reason: 'manual');
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Device check triggered successfully'),
-                        duration: Duration(seconds: 2),
-                      ),
-                    );
-                  }
                 },
               ),
             ],
           ),
-          const SizedBox(height: 18),
 
-          // ── SYNC ───────────────────────────────────────────────────────────
+          // ── Sync ──
           //
           // Status, last-sent time, the three counters, "send now" and "retry
           // failed" all live on the Sync tab, one tap away. Repeating them here
           // made Settings a second dashboard that could disagree with the first.
-          // What stays is the one preference and the one list the Sync tab does
-          // not already put in front of the user.
-          const _SettingsSectionHeader('Sync'),
-          _SettingsGroup(
+          // What stays is the waiting count, as a way back to the Sync tab.
+          //
+          // There used to be a "Send recordings on mobile data" switch here,
+          // off by default, which held audio until Wi-Fi. Recordings now go
+          // over any network, so there is nothing left to choose.
+          const SectionLabel('Sync'),
+          ListGroup(
             children: [
-              _SettingsTile(
-                icon: Icons.network_cell_rounded,
-                title: 'Send recordings on mobile data',
-                subtitle: meteredAllowed
-                    ? 'Recordings upload on any connection'
-                    : 'Recordings wait for Wi-Fi; call details always send',
-                valueWidget: Switch.adaptive(
-                  value: meteredAllowed,
-                  activeThumbColor: AppTokens.brandElectric,
-                  onChanged: (value) => ref
-                      .read(recordingsOnMeteredProvider.notifier)
-                      .set(value),
-                ),
-              ),
-              _SettingsTile(
-                icon: Icons.queue_outlined,
+              ListRow(
                 title: 'Calls waiting to send',
                 value: pendingCount == 0
                     ? 'None'
                     : '$pendingCount ${pendingCount == 1 ? "call" : "calls"}',
-                valueColor:
-                    pendingCount > 0 ? AppTokens.warning : AppTokens.textMuted,
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => const OutboxQueueScreen(),
-                  ),
-                ),
+                valueColor: pendingCount > 0 ? z.warn : z.ink3,
+                onTap: () {
+                  Navigator.of(context).popUntil((r) => r.isFirst);
+                  ref.read(homeTabProvider.notifier).show(HomeTab.sync);
+                },
               ),
             ],
           ),
-          const SizedBox(height: 18),
 
-          // ── YOUR DATA ──────────────────────────────────────────────────────
+          // ── Your data ──
           //
           // What is left here is what a user can act on. The storage internals
           // that used to sit in this group -- integrity checks, journal mode,
-          // row counts, an invented "storage footprint" -- moved to
-          // Technical details, at the bottom of this screen.
-          const _SettingsSectionHeader('Your data'),
-          _SettingsGroup(
+          // row counts -- are support-only now: long-press Version.
+          const SectionLabel('Your data'),
+          ListGroup(
             children: [
-              _SettingsTile(
-                icon: Icons.security_rounded,
+              ListRow(
                 title: 'How your call data is handled',
                 value: 'Encrypted',
-                valueColor: AppTokens.success,
                 onTap: () => _showPrivacyDialog(context),
-              ),
-              _SettingsTile(
-                icon: Icons.build_outlined,
-                title: 'Technical details',
-                subtitle: 'Device, version and storage details for support',
-                value: 'Open',
-                valueColor: AppTokens.brandElectric,
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => const DiagnosticsScreen(),
-                  ),
-                ),
               ),
             ],
           ),
-          const SizedBox(height: 18),
 
-          // ── PERMISSIONS ────────────────────────────────────────────────────
-          const _SettingsSectionHeader('Permissions'),
-          _SettingsGroup(
+          // ── Permissions ──
+          const SectionLabel('Permissions'),
+          ListGroup(
             children: [
-              _SettingsTile(
-                icon: Icons.shield_outlined,
+              ListRow(
                 title: 'App permissions',
                 subtitle: permissionsGranted == null
-                    ? 'Reading current grants…'
-                    : (permissionsGranted == PermissionSnapshot.total
-                        ? 'All access granted'
-                        : (canTrack
-                            ? 'Tracking active; some optional access missing'
-                            : 'Call log access required to track calls')),
-                valueWidget: StatusPill(
-                  label: permissionsGranted == null
-                      ? '—'
-                      : '$permissionsGranted/${PermissionSnapshot.total} Granted',
-                  color: permissionsGranted == PermissionSnapshot.total
-                      ? AppTokens.success
-                      : (canTrack ? AppTokens.warning : AppTokens.danger),
-                  icon: permissionsGranted == PermissionSnapshot.total
-                      ? Icons.check_rounded
-                      : Icons.warning_amber_rounded,
-                ),
+                    ? 'Checking…'
+                    : (permissionsGranted == permissionsTotal
+                          ? 'Everything is allowed'
+                          : (canTrack
+                                ? 'Calls are tracked; some extras are off'
+                                : 'Allow phone and call log access to track calls')),
+                value: permissionsGranted == null
+                    ? '—'
+                    : '$permissionsGranted of $permissionsTotal allowed',
+                valueColor: permissionsGranted == null
+                    ? z.ink3
+                    : (permissionsGranted == permissionsTotal
+                          ? z.ok
+                          : (canTrack ? z.warn : z.danger)),
                 onTap: () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
                     builder: (_) => const PermissionScreen(),
@@ -265,113 +251,100 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
               ),
             ],
           ),
-          const SizedBox(height: 18),
 
-          // ── APP & ABOUT ────────────────────────────────────────────────────
-          const _SettingsSectionHeader('Application'),
-          _SettingsGroup(
+          // ── Application ──
+          const SectionLabel('Application'),
+          ListGroup(
             children: [
-              _SettingsTile(
-                icon: Icons.info_outline_rounded,
-                title: 'Version',
-                value: AppVersion.full,
+              // The only way in to the support screens. Employees never
+              // need them, and a visible "Technical details" row invited
+              // them into an engineering console. ListRow has no long-press,
+              // so an outer InkWell takes it; the row's own InkWell has no
+              // tap handler and stays out of the way.
+              InkWell(
+                onLongPress: () => _showSupportInfo(context),
+                child: ListRow(title: 'Version', value: AppVersion.name),
               ),
-              _SettingsTile(
-                icon: Icons.help_outline_rounded,
+              ListRow(
                 title: 'About this app',
                 onTap: () => _showAboutDialog(context),
               ),
             ],
           ),
-          const SizedBox(height: 24),
 
-          // ── TROUBLESHOOTING & SIGN OUT ─────────────────────────────────────
-          const _SettingsSectionHeader('Troubleshooting'),
-          _SettingsGroup(
+          // ── Troubleshooting ──
+          const SectionLabel('Troubleshooting'),
+          ListGroup(
             children: [
-              _SettingsTile(
-                icon: Icons.restart_alt_rounded,
+              ListRow(
                 title: 'Show the setup steps again',
                 subtitle: 'Walk through the permissions once more',
                 onTap: () => ref.read(onboardingProvider.notifier).reset(),
               ),
-              _SettingsTile(
-                icon: Icons.open_in_new_rounded,
+              const ListRow(
                 title: 'Open Android settings',
                 onTap: openAppSettings,
               ),
             ],
           ),
-          const SizedBox(height: 16),
 
-          // Sign Out Card (Dedicated Danger Zone)
-          Container(
-            decoration: BoxDecoration(
-              color: AppTokens.surface1,
-              borderRadius: BorderRadius.circular(AppTokens.r12),
-              border: Border.all(
-                color: AppTokens.danger.withValues(alpha: 0.3),
-                width: 1,
-              ),
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(AppTokens.r12),
-              child: _SettingsTile(
-                icon: Icons.logout_rounded,
-                title: 'Sign out',
-                subtitle: 'Signs this phone out and stops syncing',
-                destructive: true,
-                onTap: () => _confirmSignOut(context, ref),
-              ),
-            ),
-          ),
-          const SizedBox(height: 24),
+          const SizedBox(height: 32),
 
-          // Footer info
-          Center(
-            child: Text(
-              '${AppConfig.appName} · ${AppConfig.buildLabel(AppVersion.name)}',
-              style: const TextStyle(
-                color: AppTokens.textMuted,
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
+          // Footer
+          Column(
+            children: [
+              const ExcludeSemantics(child: ZebuAppMark(size: 28)),
+              const SizedBox(height: 10),
+              Text(
+                '${AppConfig.appName}, version ${AppVersion.name}',
+                textAlign: TextAlign.center,
+                style: AppType.tabular(
+                  AppType.caption,
+                ).copyWith(color: z.ink3),
               ),
-            ),
+            ],
           ),
         ],
       ),
     );
   }
 
+  /// A dialog's single full-width dismiss button.
+  List<Widget> _closeAction(BuildContext context, String label) => [
+    ZButton(
+      label: label,
+      variant: ZButtonVariant.secondary,
+      onPressed: () => Navigator.of(context).pop(),
+    ),
+  ];
+
   void _showProfileDialog(BuildContext context, Session? session) {
     if (session == null) return;
     showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: AppTokens.surface1,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(AppTokens.r16),
-          side: const BorderSide(color: AppTokens.borderDefault),
-        ),
-        title: const Text('Employee Profile', style: TextStyle(color: Colors.white)),
+        icon: _Avatar(initials: session.initials, size: 52),
+        title: const Text('Your profile'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _dialogRow('Name', session.displayName),
-            _dialogRow('Employee ID', session.employeeId),
-            _dialogRow('Department', session.department ?? 'Staff'),
-            _dialogRow('Role', session.role ?? 'Representative'),
-            if (session.email != null) _dialogRow('Email', session.email!),
-            if (session.phone != null) _dialogRow('Phone', session.phone!),
+            _dialogRow(context, 'Name', session.displayName),
+            _dialogRow(context, 'Employee code', session.employeeId),
+            // Shown only when known. Filling the gap with "Staff" or
+            // "Representative" stated things about the user nobody had said.
+            if (session.department != null)
+              _dialogRow(context, 'Department', session.department!),
+            if (session.role != null)
+              _dialogRow(context, 'Role', session.role!),
+            if (session.email != null)
+              _dialogRow(context, 'Email', session.email!),
+            if (session.phone != null)
+              _dialogRow(context, 'Phone', session.phone!),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Close'),
-          ),
-        ],
+        actionsPadding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
+        actions: _closeAction(context, 'Close'),
       ),
     );
   }
@@ -380,12 +353,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
     showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: AppTokens.surface1,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(AppTokens.r16),
-          side: const BorderSide(color: AppTokens.borderDefault),
-        ),
-        title: const Text('How your call data is handled', style: TextStyle(color: Colors.white)),
+        title: const Text('How your call data is handled'),
         content: const Text(
           'Call details and any recordings are kept on this phone in encrypted '
           'storage until they reach your company server. They are sent over an '
@@ -393,406 +361,245 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen>
           'that a partial upload is never mistaken for a complete one. Only '
           'you and your administrators can see your calls, and every playback '
           'of a recording is written to an audit log.',
-          style: TextStyle(color: AppTokens.textSecondary, fontSize: 13.5, height: 1.5),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Got it'),
-          ),
-        ],
+        actionsPadding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
+        actions: _closeAction(context, 'Got it'),
       ),
     );
   }
-
 
   void _showAboutDialog(BuildContext context) {
     showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: AppTokens.surface1,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(AppTokens.r16),
-          side: const BorderSide(color: AppTokens.borderDefault),
-        ),
-        title: Text(AppConfig.appName, style: const TextStyle(color: Colors.white)),
+        icon: const ExcludeSemantics(child: ZebuAppMark(size: 52)),
+        title: Text(AppConfig.appName),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'Enterprise mobile call tracking, recording synchronization, '
-              'and analytics platform for field sales and customer support teams.',
-              style: const TextStyle(
-                color: AppTokens.textSecondary,
-                fontSize: 13.5,
-                height: 1.5,
-              ),
-            ),
+            const Text('Logs your work calls and sends them to Zebu CRM.'),
             const SizedBox(height: 12),
             Text(
-              'Build: ${AppConfig.buildLabel(AppVersion.name)}',
-              style: const TextStyle(color: AppTokens.textMuted, fontSize: 12),
+              'Version ${AppVersion.name}',
+              style: AppType.tabular(
+                AppType.caption,
+              ).copyWith(color: context.z.ink3),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Close'),
-          ),
-        ],
+        actionsPadding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
+        actions: _closeAction(context, 'Close'),
       ),
     );
   }
 
-  Widget _dialogRow(String label, String value) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4),
+  /// Support-only entry points, reached by long-pressing Version. Support
+  /// staff talk the employee through this over the phone.
+  void _showSupportInfo(BuildContext context) {
+    void open(Widget screen) {
+      Navigator.of(context)
+        ..pop()
+        ..push(MaterialPageRoute<void>(builder: (_) => screen));
+    }
+
+    // Shape, colour and drag handle come from the theme's bottom-sheet style.
+    // BottomSafe lifts the rows above the system navigation bar.
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (context) => BottomSafe(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                AppTokens.gutter,
+                0,
+                AppTokens.gutter,
+                12,
+              ),
+              child: Semantics(
+                header: true,
+                child: const Text('Support info', style: AppType.heading),
+              ),
+            ),
+            ListGroup(
+              children: [
+                ListRow(title: 'Version', value: AppVersion.full),
+                ListRow(
+                  title: 'Technical details',
+                  onTap: () => open(const DiagnosticsScreen()),
+                ),
+                ListRow(
+                  title: 'Calls not sent yet',
+                  onTap: () => open(const OutboxQueueScreen()),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _dialogRow(BuildContext context, String label, String value) {
+    final z = context.z;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: MergeSemantics(
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             SizedBox(
-              width: 100,
+              width: 108,
               child: Text(
                 label,
-                style: const TextStyle(color: AppTokens.textMuted, fontSize: 13),
+                style: AppType.label.copyWith(
+                  color: z.ink3,
+                  fontWeight: FontWeight.w400,
+                ),
               ),
             ),
             Expanded(
               child: Text(
                 value,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 13.5,
-                ),
+                style: AppType.tabular(
+                  AppType.smallStrong,
+                ).copyWith(color: z.ink),
               ),
             ),
           ],
         ),
-      );
-
-  Future<void> _confirmSignOut(BuildContext context, WidgetRef ref) async {
-    final dao = ref.read(callsDaoProvider);
-    final unsyncedCount = await dao.getUnsyncedCount();
-
-    if (!context.mounted) return;
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: AppTokens.surface1,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(AppTokens.r16),
-          side: const BorderSide(color: AppTokens.borderDefault),
-        ),
-        title: const Text('Sign out?', style: TextStyle(color: Colors.white)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (unsyncedCount > 0) ...[
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: AppTokens.warning.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(AppTokens.r8),
-                  border: Border.all(
-                    color: AppTokens.warning.withValues(alpha: 0.3),
-                  ),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.warning_amber_rounded,
-                      color: AppTokens.warning,
-                      size: 20,
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        '$unsyncedCount calls waiting in local outbox.',
-                        style: const TextStyle(
-                          color: AppTokens.warning,
-                          fontWeight: FontWeight.w700,
-                          fontSize: 13,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 12),
-            ],
-            Text(
-              unsyncedCount > 0
-                  ? 'Unsynced records remain securely stored on this device, but will not sync until an employee signs back in.'
-                  : 'Calls recorded on this device remain saved. You will need your employee credentials to sign back in.',
-              style: const TextStyle(
-                color: AppTokens.textSecondary,
-                fontSize: 13.5,
-                height: 1.45,
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancel', style: TextStyle(color: AppTokens.textSecondary)),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            style: FilledButton.styleFrom(
-              backgroundColor: AppTokens.danger,
-              minimumSize: const Size(0, 42),
-            ),
-            child: const Text('Sign Out'),
-          ),
-        ],
       ),
     );
-
-    if (confirmed ?? false) {
-      if (context.mounted) {
-        Navigator.of(context).popUntil((route) => route.isFirst);
-      }
-      await ref.read(authControllerProvider.notifier).signOut();
-    }
   }
+
 }
 
-/// Profile summary card at the top of settings.
-class _ProfileHeroCard extends StatelessWidget {
-  const _ProfileHeroCard({required this.session});
+/// The person's monogram on a solid Zebu-blue rounded square.
+class _Avatar extends StatelessWidget {
+  const _Avatar({required this.initials, this.size = 56});
+
+  final String initials;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: size,
+    height: size,
+    alignment: Alignment.center,
+    decoration: BoxDecoration(
+      color: AppTokens.zebuBlue,
+      // 18 at the 56px size, scaled with it.
+      borderRadius: BorderRadius.circular(size * AppTokens.r18 / 56),
+    ),
+    child: ExcludeSemantics(
+      child: Text(
+        initials,
+        style: AppType.heading.copyWith(
+          color: AppTokens.onBrand,
+          fontSize: size * 0.36,
+          height: 1,
+        ),
+      ),
+    ),
+  );
+}
+
+/// The profile block at the top of Settings: monogram, name, employee code
+/// and department, and the account's state. Opens "Your profile".
+class _ProfileSummary extends StatelessWidget {
+  const _ProfileSummary({required this.session, required this.onTap});
 
   final Session? session;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: AppTokens.surface1,
-        borderRadius: BorderRadius.circular(AppTokens.r16),
-        border: Border.all(color: AppTokens.borderDefault, width: 1),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.25),
-            blurRadius: 12,
-            offset: const Offset(0, 4),
+    final z = context.z;
+    final s = session;
+    final meta = s == null
+        ? 'Sign in to set up this phone'
+        : (s.department == null
+              ? 'Employee ${s.employeeId}'
+              : 'Employee ${s.employeeId}, ${s.department}');
+
+    return Semantics(
+      button: s != null,
+      child: InkWell(
+        onTap: s == null ? null : onTap,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(
+            AppTokens.gutter,
+            8,
+            AppTokens.gutter,
+            12,
           ),
-        ],
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 52,
-            height: 52,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              gradient: AppTokens.primaryGradient,
-              shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
-                  color: AppTokens.brandElectric.withValues(alpha: 0.35),
-                  blurRadius: 10,
-                  offset: const Offset(0, 3),
-                ),
-              ],
-            ),
-            child: Text(
-              session?.initials ?? 'ZB',
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.w800,
-                fontSize: 18,
-              ),
-            ),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  session?.displayName ?? 'Not signed in',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 16,
-                    color: Colors.white,
-                    letterSpacing: -0.2,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  session != null
-                      ? '${session!.employeeId} · ${session!.department ?? "Staff"}'
-                      : 'Sign in to register device',
-                  style: const TextStyle(
-                    color: AppTokens.textSecondary,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          if (session != null)
-            const StatusPill(
-              label: 'Active',
-              color: AppTokens.success,
-              icon: Icons.check_rounded,
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Section title header.
-class _SettingsSectionHeader extends StatelessWidget {
-  const _SettingsSectionHeader(this.title);
-
-  final String title;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(left: 4, bottom: 8),
-      child: Text(
-        title.toUpperCase(),
-        style: const TextStyle(
-          color: AppTokens.textMuted,
-          fontSize: 11.5,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0.8,
-        ),
-      ),
-    );
-  }
-}
-
-/// Grouped card wrapper for settings rows with subtle dividers.
-class _SettingsGroup extends StatelessWidget {
-  const _SettingsGroup({required this.children});
-
-  final List<Widget> children;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: AppTokens.surface1,
-        borderRadius: BorderRadius.circular(AppTokens.r12),
-        border: Border.all(color: AppTokens.borderSubtle, width: 1),
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(AppTokens.r12),
-        child: Column(
-          children: [
-            for (var i = 0; i < children.length; i++) ...[
-              if (i > 0)
-                const Divider(
-                  height: 1,
-                  indent: 52,
-                  color: AppTokens.borderSubtle,
-                ),
-              children[i],
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Individual setting row with icon, title, optional subtitle, value/pill, and chevron.
-class _SettingsTile extends StatelessWidget {
-  const _SettingsTile({
-    required this.icon,
-    required this.title,
-    this.subtitle,
-    this.value = '',
-    this.valueColor,
-    this.valueWidget,
-    this.onTap,
-    this.destructive = false,
-  });
-
-  final IconData icon;
-  final String title;
-  final String? subtitle;
-  final String value;
-  final Color? valueColor;
-  final Widget? valueWidget;
-  final VoidCallback? onTap;
-  final bool destructive;
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
-        child: Row(
-          children: [
-            Icon(
-              icon,
-              size: 20,
-              color: destructive ? AppTokens.danger : AppTokens.textSecondary,
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: TextStyle(
-                      fontSize: 14.5,
-                      fontWeight: FontWeight.w500,
-                      color: destructive ? AppTokens.danger : Colors.white,
-                      letterSpacing: -0.2,
-                    ),
-                  ),
-                  if (subtitle != null && subtitle!.isNotEmpty) ...[
-                    const SizedBox(height: 2),
+          child: Row(
+            children: [
+              _Avatar(initials: s?.initials ?? 'ZB'),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
                     Text(
-                      subtitle!,
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: AppTokens.textMuted,
-                      ),
+                      s?.displayName ?? 'Not signed in',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppType.barTitle,
                     ),
+                    const SizedBox(height: 3),
+                    Text(
+                      meta,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppType.tabular(
+                        AppType.label,
+                      ).copyWith(color: z.ink3, fontWeight: FontWeight.w400),
+                    ),
+                    if (s != null) ...[
+                      const SizedBox(height: 4),
+                      const _AccountStatus(),
+                    ],
                   ],
-                ],
-              ),
-            ),
-            const SizedBox(width: 10),
-            if (valueWidget != null) ...[
-              valueWidget!,
-            ] else if (value.isNotEmpty) ...[
-              Text(
-                value,
-                style: TextStyle(
-                  color: valueColor ?? AppTokens.textMuted,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
                 ),
               ),
             ],
-            if (onTap != null) ...[
-              const SizedBox(width: 4),
-              Icon(
-                Icons.chevron_right_rounded,
-                size: 18,
-                color: destructive ? AppTokens.danger : AppTokens.textMuted,
-              ),
-            ],
-          ],
+          ),
         ),
       ),
+    );
+  }
+}
+
+/// The account's state in one word, from the same alerts the banners show.
+///
+/// It used to be the literal 'Active' whenever a session existed — including
+/// on a phone the admin had revoked, beside a banner saying access was removed.
+class _AccountStatus extends ConsumerWidget {
+  const _AccountStatus();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final z = context.z;
+    final alerts = ref.watch(syncAlertsProvider);
+    final ids = alerts.map((a) => a.id).toSet();
+    final (label, color) = ids.contains('blocked')
+        ? ('Access removed', z.danger)
+        : ids.contains('signed-out')
+        ? ('Sign-in needed', z.danger)
+        : alerts.any((a) => a.severity == SyncAlertSeverity.critical)
+        ? ('Needs attention', z.warn)
+        : ('Active', z.ok);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        StatusDot(color: color, size: 7),
+        const SizedBox(width: 6),
+        Text(label, style: AppType.label.copyWith(color: color)),
+      ],
     );
   }
 }

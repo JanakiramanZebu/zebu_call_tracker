@@ -26,26 +26,38 @@ object SyncPolicyStore {
     private const val PREFS = "call_ingest_store"
     private const val KEY_POLICY = "sync_policy_json"
 
-    /** Whether the user opted in to sending recordings over mobile data. */
-    private const val KEY_RECORDINGS_ON_METERED = "recordings_on_metered"
-
     data class Policy(
         val maxBatchSize: Int = 200,
         val recommendedBatchSize: Int = 50,
-        val maxCallAgeDays: Int = 90,
         val maxRecordingSizeBytes: Long = 209_715_200L,
         val allowedRecordingExtensions: Set<String> = DEFAULT_EXTENSIONS,
         val recommendedSyncIntervalSeconds: Int = 300,
+        /**
+         * Whether [CallTrackingService] may run at all (`keepalive_service`).
+         *
+         * Default TRUE, and absent means true: only an explicit `false` from
+         * the server turns it off. Employees rarely open this app, and on
+         * Xiaomi, Oppo, Vivo, OnePlus and Honor firmware a closed app stops
+         * receiving the "call ended" broadcast and has its scheduled jobs
+         * starved, so calls reached the CRM days late. A warm process with a
+         * foreground service is what those builds respect. The event-driven
+         * triggers and the hourly safety net still run beside it.
+         */
+        val keepaliveService: Boolean = true,
+        /** §4.6: older calls are refused for good (`SYNC_POLICY_VIOLATION`). */
+        val maxCallAgeDays: Int = 90,
     ) {
         /**
-         * How often the warm-process loop sweeps, in milliseconds.
+         * How often the warm-process loop sweeps, in milliseconds, when the
+         * service is enabled at all (see [keepaliveService]).
          *
-         * Taken from the server rather than invented. Clamped so a strange
-         * value cannot turn the loop into a busy-wait or stretch it past the
-         * scheduled work it is supposed to beat.
+         * Taken from the server rather than invented. The floor is five
+         * minutes: below that the loop was a radio and CPU wake-up per minute
+         * to re-read a call log the event triggers already cover. The service
+         * stretches this further to its own minimum; see [CallTrackingService].
          */
         val loopIntervalMillis: Long
-            get() = recommendedSyncIntervalSeconds.toLong().coerceIn(60L, 900L) * 1000L
+            get() = recommendedSyncIntervalSeconds.toLong().coerceIn(300L, 3600L) * 1000L
 
         /**
          * How many calls go in one `POST /sync/calls`.
@@ -84,11 +96,12 @@ object SyncPolicyStore {
             Policy(
                 maxBatchSize = o.optInt("max_batch_size", 200),
                 recommendedBatchSize = o.optInt("recommended_batch_size", 50),
-                maxCallAgeDays = o.optInt("max_call_age_days", 90),
                 maxRecordingSizeBytes =
                     o.optLong("max_recording_size_bytes", 209_715_200L),
                 recommendedSyncIntervalSeconds =
                     o.optInt("recommended_sync_interval_seconds", 300),
+                keepaliveService = o.optBoolean("keepalive_service", true),
+                maxCallAgeDays = o.optInt("max_call_age_days", 90).coerceAtLeast(1),
                 allowedRecordingExtensions =
                     o.optJSONArray("allowed_recording_extensions")
                         ?.toLowerCaseSet()
@@ -101,22 +114,12 @@ object SyncPolicyStore {
         }
     }
 
-    /**
-     * §6.5: audio goes over unmetered networks unless the user says otherwise.
-     *
-     * Default false. A recording is far larger than the metadata beside it, and
-     * spending somebody's mobile data on it without asking is not a decision
-     * this app gets to make silently.
-     */
-    fun recordingsAllowedOnMeteredNetworks(context: Context): Boolean =
-        prefs(context).getBoolean(KEY_RECORDINGS_ON_METERED, false)
-
-    fun setRecordingsAllowedOnMeteredNetworks(context: Context, allowed: Boolean) {
-        prefs(context).edit().putBoolean(KEY_RECORDINGS_ON_METERED, allowed).apply()
-    }
-
     private fun JSONArray.toLowerCaseSet(): Set<String> =
         (0 until length())
-            .mapNotNull { optString(it)?.trim()?.lowercase()?.takeIf { s -> s.isNotEmpty() } }
+            // ".m4a" and "m4a" alike: compared against a bare extension, a
+            // leading dot rejected every file locally as unsupported.
+            .mapNotNull {
+                optString(it)?.trim()?.removePrefix(".")?.lowercase()?.takeIf { s -> s.isNotEmpty() }
+            }
             .toSet()
 }

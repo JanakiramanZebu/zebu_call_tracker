@@ -7,6 +7,7 @@ import '../../../core/storage/app_database.dart';
 import '../../../core/storage/database_providers.dart';
 import '../../../core/storage/sync_state.dart';
 import '../../../core/network/call_wire_format.dart';
+import '../../../core/utils/formatters.dart';
 import '../../recording/domain/recording_matcher.dart';
 import '../domain/call_entry.dart';
 
@@ -23,21 +24,31 @@ final recordingMatcherProvider = Provider<RecordingMatcher>(
 final permissionStatusProvider = FutureProvider.autoDispose<PermissionSnapshot>(
   (ref) async {
     final bridge = ref.watch(nativeBridgeProvider);
-    final calls = await bridge.getPermissionStatus();
-    final recordings = await bridge.getRecordingAccess();
+    // Started together and awaited as one: this re-runs on every resume, and
+    // four channel round-trips in a row were on the path to the first frame.
+    // Future.wait handles every failure and rethrows the first as-is, so the
+    // error screen still sees a NativeFailure rather than a wrapper.
+    final calls = bridge.getPermissionStatus();
+    final recordings = bridge.getRecordingAccess();
     // Notifications are not in the native inspector's remit: POST_NOTIFICATIONS
     // does not exist below API 33, and permission_handler already reports
     // "granted" there. Checking status never raises a dialog.
-    final notifications = await Permission.notification.isGranted;
-    final overlay = await bridge.checkOverlayPermission();
+    final notifications = Permission.notification.isGranted;
+    final overlay = bridge.checkOverlayPermission();
+    await Future.wait([calls, recordings, notifications, overlay]);
+
+    final callPerms = await calls;
+    final recordingAccess = await recordings;
     return PermissionSnapshot(
-      readPhoneState: calls['readPhoneState'] ?? false,
-      readCallLog: calls['readCallLog'] ?? false,
-      readContacts: calls['readContacts'] ?? false,
-      readMediaAudio: recordings.granted,
-      mediaPermissionName: recordings.permission,
-      notifications: notifications,
-      overlayWindow: overlay,
+      readPhoneState: callPerms['readPhoneState'] ?? false,
+      readCallLog: callPerms['readCallLog'] ?? false,
+      readContacts: callPerms['readContacts'] ?? false,
+      readRecordings: recordingAccess.granted,
+      recordingPermission: recordingAccess.permission,
+      notifications: await notifications,
+      overlayWindow: await overlay,
+      whatsappCalls: callPerms['whatsappCalls'] ?? false,
+      whatsappInstalled: callPerms['whatsappInstalled'] ?? false,
     );
   },
 );
@@ -47,43 +58,48 @@ class PermissionSnapshot {
     required this.readPhoneState,
     required this.readCallLog,
     required this.readContacts,
-    required this.readMediaAudio,
-    required this.mediaPermissionName,
+    required this.readRecordings,
+    required this.recordingPermission,
     required this.notifications,
     this.overlayWindow = false,
+    this.whatsappCalls = false,
+    this.whatsappInstalled = false,
   });
 
   final bool readPhoneState;
   final bool readCallLog;
   final bool readContacts;
-  final bool readMediaAudio;
-  final String mediaPermissionName;
+
+  /// Whether [recordingPermission] is held.
+  final bool readRecordings;
+
+  /// The Android permission the recording scan needs on this OS version, as
+  /// the native side names it: READ_MEDIA_AUDIO on API 33+, and
+  /// READ_EXTERNAL_STORAGE below. Carried so the ask requests the one this
+  /// handset actually has — see `permissionAsks`.
+  final String recordingPermission;
+
   final bool notifications;
 
   /// SYSTEM_ALERT_WINDOW — for the post-call overlay card.
   /// Defaults to false so existing call sites do not break.
   final bool overlayWindow;
 
-  /// Call log is the only hard requirement — everything else degrades.
-  bool get canTrack => readCallLog;
+  /// Notification access for the WhatsApp call listener.
+  final bool whatsappCalls;
 
-  /// Counted against [total], which must stay in step with `permissionAsks`.
+  /// WhatsApp or WhatsApp Business is installed. Without one, the WhatsApp
+  /// ask is not shown at all.
+  final bool whatsappInstalled;
+
+  /// Whether new calls are being captured at all.
   ///
-  /// Background activity is included because the walkthrough shows a card for
-  /// it. Leaving it out is why Settings used to report "5/5 granted" on a
-  /// handset the Permissions screen showed as 5 of 6.
-  int grantedCount({bool ignoringBatteryOptimizations = false}) => [
-    readPhoneState && readCallLog,
-    ignoringBatteryOptimizations,
-    readContacts,
-    readMediaAudio,
-    notifications,
-    overlayWindow,
-  ].where((g) => g).length;
-
-  /// One per entry in `permissionAsks`; the phone/call-log pair counts as one
-  /// ask because the user is shown one card for it.
-  static const total = 6;
+  /// Both halves, because capture needs both: the call log supplies the call,
+  /// and READ_PHONE_STATE is what lets the call-state receiver fire at all.
+  /// This used to check the call log alone, so revoking only "Phone" stopped
+  /// capture silently while the app went on looking healthy. It must agree
+  /// with the essential card in `permissionAsks`.
+  bool get canTrack => readCallLog && readPhoneState;
 }
 
 /// The call feed: log rows joined to whatever recording matched them.
@@ -121,7 +137,9 @@ class CallFeed extends AsyncNotifier<CallFeedState> {
     final matcher = ref.read(recordingMatcherProvider);
     final perms = await ref.read(permissionStatusProvider.future);
 
-    if (!perms.canTrack) {
+    // The call log alone, not [PermissionSnapshot.canTrack]: showing history
+    // needs nothing more, and AppGate already diverts when capture has stopped.
+    if (!perms.readCallLog) {
       return const CallFeedState(entries: [], hasMore: false, blocked: true);
     }
 
@@ -132,7 +150,7 @@ class CallFeed extends AsyncNotifier<CallFeedState> {
     );
 
     if (!_poolLoaded) {
-      _pool = perms.readMediaAudio
+      _pool = perms.readRecordings
           ? await bridge.scanRecordings(
               sinceEpochSeconds: 0,
               limit: _recordingPoolSize,
@@ -229,12 +247,67 @@ class CallFeed extends AsyncNotifier<CallFeedState> {
       entries.add(CallEntry(row: row, match: match, uploadState: state, contactName: name));
     }
 
+    // WhatsApp calls never reach Android's call log; they exist only as
+    // outbox rows the WhatsApp listener wrote. Each page takes the ones that
+    // fall inside its own time span — from the cursor down to the oldest call
+    // -log row on the page, or everything older on the last page — so paging
+    // neither skips nor repeats them.
+    final pageIsLast = rows.length < _pageSize;
+    final oldestOnPage = validRows.isEmpty
+        ? null
+        : validRows.map((r) => r.dateMillis!).reduce((a, b) => a < b ? a : b);
+    try {
+      final whatsApp = await dao.getWhatsAppCalls(
+        fromMillis: pageIsLast ? null : oldestOnPage,
+        beforeMillis: beforeMillis > 0 ? beforeMillis : null,
+      );
+      if (whatsApp.isNotEmpty) {
+        entries
+          ..addAll(whatsApp.map(_whatsAppEntry))
+          ..sort(
+            (a, b) => (b.row.dateMillis ?? 0).compareTo(a.row.dateMillis ?? 0),
+          );
+      }
+    } catch (_) {
+      // The call-log page still shows; WhatsApp rows return on the next load.
+    }
+
     return CallFeedState(
       entries: [...previous, ...entries],
       // A short page means the provider had nothing more to give, which is a
       // reliable end-of-list signal now that each page is a bounded query.
       hasMore: rows.length >= _pageSize,
-      recordingPoolSize: _pool.length,
+    );
+  }
+
+  /// A WhatsApp outbox row, shaped like a call-log entry so the list, the
+  /// filters and the detail screen treat it like any other call.
+  CallEntry _whatsAppEntry(LocalCall c) {
+    final direction = c.status == 'missed'
+        ? CallDirection.missed
+        : c.direction == 'outgoing'
+        ? CallDirection.outgoing
+        : CallDirection.incoming;
+    final number = c.phoneNumber == 'Unknown' ? null : c.phoneNumber;
+    return CallEntry(
+      row: CallLogRow(
+        systemId: null,
+        number: number,
+        presentation: NumberPresentation.allowed,
+        cachedName: c.contactName,
+        direction: direction,
+        dateMillis: c.startedAt.millisecondsSinceEpoch,
+        durationSeconds: c.durationSeconds,
+        phoneAccountId: null,
+      ),
+      // WhatsApp audio cannot be recorded, so there is never one to match.
+      match: const RecordingMatch(
+        status: RecordingMatchStatus.notFound,
+        confidence: 0,
+      ),
+      uploadState: _uploadStateOf(c.syncState),
+      contactName: c.contactName,
+      isWhatsApp: true,
     );
   }
 
@@ -279,12 +352,19 @@ class CallFeed extends AsyncNotifier<CallFeedState> {
       await bridge.triggerNativeSync();
     } catch (_) {}
 
+    // A reload already in flight read the row before this write; joining it
+    // would show the call still waiting for a choice. Let it land, then load
+    // again.
+    await _refreshing;
     await refresh();
   }
 
   Future<void> loadMore() async {
     final current = state.value;
     if (current == null || !current.hasMore || current.loadingMore) return;
+    // A page appended to a list that a refresh is about to replace would be
+    // thrown away, or worse, land after it and resurrect the stale prefix.
+    if (_refreshing != null) return;
 
     // The oldest row already held is the cursor for the next page. Null-safe
     // because a row without a timestamp is skipped during load and so can
@@ -294,20 +374,48 @@ class CallFeed extends AsyncNotifier<CallFeedState> {
         : current.entries.last.row.dateMillis ?? 0;
 
     state = AsyncData(current.copyWith(loadingMore: true));
-    state = await AsyncValue.guard(
+    final next = await AsyncValue.guard(
       () => _load(previous: current.entries, beforeMillis: cursor),
     );
+    // A refresh that started meanwhile owns the list now; this page belongs
+    // to the one it is replacing.
+    if (_refreshing != null) return;
+    // A page that failed to load leaves the rows already shown in place; the
+    // next scroll to the bottom asks again.
+    state = next.hasError ? AsyncData(current) : next;
   }
 
-  Future<void> refresh() async {
-    state = const AsyncLoading();
-    state = await AsyncValue.guard(() async {
-      ref.invalidate(permissionStatusProvider);
-      // A pull-to-refresh is the user saying the device state changed, so the
-      // recording pool is rebuilt rather than reused.
-      _poolLoaded = false;
-      return _load(previous: const []);
-    });
+  Future<void>? _refreshing;
+
+  /// Reloads the first page.
+  ///
+  /// Single-flight: resume, reconnect, pull-to-refresh and a confirmed
+  /// recording can all ask at once, and each used to start its own reload —
+  /// a call-log read, a MediaStore scan and a contacts lookup apiece.
+  ///
+  /// Silent when there is already something on screen: the list stays put and
+  /// the new page is swapped in when it arrives. Dropping to [AsyncLoading]
+  /// blanked every watcher to a skeleton on each resume, for data that had
+  /// usually not changed.
+  Future<void> refresh() => _refreshing ??= _reload().whenComplete(() {
+        _refreshing = null;
+      });
+
+  Future<void> _reload() async {
+    if (!state.hasValue) state = const AsyncLoading();
+    ref.invalidate(permissionStatusProvider);
+    // A refresh is the user (or a resume) saying the device state changed, so
+    // the recording pool is rebuilt rather than reused.
+    _poolLoaded = false;
+    final next = await AsyncValue.guard(() => _load(previous: const []));
+    // A failed background reload keeps the list the user is reading rather
+    // than replacing it with an error page; the next refresh tries again.
+    // A page load this refresh superseded may have left its spinner set.
+    if (next.hasError && state.value != null) {
+      state = AsyncData(state.requireValue.copyWith(loadingMore: false));
+      return;
+    }
+    state = next;
   }
 }
 
@@ -317,7 +425,6 @@ class CallFeedState {
     required this.hasMore,
     this.loadingMore = false,
     this.blocked = false,
-    this.recordingPoolSize = 0,
   });
 
   final List<CallEntry> entries;
@@ -328,46 +435,46 @@ class CallFeedState {
   /// than render an empty list that looks like "no calls".
   final bool blocked;
 
-  final int recordingPoolSize;
-
   CallFeedState copyWith({bool? loadingMore}) => CallFeedState(
     entries: entries,
     hasMore: hasMore,
     loadingMore: loadingMore ?? this.loadingMore,
     blocked: blocked,
-    recordingPoolSize: recordingPoolSize,
   );
 
   /// Entries grouped into day buckets, newest first, for sectioned lists.
-  List<(String heading, List<CallEntry> calls)> get grouped {
+  ///
+  /// Computed once per list of entries and cached: the calls list used to
+  /// regroup every loaded row — with a clock read and a heading string per
+  /// row — on each build, which meant on every keystroke in its search box.
+  /// Keyed on [entries] rather than the state so a `copyWith` (the load-more
+  /// spinner) reuses it; an [Expando] so the constructor can stay const.
+  List<(String heading, List<CallEntry> calls)> get grouped =>
+      _grouped[entries] ??= _group(entries);
+
+  static final _grouped = Expando<List<(String, List<CallEntry>)>>();
+
+  static List<(String, List<CallEntry>)> _group(List<CallEntry> entries) {
     final out = <(String, List<CallEntry>)>[];
-    String? current;
+    int? currentDay;
+    DateTime? first;
     var bucket = <CallEntry>[];
 
     for (final e in entries) {
       final utc = e.startedAtUtc;
       if (utc == null) continue;
-      final heading = _headingFor(utc);
-      if (heading != current) {
-        if (current != null) out.add((current, bucket));
-        current = heading;
+      final local = utc.toLocal();
+      final day = local.year * 10000 + local.month * 100 + local.day;
+      if (day != currentDay) {
+        if (first != null) out.add((Fmt.dayHeading(first), bucket));
+        currentDay = day;
+        first = utc;
         bucket = [];
       }
       bucket.add(e);
     }
-    if (current != null && bucket.isNotEmpty) out.add((current, bucket));
+    if (first != null) out.add((Fmt.dayHeading(first), bucket));
     return out;
-  }
-
-  static String _headingFor(DateTime utc) {
-    final local = utc.toLocal();
-    final day = DateTime(local.year, local.month, local.day);
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    final delta = today.difference(day).inDays;
-    if (delta == 0) return 'Today';
-    if (delta == 1) return 'Yesterday';
-    return '${day.day}/${day.month}/${day.year}';
   }
 }
 
@@ -421,10 +528,13 @@ final periodRangeInfoProvider = Provider<PeriodRangeInfo>((ref) {
     DashboardPeriod.all => (DateTime.fromMillisecondsSinceEpoch(0), endOfToday.add(const Duration(days: 365))),
   };
 
-  final dateFormat = DateFormat('dd-MMM-yyyy hh:mm a');
-  final formatted = period == DashboardPeriod.all
-      ? 'All Time'
-      : '${dateFormat.format(start)} - ${dateFormat.format(end)}';
+  // A date, not a timestamp range: "09-Oct-2026 12:00 AM - 09-Oct-2026
+  // 11:59 PM" said "today" in thirty-odd characters nobody needed to parse.
+  final formatted = switch (period) {
+    DashboardPeriod.all => 'All time',
+    DashboardPeriod.today || DashboardPeriod.yesterday => _dayFormat.format(start),
+    _ => '${_shortDayFormat.format(start)} – ${_dayFormat.format(end)}',
+  };
 
   return PeriodRangeInfo(
     start: start,
@@ -433,11 +543,15 @@ final periodRangeInfoProvider = Provider<PeriodRangeInfo>((ref) {
   );
 });
 
+final _dayFormat = DateFormat('EEE, d MMM yyyy');
+final _shortDayFormat = DateFormat('d MMM');
+
+/// "Hide internal calls". Off until the user turns it on: the dashboard opens
+/// on every call, with no filter quietly applied.
 class AnalyticsExcludeInternalController extends Notifier<bool> {
   @override
-  bool build() => true;
+  bool build() => false;
 
-  void toggle() => state = !state;
   void set(bool val) => state = val;
 }
 
@@ -446,18 +560,93 @@ final analyticsExcludeInternalProvider =
   AnalyticsExcludeInternalController.new,
 );
 
-/// Reactive Stream of CallStats directly computed from SQLite database records
-/// matching the active date period and filter parameters.
-final analyticsPeriodStatsProvider = StreamProvider<CallStats>((ref) {
+typedef HourlyActivity = ({
+  List<double> incoming,
+  List<double> outgoing,
+  List<double> missed,
+});
+
+/// Everything the dashboard shows for the selected period, derived from one
+/// query.
+///
+/// Four providers used to watch the same period's rows separately — four drift
+/// queries re-run, and four full walks of the result, on every write to
+/// `local_calls`, which ingest makes on each catch-up. One watch now feeds the
+/// stats, both charts and the drill-down list.
+class PeriodAnalytics {
+  const PeriodAnalytics({
+    required this.calls,
+    required this.stats,
+    required this.hourly,
+    required this.sparkline,
+  });
+
+  factory PeriodAnalytics.from(List<LocalCall> calls) {
+    final incoming = List.filled(6, 0.0);
+    final outgoing = List.filled(6, 0.0);
+    final missed = List.filled(6, 0.0);
+    final sparkline = List.filled(8, 0.0);
+
+    for (final c in calls) {
+      final hour = c.startedAt.toLocal().hour;
+      sparkline[hour ~/ 3]++;
+
+      final bucket = hour ~/ 4;
+      final dir = c.direction.toLowerCase();
+      final status = c.status.toLowerCase();
+      if (dir == 'incoming') {
+        incoming[bucket]++;
+      } else if (dir == 'outgoing') {
+        outgoing[bucket]++;
+      } else if (dir == 'missed' ||
+          dir == 'rejected' ||
+          status == 'missed' ||
+          status == 'rejected') {
+        missed[bucket]++;
+      }
+    }
+
+    return PeriodAnalytics(
+      calls: calls,
+      stats: CallStats.fromLocalCalls(calls),
+      hourly: (incoming: incoming, outgoing: outgoing, missed: missed),
+      sparkline: sparkline,
+    );
+  }
+
+  /// The period's rows, newest first.
+  final List<LocalCall> calls;
+  final CallStats stats;
+
+  /// Calls per four-hour band, by direction, for the activity chart.
+  final HourlyActivity hourly;
+
+  /// Calls per three-hour band, for the hero card's sparkline.
+  final List<double> sparkline;
+
+  static const empty = PeriodAnalytics(
+    calls: [],
+    stats: CallStats.empty,
+    hourly: (incoming: _six, outgoing: _six, missed: _six),
+    sparkline: [0, 0, 0, 0, 0, 0, 0, 0],
+  );
+
+  static const _six = <double>[0, 0, 0, 0, 0, 0];
+}
+
+/// The selected period's analytics, live from the database.
+final analyticsPeriodProvider = StreamProvider<PeriodAnalytics>((ref) {
   final dao = ref.watch(callsDaoProvider);
   final rangeInfo = ref.watch(periodRangeInfoProvider);
   final excludeInternal = ref.watch(analyticsExcludeInternalProvider);
 
-  return dao.watchCallsForAnalytics(
-    startUtc: rangeInfo.start.toUtc(),
-    endUtc: rangeInfo.end.toUtc(),
-    excludeInternal: excludeInternal,
-  ).map(CallStats.fromLocalCalls);
+  return dao
+      .watchCallsForAnalytics(
+        startUtc: rangeInfo.start.toUtc(),
+        endUtc: rangeInfo.end.toUtc(),
+        excludeInternal: excludeInternal,
+      )
+      .map(PeriodAnalytics.from);
 });
 
 /// The same-length window immediately before [periodRangeInfoProvider].
@@ -509,63 +698,6 @@ String? trendLabel(num current, num? previous) {
   return '$sign${delta.abs().toStringAsFixed(0)}%';
 }
 
-/// Reactive hourly call activity point distribution for dashboard charts.
-final analyticsHourlyActivityProvider = StreamProvider<({List<double> incoming, List<double> outgoing, List<double> missed})>((ref) {
-  final dao = ref.watch(callsDaoProvider);
-  final rangeInfo = ref.watch(periodRangeInfoProvider);
-  final excludeInternal = ref.watch(analyticsExcludeInternalProvider);
-
-  return dao.watchCallsForAnalytics(
-    startUtc: rangeInfo.start.toUtc(),
-    endUtc: rangeInfo.end.toUtc(),
-    excludeInternal: excludeInternal,
-  ).map((calls) {
-    final incoming = List.filled(6, 0.0);
-    final outgoing = List.filled(6, 0.0);
-    final missed = List.filled(6, 0.0);
-
-    for (final c in calls) {
-      final localDt = c.startedAt.toLocal();
-      final hour = localDt.hour;
-      final bucket = (hour ~/ 4).clamp(0, 5);
-      final dir = c.direction.toLowerCase();
-      final status = c.status.toLowerCase();
-
-      if (dir == 'incoming') {
-        incoming[bucket]++;
-      } else if (dir == 'outgoing') {
-        outgoing[bucket]++;
-      } else if (dir == 'missed' || dir == 'rejected' || status == 'missed' || status == 'rejected') {
-        missed[bucket]++;
-      }
-    }
-
-    return (incoming: incoming, outgoing: outgoing, missed: missed);
-  });
-});
-
-/// Reactive sparkline data point distribution.
-final analyticsSparklineProvider = StreamProvider<List<double>>((ref) {
-  final dao = ref.watch(callsDaoProvider);
-  final rangeInfo = ref.watch(periodRangeInfoProvider);
-  final excludeInternal = ref.watch(analyticsExcludeInternalProvider);
-
-  return dao.watchCallsForAnalytics(
-    startUtc: rangeInfo.start.toUtc(),
-    endUtc: rangeInfo.end.toUtc(),
-    excludeInternal: excludeInternal,
-  ).map((calls) {
-    if (calls.isEmpty) return const [0, 0, 0, 0, 0, 0, 0, 0];
-    final buckets = List.filled(8, 0.0);
-    for (final c in calls) {
-      final hour = c.startedAt.toLocal().hour;
-      final b = (hour ~/ 3).clamp(0, 7);
-      buckets[b]++;
-    }
-    return buckets;
-  });
-});
-
 CallEntry callEntryFromLocalCall(LocalCall lc) {
   final dir = switch (lc.direction.toLowerCase()) {
     'incoming' => CallDirection.incoming,
@@ -612,56 +744,17 @@ CallEntry callEntryFromLocalCall(LocalCall lc) {
   );
 }
 
-/// Reactive entries matching active period and filter for drilldown popups.
-final analyticsPeriodEntriesProvider = StreamProvider<List<CallEntry>>((ref) {
-  final dao = ref.watch(callsDaoProvider);
-  final rangeInfo = ref.watch(periodRangeInfoProvider);
-  final excludeInternal = ref.watch(analyticsExcludeInternalProvider);
-
-  return dao.watchCallsForAnalytics(
-    startUtc: rangeInfo.start.toUtc(),
-    endUtc: rangeInfo.end.toUtc(),
-    excludeInternal: excludeInternal,
-  ).map((calls) => calls.map(callEntryFromLocalCall).toList());
-});
-
-/// Aggregates for the dashboard computed from database when available,
-/// with immediate fallback to feed entries during initialization or tests.
-final periodStatsProvider = Provider<CallStats>((ref) {
-  final statsAsync = ref.watch(analyticsPeriodStatsProvider);
-  if (statsAsync.hasValue) return statsAsync.requireValue;
-
-  final feed = ref.watch(callFeedProvider).value;
-  if (feed == null) return CallStats.empty;
-
-  final rangeInfo = ref.watch(periodRangeInfoProvider);
-
-  return CallStats.from(
-    feed.entries.where((e) {
-      final local = e.startedAtUtc?.toLocal();
-      if (local == null) return false;
-      return !local.isBefore(rangeInfo.start) && !local.isAfter(rangeInfo.end);
-    }),
-  );
-});
-
-/// Today's aggregates for the dashboard.
-final todayStatsProvider = Provider<CallStats>((ref) {
-  final statsAsync = ref.watch(analyticsPeriodStatsProvider);
-  if (statsAsync.hasValue) return statsAsync.requireValue;
-
-  final feed = ref.watch(callFeedProvider).value;
-  if (feed == null) return CallStats.empty;
-
-  final now = DateTime.now();
-  final startOfToday = DateTime(now.year, now.month, now.day);
-  return CallStats.from(
-    feed.entries.where((e) {
-      final local = e.startedAtUtc?.toLocal();
-      return local != null && !local.isBefore(startOfToday);
-    }),
-  );
-});
+/// The selected period's calls as list entries, for the drill-down sheet.
+///
+/// Derived from [analyticsPeriodProvider] rather than a second watch of the
+/// same rows, and auto-disposed: only an open sheet needs the mapped list, and
+/// for "All time" it can run to thousands of entries.
+final analyticsPeriodEntriesProvider =
+    Provider.autoDispose<AsyncValue<List<CallEntry>>>(
+  (ref) => ref.watch(analyticsPeriodProvider).whenData(
+        (p) => [for (final c in p.calls) callEntryFromLocalCall(c)],
+      ),
+);
 
 /// Device identity for the settings and detail screens.
 final deviceInfoProvider = FutureProvider<Map<String, Object?>>(

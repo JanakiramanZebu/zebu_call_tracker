@@ -2,6 +2,7 @@ package `in`.mynt.zebu_call_tracker.background
 
 import android.content.ContentValues
 import android.content.Context
+import android.database.DatabaseErrorHandler
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import android.util.Log
@@ -36,7 +37,8 @@ data class CallRecord(
     val recordingMediaStoreId: Long?,
     val recordingChecksum: String?,
     val recordingUploadStatus: String,
-    val simSlot: Int,
+    /** Null for calls that use no SIM (WhatsApp) — sent without a slot. */
+    val simSlot: Int?,
     /**
      * Call-log and recording facts with no column of their own, as a JSON
      * object, forwarded verbatim to the server's `metadata` bag. Null when the
@@ -44,7 +46,11 @@ data class CallRecord(
      */
     val metadataJson: String?,
     val attemptCount: Int,
-    val syncState: String,
+    /**
+     * When the row was first written on this handset: the wire's
+     * `client_created_at`. Null only if the column could not be read.
+     */
+    val clientCreatedAtMillis: Long? = null,
 )
 
 /**
@@ -55,16 +61,36 @@ class ZebuDatabaseHelper private constructor(context: Context, dbPath: String) :
     context.applicationContext,
     dbPath,
     null,
-    DATABASE_VERSION
+    DATABASE_VERSION,
+    // Never delete the file on corruption. Android's default handler does,
+    // which would silently drop every call not yet sent. The Dart side owns
+    // recovery: it backs the file up and salvages readable rows on next open
+    // (AppDatabase.checkAndRepairDatabaseFile).
+    DatabaseErrorHandler { db ->
+        Log.e("ZebuDatabaseHelper", "SQLite reported corruption in ${db.path}; leaving the file for salvage")
+    },
 ) {
     override fun onConfigure(db: SQLiteDatabase) {
         super.onConfigure(db)
+        // Each setting on its own: one failing must not skip the rest.
         try {
             db.enableWriteAheadLogging()
-            db.execSQL("PRAGMA busy_timeout=10000;")
-            db.execSQL("PRAGMA synchronous=NORMAL;")
         } catch (e: Exception) {
-            Log.w(TAG, "Failed configuring SQLite pragmas: ${e.message}")
+            Log.w(TAG, "Failed enabling WAL: ${e.message}")
+        }
+        // busy_timeout RETURNS a row, and Android's execSQL rejects any
+        // statement that does ("Queries can be performed using rawQuery
+        // only") — so it used to throw here on every open, and the shared
+        // try then skipped synchronous=NORMAL too. Run it as a query.
+        try {
+            db.rawQuery("PRAGMA busy_timeout=10000;", null).use { it.moveToFirst() }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed setting busy_timeout: ${e.message}")
+        }
+        try {
+            db.rawQuery("PRAGMA synchronous=NORMAL;", null).use { it.moveToFirst() }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed setting synchronous: ${e.message}")
         }
     }
 
@@ -154,6 +180,40 @@ class ZebuDatabaseHelper private constructor(context: Context, dbPath: String) :
         } catch (e: Exception) {
             Log.w(TAG, "Failed normalising legacy sync states: ${e.message}")
         }
+
+        // Releases recordings an older build held for Wi-Fi. That build parked
+        // an owed recording on its synced row with a future `next_attempt_at`
+        // (up to six hours out). The claim query no longer reads that column
+        // for such rows, so they are sendable already; clearing the stale
+        // value as well keeps the column meaning "retry backoff" and nothing
+        // else. Idempotent: once cleared, the WHERE matches nothing.
+        try {
+            db.execSQL(
+                "UPDATE $TABLE_LOCAL_CALLS SET next_attempt_at = NULL " +
+                    "WHERE sync_state = '${SyncStates.UPLOADED}' " +
+                    "AND recording_upload_status = '${RecordingStates.PENDING}' " +
+                    "AND next_attempt_at IS NOT NULL",
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not release held recordings: ${e.message}")
+        }
+
+        // Indexes for the queries that run on every pass and every sync: the
+        // claim queries (sync_state + next_attempt_at, newest first), the
+        // recording-discovery window on started_at, and the server-id checks.
+        // Without them each was a full scan of a table that grows by every
+        // call the handset makes.
+        //
+        // Same rules as the columns above: IF NOT EXISTS, no version bump,
+        // and the names are shared with drift's `beforeOpen` so whichever side
+        // opens the file first creates them and the other finds them there.
+        for (statement in INDEX_STATEMENTS) {
+            try {
+                db.execSQL(statement)
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not create index: ${e.message}")
+            }
+        }
     }
 
     companion object {
@@ -174,6 +234,13 @@ class ZebuDatabaseHelper private constructor(context: Context, dbPath: String) :
          */
         private val ADDITIVE_COLUMNS = listOf(
             "metadata_json" to "metadata_json TEXT",
+        )
+
+        /** Keep the names in step with `lib/core/storage/app_database.dart`. */
+        private val INDEX_STATEMENTS = listOf(
+            "CREATE INDEX IF NOT EXISTS idx_local_calls_sync_next ON local_calls(sync_state, next_attempt_at)",
+            "CREATE INDEX IF NOT EXISTS idx_local_calls_started_at ON local_calls(started_at)",
+            "CREATE INDEX IF NOT EXISTS idx_local_calls_server_call_id ON local_calls(server_call_id)",
         )
 
         /** True when [table] already has [column]. */
@@ -314,7 +381,10 @@ object NativeCallOutboxDao {
                     Log.w(TAG, "Warning copying backup: ${e.message}")
                 }
 
-                db.execSQL("PRAGMA wal_checkpoint(TRUNCATE);")
+                // rawQuery, not execSQL: the checkpoint returns a row, and
+                // Android's execSQL throws on any statement that does — which
+                // aborted the repair before REINDEX ever ran.
+                db.rawQuery("PRAGMA wal_checkpoint(TRUNCATE);", null).use { it.moveToFirst() }
                 db.execSQL("REINDEX;")
 
                 val recheckCursor = db.rawQuery("PRAGMA integrity_check;", null)
@@ -462,7 +532,7 @@ object NativeCallOutboxDao {
                            contact_name, direction, status, started_at, duration_seconds,
                            has_recording, recording_path, recording_media_store_id, recording_checksum,
                            recording_upload_status, sim_slot, attempt_count, sync_state,
-                           answered_at, ended_at, metadata_json
+                           answered_at, ended_at, metadata_json, client_created_at
                     FROM $TABLE_LOCAL_CALLS
                     WHERE server_call_id IS NULL
                       AND (sync_state = '${SyncStates.WAITING}'
@@ -537,35 +607,155 @@ object NativeCallOutboxDao {
             recordingChecksum = if (isNull(13)) null else getString(13),
             recordingUploadStatus =
                 if (isNull(14)) RecordingStates.PENDING else getString(14),
-            simSlot = if (isNull(15)) 1 else getInt(15),
+            // NULL only on WhatsApp rows, which have no SIM. Every call-log
+            // row is written with a slot (insertCapturedCalls), so legacy rows
+            // keep reading as SIM 1.
+            simSlot = if (isNull(15)) null else getInt(15),
             attemptCount = getInt(16),
-            syncState = SyncStates.UPLOADING,
+            clientCreatedAtMillis = if (isNull(21)) null else toMillis(getLong(21)),
         )
+    }
+
+    /**
+     * The claim predicate, shared by [claimNextWaitingCall] and
+     * [hasClaimableWork] so "is there work" can never disagree with "take the
+     * work". Returns the WHERE clause and its arguments.
+     *
+     * Three ways a row becomes claimable:
+     *  1. never sent,
+     *  2. sent and failed on something transient, backoff elapsed,
+     *  3. metadata already accepted but the audio is still owed — the common
+     *     case, since OEM dialers write the file after the call-log row and
+     *     the recording is linked on a later pass.
+     *
+     * Clause 3 must exclude terminal rows. It once matched on
+     * `sync_state != 'UPLOADING'` alone, so a row whose recording had failed
+     * permanently stayed eligible forever and the caller's drain loop
+     * re-claimed the same record without end.
+     *
+     * Clause 3 has no `next_attempt_at` test. The only thing that ever set
+     * one on such a row was the old hold for an unmetered network, which is
+     * gone: recordings go over any network. A transient recording failure
+     * moves the row to RETRY_PENDING, where clause 2's backoff applies.
+     */
+    private fun claimableWhere(nowSec: Long): Pair<String, Array<String>> {
+        val where = """
+            sync_state = '${SyncStates.WAITING}'
+               OR (sync_state = '${SyncStates.RETRY_PENDING}'
+                   AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+               OR (sync_state = '${SyncStates.UPLOADED}'
+                   AND has_recording = 1
+                   AND server_call_id IS NOT NULL
+                   AND recording_upload_status = '${RecordingStates.PENDING}')
+        """.trimIndent()
+        return where to arrayOf(nowSec.toString())
+    }
+
+    /**
+     * Whether a sync would find anything to send: a claimable row, or one
+     * left UPLOADING by a process that died mid-upload (the next run recovers
+     * those first). A single EXISTS, so callers can afford it before every
+     * "maybe sync" — the point is to not wake a worker, and possibly the
+     * radio, to claim nothing.
+     *
+     * Returns true on error: a sync that finds nothing is cheaper than calls
+     * that sit unsent because a query failed.
+     */
+    fun hasClaimableWork(context: Context): Boolean = synchronized(dbLock) {
+        val db = getReadableDb(context) ?: return true
+        val (where, args) = claimableWhere(System.currentTimeMillis() / 1000L)
+        return try {
+            db.rawQuery(
+                "SELECT EXISTS(SELECT 1 FROM $TABLE_LOCAL_CALLS " +
+                    "WHERE ($where) OR sync_state = '${SyncStates.UPLOADING}')",
+                args,
+            ).use { c -> c.moveToFirst() && c.getInt(0) == 1 }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not test for claimable work: ${e.message}")
+            true
+        }
+    }
+
+    /**
+     * Queue depth for the heartbeat, counted exactly as Dart's `_sendHeartbeat`
+     * counts it so the server sees one meaning whichever side reports:
+     *  - calls: every row neither UPLOADED nor UPLOADING (Dart's "waiting"
+     *    plus "failed" counters);
+     *  - recordings: synced calls whose audio is still owed, pending or failed
+     *    (`CallsDao.getPendingRecordingUploads`).
+     *
+     * Null on error: the heartbeat is telemetry and goes without it.
+     */
+    fun heartbeatCounts(context: Context): Pair<Int, Int>? = synchronized(dbLock) {
+        val db = getReadableDb(context) ?: return null
+        return try {
+            db.rawQuery(
+                """
+                SELECT
+                  SUM(CASE WHEN sync_state NOT IN ('${SyncStates.UPLOADED}', '${SyncStates.UPLOADING}')
+                           THEN 1 ELSE 0 END),
+                  SUM(CASE WHEN sync_state = '${SyncStates.UPLOADED}'
+                            AND has_recording = 1
+                            AND recording_upload_status IN
+                                ('${RecordingStates.PENDING}', '${RecordingStates.FAILED}')
+                           THEN 1 ELSE 0 END)
+                FROM $TABLE_LOCAL_CALLS
+                """.trimIndent(),
+                null,
+            ).use { c ->
+                if (c.moveToFirst()) c.getInt(0) to c.getInt(1) else 0 to 0
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not count the queue for the heartbeat: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Whether [reviveRetryableFailures] would revive anything, with the same
+     * predicate. False on error: revival is a daily courtesy, not delivery.
+     */
+    fun hasRevivableFailures(
+        context: Context,
+        permanentCodes: Set<String>,
+        maxAttempts: Int = 12,
+    ): Boolean = synchronized(dbLock) {
+        val db = getReadableDb(context) ?: return false
+        val placeholders = permanentCodes.joinToString(",") { "?" }
+        val where = buildString {
+            append("sync_state = ? AND attempt_count < ?")
+            if (permanentCodes.isNotEmpty()) {
+                append(" AND (last_error_code IS NULL OR last_error_code NOT IN ($placeholders))")
+            }
+        }
+        val args = buildList {
+            add(SyncStates.FAILED)
+            add(maxAttempts.toString())
+            addAll(permanentCodes)
+        }.toTypedArray()
+        return try {
+            db.rawQuery("SELECT EXISTS(SELECT 1 FROM $TABLE_LOCAL_CALLS WHERE $where)", args)
+                .use { c -> c.moveToFirst() && c.getInt(0) == 1 }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not test for revivable failures: ${e.message}")
+            false
+        }
     }
 
     /**
      * Atomically selects and claims the next pending record for upload.
      * Sets its state to `UPLOADING` in a single transaction.
+     *
+     * See [claimableWhere] for what is claimable.
      */
     fun claimNextWaitingCall(context: Context): CallRecord? = synchronized(dbLock) {
         val db = getWritableDb(context) ?: return null
         var record: CallRecord? = null
         val nowSec = System.currentTimeMillis() / 1000L
+        val (where, args) = claimableWhere(nowSec)
 
         db.beginTransaction()
         try {
-            // Three ways a row becomes claimable:
-            //  1. never sent,
-            //  2. sent and failed on something transient, backoff elapsed,
-            //  3. metadata already accepted but the audio is still owed —
-            //     the common case, since OEM dialers write the file after the
-            //     call-log row and the recording is linked on a later pass.
-            //
-            // Clause 3 must exclude terminal rows. It once matched on
-            // `sync_state != 'UPLOADING'` alone, so a row whose recording had
-            // failed permanently stayed eligible forever and the caller's
-            // drain loop re-claimed the same record without end.
-            //
             // NEWEST FIRST. The server takes one call per request, so the queue
             // drains at a few rows a second at best. Oldest-first put the call
             // the user just made at the BACK of the backlog — on a handset with
@@ -578,21 +768,14 @@ object NativeCallOutboxDao {
                        contact_name, direction, status, started_at, duration_seconds,
                        has_recording, recording_path, recording_media_store_id, recording_checksum,
                        recording_upload_status, sim_slot, attempt_count, sync_state,
-                       answered_at, ended_at, metadata_json
+                       answered_at, ended_at, metadata_json, client_created_at
                 FROM $TABLE_LOCAL_CALLS
-                WHERE sync_state = '${SyncStates.WAITING}'
-                   OR (sync_state = '${SyncStates.RETRY_PENDING}'
-                       AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
-                   OR (sync_state = '${SyncStates.UPLOADED}'
-                       AND has_recording = 1
-                       AND server_call_id IS NOT NULL
-                       AND recording_upload_status = '${RecordingStates.PENDING}'
-                       AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+                WHERE $where
                 ORDER BY started_at DESC
                 LIMIT 1
             """.trimIndent()
 
-            val cursor = db.rawQuery(query, arrayOf(nowSec.toString(), nowSec.toString()))
+            val cursor = db.rawQuery(query, args)
             if (cursor.moveToFirst()) {
                 // Same mapper as the batch claim. This block used to repeat the
                 // whole mapping by hand against the same column list, so every
@@ -619,41 +802,6 @@ object NativeCallOutboxDao {
             db.endTransaction()
         }
         return record
-    }
-
-    /**
-     * Holds a recording back without disturbing the call's own state.
-     *
-     * Used when audio is waiting for an unmetered network. [markRetryPending]
-     * would be wrong here: it moves the row out of UPLOADED, and the sync
-     * counters read UPLOADED as "sent" — so a call the server already has would
-     * be reported to the user as still waiting, for as long as the deferral
-     * lasted. The call IS synced; only its audio is not.
-     *
-     * Leaves `recording_upload_status` on `pending` so the claim query's
-     * recording clause still matches once `next_attempt_at` passes.
-     */
-    fun deferRecordingUpload(
-        context: Context,
-        idempotencyKey: String,
-        delaySeconds: Long,
-    ): Boolean = synchronized(dbLock) {
-        val db = getWritableDb(context) ?: return false
-        return try {
-            val cv = ContentValues().apply {
-                put("sync_state", SyncStates.UPLOADED)
-                put("next_attempt_at", (System.currentTimeMillis() / 1000L) + delaySeconds)
-            }
-            db.update(
-                TABLE_LOCAL_CALLS,
-                cv,
-                "idempotency_key = ?",
-                arrayOf(idempotencyKey),
-            ) > 0
-        } catch (e: Exception) {
-            Log.e(TAG, "Error deferring recording upload: ${e.message}")
-            false
-        }
     }
 
     /**
@@ -792,26 +940,207 @@ object NativeCallOutboxDao {
         }
     }
 
+    enum class Reopen {
+        /** The file is on the phone; the recording is owed again. */
+        REOPENED,
+
+        /** The call is known here but has nothing left to send. */
+        NO_FILE,
+
+        /** No local row for it (reinstall, data cleared), or it is still being matched. */
+        UNKNOWN_CALL,
+    }
+
     /**
-     * Marks a record as permanently failed (non-retryable).
+     * Re-offers a recording the server says it never received
+     * (`pending_recording_uploads`, §5.1). The native twin of Dart's
+     * `CallsDao.reopenRecordingUpload`.
+     */
+    fun reopenRecordingByServerId(context: Context, serverCallId: String): Reopen = synchronized(dbLock) {
+        val db = getWritableDb(context) ?: return Reopen.UNKNOWN_CALL
+        return try {
+            val row = db.rawQuery(
+                "SELECT idempotency_key, has_recording, recording_media_store_id, recording_path, " +
+                    "recording_upload_status FROM $TABLE_LOCAL_CALLS WHERE server_call_id = ? LIMIT 1",
+                arrayOf(serverCallId),
+            ).use { c ->
+                if (!c.moveToFirst()) return Reopen.UNKNOWN_CALL
+                listOf(
+                    c.getString(0),
+                    c.getInt(1) == 1,
+                    !c.isNull(2) || !c.isNull(3),
+                    if (c.isNull(4)) null else c.getString(4),
+                )
+            }
+            val key = row[0] as String
+            val hasRecording = row[1] as Boolean
+            val hasFile = row[2] as Boolean
+            val status = row[3] as String?
+            when {
+                // Still inside the matching window: not this pass's to judge.
+                status == RecordingStates.WAITING_FOR_RECORDING -> Reopen.UNKNOWN_CALL
+                hasRecording && hasFile -> {
+                    val cv = ContentValues().apply {
+                        put("recording_upload_status", RecordingStates.PENDING)
+                        putNull("next_attempt_at")
+                    }
+                    db.update(TABLE_LOCAL_CALLS, cv, "idempotency_key = ?", arrayOf(key))
+                    Reopen.REOPENED
+                }
+                else -> Reopen.NO_FILE
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error re-opening recording for $serverCallId: ${e.message}")
+            Reopen.UNKNOWN_CALL
+        }
+    }
+
+    /**
+     * Hands a claimed row back untouched: no attempt counted, no error kept.
+     *
+     * For a row the run claimed but chose not to send — the server's rate
+     * limit is full. That is not the row's failure, so it must not move it
+     * toward the attempt cap. A row whose metadata the server already holds
+     * goes back to UPLOADED, where the claim's recording clause finds it again;
+     * any other goes back to WAITING.
+     */
+    fun releaseClaim(context: Context, idempotencyKey: String): Boolean = synchronized(dbLock) {
+        val db = getWritableDb(context) ?: return false
+        return try {
+            db.execSQL(
+                "UPDATE $TABLE_LOCAL_CALLS SET sync_state = CASE WHEN server_call_id IS NULL " +
+                    "THEN '${SyncStates.WAITING}' ELSE '${SyncStates.UPLOADED}' END " +
+                    "WHERE idempotency_key = ? AND sync_state = '${SyncStates.UPLOADING}'",
+                arrayOf(idempotencyKey),
+            )
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing claimed record: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * The server no longer knows this call (`CALL_NOT_FOUND` on its recording
+     * upload). §9: re-post the metadata under the same idempotency key, which
+     * is an upsert, and the audio follows under the id that comes back.
+     *
+     * The stale `server_call_id` is dropped so the batch pass claims the row
+     * again; the recording goes back to pending. Not counted as an attempt.
+     */
+    fun requeueMetadata(context: Context, idempotencyKey: String, delaySeconds: Long): Boolean =
+        synchronized(dbLock) {
+            val db = getWritableDb(context) ?: return false
+            return try {
+                val cv = ContentValues().apply {
+                    putNull("server_call_id")
+                    put("sync_state", SyncStates.RETRY_PENDING)
+                    put("next_attempt_at", System.currentTimeMillis() / 1000L + delaySeconds)
+                    put("recording_upload_status", RecordingStates.PENDING)
+                    put("last_error_code", "CALL_NOT_FOUND")
+                }
+                db.update(TABLE_LOCAL_CALLS, cv, "idempotency_key = ?", arrayOf(idempotencyKey)) > 0
+            } catch (e: Exception) {
+                Log.e(TAG, "Error re-queueing metadata: ${e.message}")
+                false
+            }
+        }
+
+    /**
+     * `attempt_count` of a row the server refused for good.
+     *
+     * §5.3: `retryable: false` means drop it and never send it again. Above
+     * every revival cap, so neither the daily revival nor a late recording
+     * match wakes it; only the user's own "Retry" resets it. A marker on the
+     * existing column rather than a new one, so the shared table needs no
+     * migration on either side.
+     */
+    const val PERMANENT_ATTEMPT_MARK = 99
+
+    /**
+     * Marks a record as failed. [permanent] when the server said so explicitly
+     * (`retryable: false`, or a code it documents as permanent).
      */
     fun markFailed(
         context: Context,
         idempotencyKey: String,
         errorCode: String,
-        currentAttemptCount: Int
+        currentAttemptCount: Int,
+        permanent: Boolean = false,
     ): Boolean = synchronized(dbLock) {
         val db = getWritableDb(context) ?: return false
         return try {
             val cv = ContentValues().apply {
                 put("sync_state", SyncStates.FAILED)
-                put("attempt_count", currentAttemptCount + 1)
+                put(
+                    "attempt_count",
+                    if (permanent) maxOf(currentAttemptCount + 1, PERMANENT_ATTEMPT_MARK)
+                    else currentAttemptCount + 1,
+                )
                 put("last_error_code", errorCode)
             }
             val rows = db.update(TABLE_LOCAL_CALLS, cv, "idempotency_key = ?", arrayOf(idempotencyKey))
             rows > 0
         } catch (e: Exception) {
             Log.e(TAG, "Error marking record failed: ${e.message}")
+            false
+        }
+    }
+
+    /** `external_call_id` prefix of calls captured from WhatsApp's notifications. */
+    const val EXTERNAL_WHATSAPP_PREFIX = "whatsapp-"
+
+    /**
+     * A call that did not come from Android's CallLog — today, a WhatsApp call
+     * rebuilt from its notifications. Times in epoch millis; the row stores
+     * seconds like every other.
+     */
+    data class ExternalCall(
+        val externalCallId: String,
+        val idempotencyKey: String,
+        val phoneNumber: String,
+        val contactName: String?,
+        val direction: String,
+        val status: String,
+        val startedAtMillis: Long,
+        val answeredAtMillis: Long?,
+        val endedAtMillis: Long?,
+        val durationSeconds: Int,
+        val metadataJson: String?,
+    )
+
+    /**
+     * Inserts [call] ready for upload. No SIM slot and no recording: neither
+     * exists for a WhatsApp call. Ignored, returning false, when the same
+     * idempotency key is already stored — the listener can see one call's
+     * notifications more than once.
+     */
+    fun insertExternalCall(context: Context, call: ExternalCall): Boolean = synchronized(dbLock) {
+        val db = getWritableDb(context) ?: return false
+        val cv = ContentValues().apply {
+            put("idempotency_key", call.idempotencyKey)
+            put("external_call_id", call.externalCallId)
+            put("phone_number", call.phoneNumber)
+            if (!call.contactName.isNullOrBlank()) put("contact_name", call.contactName)
+            put("direction", call.direction)
+            put("status", call.status)
+            put("started_at", call.startedAtMillis / 1000L)
+            call.answeredAtMillis?.let { put("answered_at", it / 1000L) }
+            call.endedAtMillis?.let { put("ended_at", it / 1000L) }
+            call.metadataJson?.let { put("metadata_json", it) }
+            put("duration_seconds", call.durationSeconds)
+            put("has_recording", 0)
+            put("recording_upload_status", RecordingStates.ABSENT)
+            putNull("sim_slot")
+            put("client_created_at", System.currentTimeMillis() / 1000L)
+            put("sync_state", SyncStates.WAITING)
+            put("attempt_count", 0)
+            put("revision", 0)
+        }
+        return try {
+            db.insertWithOnConflict(TABLE_LOCAL_CALLS, null, cv, SQLiteDatabase.CONFLICT_IGNORE) != -1L
+        } catch (e: Exception) {
+            Log.e(TAG, "Error inserting external call: ${e.message}")
             false
         }
     }
@@ -830,10 +1159,10 @@ object NativeCallOutboxDao {
         context: Context,
         calls: List<Map<String, Any?>>,
         recordingMatches: Map<Long, Map<String, Any?>> = emptyMap(),
-    ): Int = synchronized(dbLock) {
-        if (calls.isEmpty()) return 0
-        val db = getWritableDb(context) ?: return 0
-        var insertedCount = 0
+    ): InsertOutcome = synchronized(dbLock) {
+        if (calls.isEmpty()) return InsertOutcome.NONE
+        val db = getWritableDb(context) ?: return InsertOutcome.NONE
+        val inserted = mutableSetOf<Long>()
         val nowSec = System.currentTimeMillis() / 1000L
 
         // Resolved once for the batch, not per row: SubscriptionManager is a
@@ -905,10 +1234,11 @@ object NativeCallOutboxDao {
                     // wrong line.
                     put(
                         "sim_slot",
-                        SimInfoReader.slotForAccountId(
-                            c["phoneAccountId"] as? String,
-                            subscriptions,
-                        ),
+                        (c["simSlot"] as? Number)?.toInt()
+                            ?: SimInfoReader.slotForAccountId(
+                                c["phoneAccountId"] as? String,
+                                subscriptions,
+                            ),
                     )
                     put("client_created_at", nowSec)
                     put("sync_state", SyncStates.WAITING)
@@ -923,21 +1253,115 @@ object NativeCallOutboxDao {
                     SQLiteDatabase.CONFLICT_IGNORE
                 )
                 if (rowId != -1L) {
-                    insertedCount++
+                    inserted += dateMillis
                     Log.d(TAG, "[OUTBOX_INSERT] Call: $extId, Duration: ${duration}s, RecordingStatus: $recStatus")
                 }
             }
             db.setTransactionSuccessful()
         } catch (e: Exception) {
             Log.e(TAG, "Error inserting captured calls: ${e.message}")
+            // Rolled back: nothing from this batch is in the table.
+            inserted.clear()
         } finally {
             db.endTransaction()
         }
-        return insertedCount
+        return InsertOutcome(inserted)
     }
 
     /**
-     * Retrieves recent connected calls that have not yet been linked to a recording candidate.
+     * What [insertCapturedCalls] actually added, by the call's `dateMillis`
+     * (the same key the recording matches arrive under). The ingester needs
+     * to know which rows were new, not just how many, to decide whether their
+     * sync should wait for a recording.
+     */
+    data class InsertOutcome(val insertedDateMillis: Set<Long>) {
+        val count: Int get() = insertedDateMillis.size
+
+        companion object {
+            val NONE = InsertOutcome(emptySet())
+        }
+    }
+
+    /**
+     * `started_at` in epoch seconds, whichever unit the row was written in
+     * (see [toMillis]), as a SQL expression.
+     */
+    private const val STARTED_AT_SECONDS_SQL =
+        "(CASE WHEN started_at < 10000000000 THEN started_at ELSE started_at / 1000 END)"
+
+    /**
+     * The longest ring before pickup that the recording matcher accepts
+     * (`MAX_RING_GAP_SECONDS` in NativeRecordingMatcher).
+     */
+    private const val RING_ALLOWANCE_SECONDS = 180
+
+    /**
+     * The latest the call can have ENDED, in epoch seconds, as a SQL
+     * expression: start + talk time + the longest ring.
+     *
+     * The recording-discovery window is measured from here, not from
+     * `started_at`. A dialer that dates its file at hang-up writes it a whole
+     * call-length after the start, so a window keyed on the start closed
+     * before a long call's recording could exist: anything over ~10 minutes
+     * was never offered a late recording at all, and was written off as
+     * `absent` on the next pass. `duration_seconds` is talk time only, so the
+     * ring is added back; without it a call that rang for three minutes lost
+     * three of its ten minutes of grace.
+     */
+    private const val ENDED_AT_SECONDS_SQL =
+        "($STARTED_AT_SECONDS_SQL + duration_seconds + $RING_ALLOWANCE_SECONDS)"
+
+    /**
+     * The longest call the discovery window allows for when narrowing by
+     * `started_at` first, so the query can still use the started_at index. A
+     * call that ran longer than this simply ages out of the search early.
+     */
+    private const val MAX_CALL_SPAN_SECONDS = 12L * 60L * 60L
+
+    // WhatsApp rows are excluded: the phone cannot record WhatsApp audio, so
+    // any "match" would be a cellular call's recording that happened to
+    // overlap in time — attached to the wrong call and uploaded as its audio.
+    //
+    // `has_recording = 0` alone is not "needs one": markRecordingAbsent sets
+    // it when the coordinator gives up on a file (refused by the server,
+    // rejected locally) and keeps the media id. Matching on it re-linked that
+    // same file and uploaded it in full to be refused again, for as long as
+    // the call stayed inside its discovery window.
+    private const val NEEDS_RECORDING_SQL = """
+        duration_seconds > 0
+          AND (external_call_id IS NULL OR external_call_id NOT LIKE '$EXTERNAL_WHATSAPP_PREFIX%')
+          AND (recording_upload_status = '${RecordingStates.WAITING_FOR_RECORDING}'
+               OR recording_media_store_id IS NULL)
+          AND COALESCE(recording_upload_status, '') <> '${RecordingStates.UPLOADED}'
+    """
+
+    /**
+     * Whether any connected call ended within [maxAgeSeconds] and still has
+     * no recording — the same rows [getCallsNeedingRecordingMatch] returns,
+     * as one EXISTS. Lets a pass whose only purpose is linking a recording
+     * stop before it touches the call log or MediaStore.
+     *
+     * True on error, so a failed check costs a pass rather than a recording.
+     */
+    fun hasCallsNeedingRecordingMatch(context: Context, maxAgeSeconds: Long): Boolean = synchronized(dbLock) {
+        val db = getReadableDb(context) ?: return true
+        val cutoffSec = (System.currentTimeMillis() / 1000L) - maxAgeSeconds
+        return try {
+            db.rawQuery(
+                "SELECT EXISTS(SELECT 1 FROM $TABLE_LOCAL_CALLS WHERE $NEEDS_RECORDING_SQL " +
+                    "AND started_at >= ? AND $ENDED_AT_SECONDS_SQL >= ?)",
+                arrayOf((cutoffSec - MAX_CALL_SPAN_SECONDS).toString(), cutoffSec.toString()),
+            ).use { c -> c.moveToFirst() && c.getInt(0) == 1 }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not test for calls awaiting a recording: ${e.message}")
+            true
+        }
+    }
+
+    /**
+     * Recent connected calls that have not yet been linked to a recording:
+     * those that ENDED within [maxAgeSeconds]. See [ENDED_AT_SECONDS_SQL] for
+     * why the end and not the start.
      */
     fun getCallsNeedingRecordingMatch(context: Context, maxAgeSeconds: Long = 600L): List<Map<String, Any?>> = synchronized(dbLock) {
         val db = getReadableDb(context) ?: return emptyList()
@@ -945,20 +1369,24 @@ object NativeCallOutboxDao {
         val cutoffSec = (System.currentTimeMillis() / 1000L) - maxAgeSeconds
 
         try {
+            // `started_at >= ?` is implied by the end-time test for any call
+            // shorter than MAX_CALL_SPAN_SECONDS; it is there so the started_at
+            // index bounds the scan, which an expression alone cannot.
             val query = """
                 SELECT local_id, idempotency_key, phone_number, contact_name, started_at,
                        duration_seconds, direction, answered_at, metadata_json
                 FROM $TABLE_LOCAL_CALLS
-                WHERE duration_seconds > 0
-                  AND (has_recording = 0
-                       OR recording_upload_status = '${RecordingStates.WAITING_FOR_RECORDING}'
-                       OR recording_media_store_id IS NULL)
+                WHERE $NEEDS_RECORDING_SQL
                   AND started_at >= ?
+                  AND $ENDED_AT_SECONDS_SQL >= ?
                 ORDER BY started_at DESC
                 LIMIT 50
             """.trimIndent()
 
-            val cursor = db.rawQuery(query, arrayOf(cutoffSec.toString()))
+            val cursor = db.rawQuery(
+                query,
+                arrayOf((cutoffSec - MAX_CALL_SPAN_SECONDS).toString(), cutoffSec.toString()),
+            )
             while (cursor.moveToNext()) {
                 val rawStartedAt = cursor.getLong(4)
                 val startedAtMillis = if (rawStartedAt < 10000000000L) rawStartedAt * 1000L else rawStartedAt
@@ -1037,11 +1465,13 @@ object NativeCallOutboxDao {
             // A row already UPLOADED keeps that state: the server has the
             // metadata and the claim query picks it up on the recording clause.
             // Resetting it to WAITING used to re-post the metadata as well.
-            // Terminal rows do need waking, though — a recording discovered
-            // after a permanent failure deserves a fresh attempt.
+            // A row failed for a reason that was not the server's final word
+            // does get woken: the payload now says has_recording. One the
+            // server refused for good (§5.3) stays down.
             db.execSQL(
                 "UPDATE $TABLE_LOCAL_CALLS SET sync_state = '${SyncStates.WAITING}', next_attempt_at = NULL " +
-                    "WHERE idempotency_key = ? AND sync_state = '${SyncStates.FAILED}'",
+                    "WHERE idempotency_key = ? AND sync_state = '${SyncStates.FAILED}' " +
+                    "AND attempt_count < $PERMANENT_ATTEMPT_MARK",
                 arrayOf(idempotencyKey)
             )
             val rows = db.update(TABLE_LOCAL_CALLS, cv, "idempotency_key = ?", arrayOf(idempotencyKey))
@@ -1056,7 +1486,10 @@ object NativeCallOutboxDao {
     }
 
     /**
-     * Sets `recording_upload_status = 'absent'` for calls that exceeded the discovery window without finding a recording.
+     * Sets `recording_upload_status = 'absent'` for calls whose discovery
+     * window closed without a recording — measured from the call's END, the
+     * same as [getCallsNeedingRecordingMatch], so a call is never written off
+     * while it is still being offered recordings.
      */
     fun expireUnmatchedCalls(context: Context, maxAgeSeconds: Long = 300L): Int = synchronized(dbLock) {
         val db = getWritableDb(context) ?: return 0
@@ -1068,7 +1501,8 @@ object NativeCallOutboxDao {
             val count = db.update(
                 TABLE_LOCAL_CALLS,
                 cv,
-                "recording_upload_status = '${RecordingStates.WAITING_FOR_RECORDING}' AND started_at < ?",
+                "recording_upload_status = '${RecordingStates.WAITING_FOR_RECORDING}' " +
+                    "AND $ENDED_AT_SECONDS_SQL < ?",
                 arrayOf(cutoffSec.toString())
             )
             if (count > 0) {
@@ -1111,42 +1545,57 @@ object NativeCallOutboxDao {
     }
 
     /**
-     * Reads sync state counters from SQLite.
+     * Which of [keys] are already in the outbox.
+     *
+     * Lets the ingester re-read an overlap of the call log cheaply: rows it
+     * has captured are dropped before any recording scan or contact lookup.
+     * On error every key is reported present, so a failed check costs a
+     * capture attempt later rather than a duplicate pass of heavy work now.
      */
-    fun getSyncCounters(context: Context): Map<String, Int> = synchronized(dbLock) {
-        val db = getReadableDb(context) ?: return mapOf(
-            "uploaded" to 0, "uploading" to 0, "waiting" to 0, "failed" to 0, "total" to 0
-        )
-        var uploaded = 0
-        var uploading = 0
-        var waiting = 0
-        var failed = 0
-        var total = 0
-
-        try {
-            val cursor = db.rawQuery("SELECT sync_state, COUNT(*) FROM $TABLE_LOCAL_CALLS GROUP BY sync_state", null)
-            while (cursor.moveToNext()) {
-                val state = cursor.getString(0)
-                val count = cursor.getInt(1)
-                total += count
-                when (state) {
-                    SyncStates.UPLOADED -> uploaded += count
-                    SyncStates.UPLOADING -> uploading += count
-                    SyncStates.FAILED -> failed += count
-                    else -> waiting += count
-                }
+    fun existingKeys(context: Context, keys: Collection<String>): Set<String> = synchronized(dbLock) {
+        if (keys.isEmpty()) return emptySet()
+        val db = getReadableDb(context) ?: return keys.toSet()
+        val found = mutableSetOf<String>()
+        return try {
+            // Chunked under SQLite's default 999-variable limit.
+            for (chunk in keys.distinct().chunked(500)) {
+                val placeholders = chunk.joinToString(",") { "?" }
+                db.rawQuery(
+                    "SELECT idempotency_key FROM $TABLE_LOCAL_CALLS WHERE idempotency_key IN ($placeholders)",
+                    chunk.toTypedArray(),
+                ).use { c -> while (c.moveToNext()) found += c.getString(0) }
             }
-            cursor.close()
+            found
         } catch (e: Exception) {
-            Log.e(TAG, "Error reading sync counters: ${e.message}")
+            Log.w(TAG, "Could not look up existing keys: ${e.message}")
+            keys.toSet()
         }
+    }
 
-        return mapOf(
-            "uploaded" to uploaded,
-            "uploading" to uploading,
-            "waiting" to waiting,
-            "failed" to failed,
-            "total" to total,
-        )
+    /**
+     * Runs [block] — a series of the `mark*` calls above — as one transaction.
+     *
+     * Each of those otherwise commits on its own, and a batch of fifty
+     * verdicts meant fifty separate commits, each one an fsync of the WAL.
+     * The individual calls keep their own error handling, so a row that fails
+     * to update does not roll back the others: the transaction only makes the
+     * writes cheaper, not all-or-nothing.
+     *
+     * Safe to nest the calls inside: [dbLock] is re-entrant, and SQLite runs
+     * every statement on this thread inside the open transaction.
+     */
+    fun inTransaction(context: Context, block: () -> Unit): Unit = synchronized(dbLock) {
+        val db = getWritableDb(context)
+        if (db == null) {
+            block()
+            return
+        }
+        db.beginTransaction()
+        try {
+            block()
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
     }
 }

@@ -49,11 +49,13 @@ class RecordingCandidate {
   final int durationMillis;
   final int sizeBytes;
 
-  /// When the dialer created the file — in practice, when recording STARTED,
-  /// i.e. roughly when the call was answered.
+  /// When the MediaStore row was created. On an OPEN-stamping dialer (the
+  /// Samsung reference device) that is when recording STARTED, roughly when
+  /// the call was answered; on an END-stamping one it is the hang-up.
   final int dateAddedEpochSeconds;
 
-  /// When the dialer finished writing — in practice, when recording STOPPED.
+  /// When the dialer finished writing — in practice, when recording STOPPED,
+  /// whichever convention stamped [dateAddedEpochSeconds].
   final int dateModifiedEpochSeconds;
 
   final String? mimeType;
@@ -68,16 +70,43 @@ class RecordingCandidate {
 
   double get durationSeconds => durationMillis / 1000.0;
 
-  /// How long the dialer held the file open. For an intact file this
-  /// reproduces [durationSeconds], which is why disagreement is evidence the
-  /// file is truncated or still being written.
+  /// `dateModified - dateAdded`. What it means depends on the dialer:
+  ///
+  ///  - OPEN-stamped: the file's open-to-close time, so an intact file's
+  ///    lifetime reproduces [durationSeconds].
+  ///  - END-stamped: the row is created when the file is CLOSED, at hang-up,
+  ///    so both stamps sit at the end of the call and the lifetime is about
+  ///    zero, or slightly negative when the media scanner indexed it a moment
+  ///    after the last write.
   int get lifetimeSeconds =>
       dateModifiedEpochSeconds - dateAddedEpochSeconds;
 
+  /// When recording started, read as an END-stamped file: the close time
+  /// minus the audio. [dateModifiedEpochSeconds] is the close (the file's
+  /// last write) even when the row was indexed later; [dateAddedEpochSeconds]
+  /// stands in when it is missing.
+  int get endStampedStartEpochSeconds =>
+      (dateModifiedEpochSeconds > 0
+          ? dateModifiedEpochSeconds
+          : dateAddedEpochSeconds) -
+      durationSeconds.round();
+
+  /// When recording most likely started, for screens that hold only the file
+  /// and not the matcher's verdict ([MatchSignals.endStamped] says it exactly).
+  /// A lifetime of about zero on a file longer than that is the END-stamped
+  /// signature; anything else reads as [dateAddedEpochSeconds].
+  int get likelyStartEpochSeconds =>
+      lifetimeSeconds <= 5 && durationSeconds > 20
+          ? endStampedStartEpochSeconds
+          : dateAddedEpochSeconds;
+
   static String _staticNormalize(String name) {
-    return name.replaceAll(RegExp(r'[^0-9]'), '');
+    return name.replaceAll(_nonDigits, '');
   }
 }
+
+/// Built once: candidates are constructed by the hundred per scan.
+final _nonDigits = RegExp(r'[^0-9]');
 
 /// The subset of a call record the matcher reasons over.
 class CallForMatching {
@@ -98,8 +127,8 @@ class CallForMatching {
   final int startedAtEpochMillis;
 
   /// `CallLog.Calls.DURATION` — CONNECTED seconds only. Ring time is not
-  /// included, which is precisely why [dateAddedEpochSeconds] lands after the
-  /// call start rather than on it.
+  /// included, which is precisely why a recording starts after the call start
+  /// rather than on it.
   final int durationSeconds;
 
   final String? normalizedNumber;
@@ -108,10 +137,10 @@ class CallForMatching {
   /// When the call was actually picked up, if the device could say.
   ///
   /// This is the anchor that turns matching from a duration coincidence into a
-  /// statement about the same instant: an OEM dialer opens its file when the
-  /// call connects, so [RecordingCandidate.dateAddedEpochSeconds] and this
-  /// value describe one event and should agree to within a second or two. Null
-  /// falls back to the original heuristic scoring.
+  /// statement about the same instant: an OEM dialer starts recording when the
+  /// call connects, so the recording's estimated start and this value describe
+  /// one event and should agree to within a second or two. Null falls back to
+  /// the original heuristic scoring.
   final int? answeredAtEpochMillis;
 
   final String _cachedNumberTail;
@@ -126,7 +155,7 @@ class CallForMatching {
 
   static String _extractTail(String? number) {
     if (number == null || number.length < 7) return '';
-    final digits = number.replaceAll(RegExp(r'[^0-9]'), '');
+    final digits = number.replaceAll(_nonDigits, '');
     return digits.substring(math.max(0, digits.length - 10));
   }
 }
@@ -141,9 +170,9 @@ class MatchSignals {
     required this.durationDeltaSeconds,
     required this.ringGapSeconds,
     required this.identityMatched,
-    required this.lifetimeDeltaSeconds,
     this.anchorScore,
     this.anchorDeltaSeconds,
+    this.endStamped = false,
   });
 
   final double durationScore;
@@ -157,16 +186,18 @@ class MatchSignals {
   /// |recording duration − call duration|, in seconds.
   final double durationDeltaSeconds;
 
-  /// recording start − call start. Should be a plausible ring time.
+  /// Estimated recording start − call start. Should be a plausible ring time.
   final int ringGapSeconds;
 
   /// |recording start − call answer|, in seconds. Null on the heuristic path.
   final int? anchorDeltaSeconds;
 
-  /// |file lifetime − audio duration|. Large means truncated or still writing.
-  final double lifetimeDeltaSeconds;
-
   final bool identityMatched;
+
+  /// Which reading of the file's stamps won: true when its start was taken
+  /// as `dateModified` minus the audio (stamped at close), false when it was
+  /// `dateAdded` (stamped at open).
+  final bool endStamped;
 
   /// True when an answer time was known and the file lines up with it.
   bool get isAnchored => anchorScore != null && anchorScore! > 0;
@@ -176,6 +207,7 @@ class MatchSignals {
       'dur=${durationDeltaSeconds.toStringAsFixed(1)}s '
       'ring=${ringGapSeconds}s '
       '${anchorDeltaSeconds == null ? '' : 'anchor=${anchorDeltaSeconds}s '}'
+      '${endStamped ? 'end-stamped ' : ''}'
       'id=$identityMatched';
 }
 
@@ -203,8 +235,6 @@ class RecordingMatch {
   /// be computed and thrown away, which is why "Review required" could be shown
   /// with nothing to review.
   final List<RankedCandidate> rankedCandidates;
-
-  bool get isAssociable => status == RecordingMatchStatus.matched;
 }
 
 /// A scored candidate, for the ambiguity UI and the audit trail.
@@ -237,15 +267,28 @@ class RankedCandidate {
 ///      always POSITIVE. `date_modified − date_added` reproduces the duration,
 ///      which is a useful internal consistency check.
 ///
+/// The recording's START is estimated per candidate, because dialers disagree
+/// on what `date_added` means. That device stamps the file when it OPENS it;
+/// other OEMs create the row when the file is CLOSED, at hang-up, leaving a
+/// lifetime of about zero. Every timing rule (ring gap, timing score, anchor)
+/// measures from the estimate, so both conventions match at any call length.
+/// See [_score].
+///
 /// Filenames are used only as a weak tie-breaker. They are unstable even within
 /// one vendor: the reference device carries both
 /// `Call recording <name>_YYMMDD_HHMMSS.m4a` (2025 builds) and
 /// `Call <name>_YYMMDD_HHMMSS.m4a` (2026 builds), and a contact rename changes
 /// them retroactively for future files. Never match on filename alone.
+///
+/// **Every constant and weight below is mirrored in
+/// `android/.../recording/NativeRecordingMatcher.kt`**, which matches while
+/// Flutter is closed. Nothing enforces that at build time, so a change here is
+/// only half a change until the Kotlin file matches it value for value.
 class RecordingMatcher {
   const RecordingMatcher({
     this.durationToleranceSeconds = 5.0,
     this.maxDurationDeltaSeconds = 15.0,
+    this.durationDriftRatio = 0.02,
     this.maxRingGapSeconds = 180,
     this.minRingGapSeconds = -15,
     this.matchThreshold = 0.70,
@@ -254,14 +297,25 @@ class RecordingMatcher {
     this.anchorToleranceSeconds = 2.0,
     this.maxAnchorDeltaSeconds = 10,
     this.maxLifetimeDeltaSeconds = 15.0,
+    this.maxEndStampLifetimeSeconds = 5,
   });
 
-  /// Beyond this delta the duration score decays to zero.
+  /// Beyond this delta the duration score decays to zero. Widened for long
+  /// calls; see [durationDriftRatio].
   final double durationToleranceSeconds;
 
   /// Hard gate: a bigger gap than this is a different call, whatever else lines
-  /// up.
+  /// up. Widened for long calls; see [durationDriftRatio].
   final double maxDurationDeltaSeconds;
+
+  /// How far a long call's audio may drift from its call-log duration, as a
+  /// fraction of that duration. The duration tolerance, its hard gate and the
+  /// lifetime gate all widen in proportion beyond 750 s (where 2% passes
+  /// 15 s): max(15 s, 2%) is 72 s on an hour-long call. A fixed 15 s rejected
+  /// long recordings whose dialer paused or resampled for a few seconds per
+  /// ten minutes. Cross-matching stays out of reach because the ring-gap gate
+  /// does not widen, and two long calls cannot both start within it.
+  final double durationDriftRatio;
 
   /// Longest plausible ring before answer. Beyond it, the recording belongs to
   /// a later call.
@@ -281,19 +335,24 @@ class RecordingMatcher {
   /// Below this a candidate is not worth a human's attention either.
   final double plausibilityFloor;
 
-  /// How far a recording's start may sit from a known answer time before the
-  /// anchor scores zero. Both are whole seconds from different providers, so
-  /// one second of slack is rounding and two is generous.
+  /// How far a recording's estimated start may sit from a known answer time
+  /// before the anchor scores zero. Both are whole seconds from different
+  /// providers, so one second of slack is rounding and two is generous.
   final double anchorToleranceSeconds;
 
   /// Beyond this the candidate is rejected outright when an answer time is
-  /// known. A dialer does not open its file ten seconds away from the moment
-  /// the call connected; something that does belongs to a different call.
+  /// known. A dialer does not start recording ten seconds away from the moment
+  /// the call connected; a file that did belongs to a different call.
   final int maxAnchorDeltaSeconds;
 
   /// How far a file's open-to-close lifetime may differ from the audio it
-  /// contains before it is treated as truncated or still being written.
+  /// contains, read as an OPEN-stamped file, before it is treated as truncated
+  /// or still being written. Widened for long calls like the duration gate.
   final double maxLifetimeDeltaSeconds;
+
+  /// A lifetime at or below this reads as END-stamped: the dialer created the
+  /// row when it closed the file, so both stamps sit at hang-up.
+  final int maxEndStampLifetimeSeconds;
 
   // Heuristic weights: no answer time available. Duration dominates because it
   // is the signal that held to within ~1s across every observed pair; identity
@@ -337,28 +396,19 @@ class RecordingMatcher {
     }
 
     final scored = <({RecordingCandidate c, double score, MatchSignals s})>[];
-    final minTime = call.startedAtEpochSeconds + minRingGapSeconds;
-    final maxTime = call.startedAtEpochSeconds + maxRingGapSeconds;
 
     for (final candidate in candidates) {
-      // Fast temporal pre-gate: discard candidate without computing full signals
-      if (candidate.dateAddedEpochSeconds < minTime ||
-          candidate.dateAddedEpochSeconds > maxTime) {
-        continue;
-      }
-
       final signals = _score(call, candidate);
       if (signals == null) continue; // hard-gated out
       scored.add((c: candidate, score: _weigh(signals), s: signals));
     }
 
     if (scored.isEmpty) {
-      // The anchor gate is strict by design, and it assumes the dialer stamps
-      // dateAdded when it OPENS the file. That holds on the devices this was
-      // derived from, but the convention is the OEM's to choose and some stamp
-      // it at close instead — on such a handset every candidate would sit a
-      // whole call-length away from the answer instant and be rejected, which
-      // is worse than the heuristic this replaced.
+      // The anchor gate is strict by design. Both stamping conventions are
+      // read from the file's own lifetime now, but the answer time can still
+      // be off on a handset whose journal is wrong, or whose audio drifts from
+      // the wall clock over a long call — and then every candidate is
+      // rejected, which is worse than the heuristic this replaced.
       //
       // So when the anchor eliminates EVERYTHING, it is treated as evidence
       // about the device rather than about the recordings, and the call is
@@ -433,7 +483,7 @@ class RecordingMatcher {
       runnerUpConfidence: runnerUp,
       rankedCandidates: ranked,
       reason: best.s.isAnchored
-          ? 'Recording opened at the moment the call was answered.'
+          ? 'Recording started at the moment the call was answered.'
           : 'Duration and timing both consistent.',
     );
   }
@@ -452,38 +502,89 @@ class RecordingMatcher {
         _wIdentity * s.identityScore;
   }
 
-  /// Returns null when the candidate is ruled out outright.
+  /// How much the duration and lifetime allowances widen for this call: 1 up
+  /// to 750 s, then in proportion to its length. See [durationDriftRatio].
+  double _driftScale(CallForMatching call) => math.max(
+        1.0,
+        call.durationSeconds * durationDriftRatio / maxDurationDeltaSeconds,
+      );
+
+  /// Scores the candidate under each stamping convention its own lifetime
+  /// allows, and keeps the better reading. Null when neither survives.
+  ///
+  ///  - OPEN: the recording started at `dateAdded`. Only when the lifetime
+  ///    reproduces the audio duration — the lifetime check, which belongs to
+  ///    this reading alone — or when there is no `dateModified` to check.
+  ///  - END: the recording started at `dateModified` minus the audio. When
+  ///    the lifetime is about zero (the row was made at hang-up) or clearly
+  ///    shorter than the audio (the row was indexed mid-call).
+  ///
+  /// A file plausible both ways — a short one, or one with no `dateModified`
+  /// — is scored both ways. Its best reading is still ONE candidate, so it
+  /// cannot make itself ambiguous. A file held open longer than its audio by
+  /// more than the tolerance fits neither: something touched it after the
+  /// dialer closed it.
+  ///
+  /// A zero lifetime on a long file is NOT also read as open-stamped (the old
+  /// rule let any lifetime of zero or less through). Its `dateAdded` is the
+  /// hang-up, which is exactly where the next call to the same person starts,
+  /// so that reading turned every quick call-back into a tie.
+  ///
+  /// Before this, every rule measured from `dateAdded`, so on a dialer that
+  /// stamps at close a call longer than the 180 s ring gate (or, through the
+  /// lifetime check, longer than about 15 s) could never be matched, anchor or
+  /// not.
   MatchSignals? _score(CallForMatching call, RecordingCandidate candidate) {
     if (candidate.durationMillis <= 0) return null;
 
+    final scale = _driftScale(call);
     final durationDelta = (candidate.durationSeconds - call.durationSeconds)
         .abs();
-    if (durationDelta > maxDurationDeltaSeconds) return null;
+    if (durationDelta > maxDurationDeltaSeconds * scale) return null;
 
-    final ringGap =
-        candidate.dateAddedEpochSeconds - call.startedAtEpochSeconds;
-    if (ringGap < minRingGapSeconds || ringGap > maxRingGapSeconds) return null;
+    final lifetime = candidate.lifetimeSeconds;
+    final lifetimeTolerance = maxLifetimeDeltaSeconds * scale;
+    final lifetimeDelta = (lifetime - candidate.durationSeconds).abs();
 
     // A file whose open-to-close lifetime does not reproduce its own audio
-    // duration is truncated, still being written, or was copied here by
-    // something other than the dialer. Any of those makes it the wrong file to
-    // attach, and it previously scored like a perfect match.
-    final lifetimeDelta =
-        (candidate.lifetimeSeconds - candidate.durationSeconds).abs();
-    if (candidate.lifetimeSeconds > 0 &&
-        lifetimeDelta > maxLifetimeDeltaSeconds) {
-      return null;
-    }
+    // duration is, read as open-stamped, truncated, still being written, or
+    // copied here by something other than the dialer.
+    final open = (candidate.dateModifiedEpochSeconds <= 0 ||
+            lifetimeDelta <= lifetimeTolerance)
+        ? _scoreAt(call, candidate, candidate.dateAddedEpochSeconds,
+            endStamped: false, durationDelta: durationDelta, scale: scale)
+        : null;
+    final end = (lifetime <= maxEndStampLifetimeSeconds ||
+            lifetime < candidate.durationSeconds - lifetimeTolerance)
+        ? _scoreAt(call, candidate, candidate.endStampedStartEpochSeconds,
+            endStamped: true, durationDelta: durationDelta, scale: scale)
+        : null;
+
+    if (open == null || end == null) return open ?? end;
+    // Ties go to the open reading, the convention the model was built on.
+    return _weigh(end) > _weigh(open) ? end : open;
+  }
+
+  /// Scores the candidate as a recording that started at [startedAtSeconds].
+  MatchSignals? _scoreAt(
+    CallForMatching call,
+    RecordingCandidate candidate,
+    int startedAtSeconds, {
+    required bool endStamped,
+    required double durationDelta,
+    required double scale,
+  }) {
+    final ringGap = startedAtSeconds - call.startedAtEpochSeconds;
+    if (ringGap < minRingGapSeconds || ringGap > maxRingGapSeconds) return null;
 
     // Hard anchor gate. When the answer instant is known, a file that did not
-    // open at that instant belongs to another call, however well its duration
-    // happens to line up.
+    // start recording at that instant belongs to another call, however well
+    // its duration happens to line up.
     int? anchorDelta;
     double? anchorScore;
     final answeredAtSeconds = call.answeredAtEpochSeconds;
     if (answeredAtSeconds != null) {
-      final delta =
-          (candidate.dateAddedEpochSeconds - answeredAtSeconds).abs();
+      final delta = (startedAtSeconds - answeredAtSeconds).abs();
       if (delta > maxAnchorDeltaSeconds) return null;
       anchorDelta = delta;
       anchorScore = math.max(0.0, 1.0 - (delta / anchorToleranceSeconds));
@@ -492,7 +593,7 @@ class RecordingMatcher {
     // Linear decay to zero at the tolerance edge.
     final durationScore = math.max(
         0.0,
-        1.0 - (durationDelta / durationToleranceSeconds),
+        1.0 - (durationDelta / (durationToleranceSeconds * scale)),
     );
 
     // A gap of 0-20s is an ordinary ring and scores full marks; longer gaps are
@@ -523,8 +624,8 @@ class RecordingMatcher {
       durationDeltaSeconds: durationDelta,
       ringGapSeconds: ringGap,
       anchorDeltaSeconds: anchorDelta,
-      lifetimeDeltaSeconds: lifetimeDelta.toDouble(),
       identityMatched: identityMatched,
+      endStamped: endStamped,
     );
   }
 

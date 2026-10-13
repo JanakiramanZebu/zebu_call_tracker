@@ -5,8 +5,8 @@ import '../../../core/config/app_config.dart';
 import '../../../core/config/app_version.dart';
 import '../../../core/network/api_client.dart' show SessionRevokedReason;
 import '../../../core/network/api_client_provider.dart';
-import '../../background/data/background_service.dart';
 import '../../call_tracking/data/call_feed.dart';
+import '../../synchronization/data/server_snapshot.dart';
 import '../../synchronization/data/sync_service.dart';
 import '../domain/session.dart';
 import 'auth_repository.dart';
@@ -72,9 +72,7 @@ class AuthController extends AsyncNotifier<Session?> {
     // shell to the sign-in screen instead of leaving it rendering over a
     // session that cannot make a single request.
     if (native.wasRevoked) {
-      await ref.read(authRepositoryProvider).signOut();
-      // Also drops the tombstone, so the next pairing starts clean.
-      await bridge.clearAuthSession();
+      await _clearDeadSession();
       ref
           .read(sessionRevocationProvider.notifier)
           .report(SessionRevokedReason.invalidToken);
@@ -122,13 +120,30 @@ class AuthController extends AsyncNotifier<Session?> {
   /// restore below write the pre-rotation token back over it, which is the
   /// exact race described on [_reconcileWithNative]. Fired only once the two
   /// stores agree.
-  void _triggerStartupSync() {
+  ///
+  /// [afterSignIn] lifts the sync's server-check rate limit: a new session has
+  /// to register the device and fetch the policy now, not half an hour later.
+  void _triggerStartupSync({bool afterSignIn = false}) {
     Future.microtask(() async {
       try {
-        await ref.read(syncServiceProvider.notifier).triggerSync();
+        await ref
+            .read(syncServiceProvider.notifier)
+            .triggerSync(afterSignIn: afterSignIn);
       } catch (_) {}
     });
   }
+  /// `POST /mobile/lookup`: what the server already holds for this code, so a
+  /// returning employee's form fills itself instead of being retyped (and
+  /// their profile overwritten with whatever they typed). Throws [AuthFailure].
+  Future<EmployeeLookup> lookupEmployee({
+    required String pairingWord,
+    required String employeeCode,
+  }) =>
+      ref.read(authRepositoryProvider).lookupEmployee(
+            pairingWord: pairingWord,
+            employeeCode: employeeCode,
+          );
+
   Future<Session> signInWithPairingWord({
     required String pairingWord,
     required String employeeCode,
@@ -163,7 +178,7 @@ class AuthController extends AsyncNotifier<Session?> {
       deviceName: device['model'] as String? ?? 'Android Handset',
       manufacturer: device['manufacturer'] as String? ?? 'Generic',
       model: device['model'] as String? ?? 'Unknown',
-      osVersion: device['version'] as String? ?? '14',
+      osVersion: device['osVersion'] as String? ?? 'Unknown',
       appVersion: AppVersion.name,
       mobileUniqueId: mobileUniqueId,
     );
@@ -188,23 +203,42 @@ class AuthController extends AsyncNotifier<Session?> {
       );
     } catch (_) {}
 
-    _triggerStartupSync();
+    _triggerStartupSync(afterSignIn: true);
 
     return session;
   }
 
-  Future<void> signOut() async {
-    try {
-      await ref.read(backgroundControllerProvider.notifier).stop();
-      await ref.read(nativeBridgeProvider).clearAuthSession();
-    } on Object {
-      // Ignore background stop error during sign out
-    }
-
-    await ref.read(authRepositoryProvider).signOut();
+  /// Returns to the pairing screen after the server has already refused this
+  /// session. Not a sign-out: the app has none. A handset changes hands by an
+  /// administrator revoking the device and the phone being reset, then paired
+  /// afresh. This only drops credentials that can no longer make a request;
+  /// queued calls stay on the phone for the next pairing of the same employee.
+  Future<void> resetDeadSession() async {
+    await _clearDeadSession();
     state = const AsyncData(null);
     ref.invalidate(callFeedProvider);
     ref.invalidate(syncServiceProvider);
+  }
+
+  /// Local only. No `/auth/logout`: the session is already dead server-side.
+  Future<void> _clearDeadSession() async {
+    final bridge = ref.read(nativeBridgeProvider);
+    // The install's FCM token belonged to the old session; the next pairing
+    // registers a new one.
+    try {
+      await bridge.unregisterPushToken();
+    } on Object {
+      // Best effort.
+    }
+    await ref.read(authRepositoryProvider).clearLocalSession();
+    try {
+      // Also drops the revocation tombstone, so the next pairing starts clean.
+      await bridge.clearAuthSession();
+    } on Object {
+      // Nothing to clear without a platform channel.
+    }
+    // The server's view of this phone belonged to the session that ended.
+    await ref.read(serverSnapshotProvider.notifier).clear();
   }
 }
 
@@ -244,7 +278,7 @@ final onboardingProvider = AsyncNotifierProvider<OnboardingController, bool>(
 /// without this permission. But a hard gate with no way past it traps anyone who
 /// genuinely cannot grant it -- a managed handset, a work profile restriction --
 /// and takes away the parts that DO still work: the outbox keeps draining
-/// already-captured calls, and they can still reach Settings and sign out.
+/// already-captured calls, and they can still reach Settings.
 ///
 /// Deliberately NOT persisted. It lasts for this launch only, so the next cold
 /// start puts the problem back in front of them, and the critical alert banner

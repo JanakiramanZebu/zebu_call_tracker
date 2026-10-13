@@ -19,15 +19,15 @@ abstract final class AppVersion {
   /// Kept in step with `pubspec.yaml`'s `version:` by hand — but unlike the
   /// literals it replaces, being stale here is visible only in the seconds
   /// before startup finishes, never in what is sent to the server.
-  static const fallback = '1.0.0';
+  static const _fallback = '1.0.0';
 
-  static String _name = fallback;
+  static String _name = _fallback;
   static String _buildNumber = '';
 
   /// Reads the package metadata. Call once from `main` before `runApp`.
   ///
   /// Never throws: a version string is not worth failing a launch over, and
-  /// [fallback] is a truthful-enough answer when the platform channel is
+  /// [_fallback] is a truthful-enough answer when the platform channel is
   /// unavailable (a unit test, a platform without the plugin).
   static Future<void> initialize() async {
     try {
@@ -45,7 +45,7 @@ abstract final class AppVersion {
   /// `1` — the Android `versionCode`. Empty when unknown.
   static String get buildNumber => _buildNumber;
 
-  /// `1.0.0+1`, for display. Falls back to [name] when there is no build number.
+  /// `1.0.0+1`, for support screens. Falls back to [name] when there is no build number.
   static String get full =>
       _buildNumber.isEmpty ? _name : '$_name+$_buildNumber';
 }
