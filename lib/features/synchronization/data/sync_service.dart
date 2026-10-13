@@ -892,9 +892,26 @@ class SyncServiceNotifier extends AsyncNotifier<SyncResultSummary?> {
             ServerSnapshot.from(status, clockSkewMinutes: _clockSkewMinutes),
           );
 
+      // An administrator's "Request from phone" is the native worker's to
+      // answer: it uploads, or tells the administrator why it cannot. A
+      // PATCH has_recording:false from here would close it with no reason.
+      final requested = status.pendingRecordingUploads
+          .where((p) => p.requested && p.callId.isNotEmpty)
+          .map((p) => p.toJson())
+          .toList();
+      if (requested.isNotEmpty) {
+        try {
+          await ref
+              .read(nativeBridgeProvider)
+              .enqueueRecordingRequests(jsonEncode(requested));
+        } catch (e) {
+          debugPrint('[SYNC] Could not queue recording requests: $e');
+        }
+      }
+
       int reopened = 0;
       for (final pending in status.pendingRecordingUploads) {
-        if (pending.callId.isEmpty) continue;
+        if (pending.callId.isEmpty || pending.requested) continue;
 
         final local = await dao.findByServerCallId(pending.callId);
         if (local == null) continue;

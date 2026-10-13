@@ -1,5 +1,6 @@
 package `in`.mynt.zebu_call_tracker.overlay
 
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
@@ -134,6 +135,9 @@ object PostCallOverlayController {
     }
 
     private var windowMgr: WindowManager? = null
+
+    /** Set while the card is shown inside [PostCallActivity] instead of a window. */
+    private var hostActivity: Activity? = null
     private var root: FrameLayout? = null
     private var current: PostCallData? = null
 
@@ -152,13 +156,15 @@ object PostCallOverlayController {
      * contact name, direction and duration are read off the call log on a
      * background thread, after which the card's content is rebuilt in place.
      *
-     * A silent no-op without `SYSTEM_ALERT_WINDOW` — the card is opt-in, and
-     * tracking does not depend on it.
+     * Without `SYSTEM_ALERT_WINDOW` — refused outright on Android Go, or turned
+     * off by the user — the card comes up from a notification instead
+     * ([PostCallNotifier] → [PostCallActivity]). Tracking depends on neither.
      */
     fun show(context: Context, seed: PostCallData) {
         val app = context.applicationContext
         if (!Settings.canDrawOverlays(app)) {
-            Log.i(TAG, "Overlay permission not granted; skipping post-call card.")
+            Log.i(TAG, "Overlay not allowed; offering the post-call card as a notification.")
+            notifyCallEnded(app, seed, isRetry = false)
             return
         }
         if (Looper.myLooper() != Looper.getMainLooper()) {
@@ -183,6 +189,30 @@ object PostCallOverlayController {
         }
 
         enrich(app, seed, isRetry = false)
+    }
+
+    /**
+     * Shows the card inside [activity] rather than over other apps: the host
+     * for the notification route ([PostCallActivity]). Same card, same scrim,
+     * same buttons; closing it finishes the activity.
+     */
+    fun showIn(activity: Activity, data: PostCallData) {
+        if (hostActivity !== activity) removeOverlay()
+
+        val host = buildHost(activity, data, paletteFor(activity))
+        activity.setContentView(host)
+        hostActivity = activity
+        root = host
+        current = data
+        animateIn(activity, host)
+    }
+
+    /** [activity] is going away; forget it without finishing it again. */
+    fun detach(activity: Activity) {
+        if (hostActivity === activity) {
+            hostActivity = null
+            clearViews()
+        }
     }
 
     /** Takes the card down, if it is up. Safe to call at any time. */
@@ -212,19 +242,8 @@ object PostCallOverlayController {
      */
     private fun enrich(context: Context, seed: PostCallData, isRetry: Boolean) {
         enrichExecutor.execute {
-            val row = try {
-                CallLogReader.read(context, sinceMillis = 0L, limit = 1).firstOrNull()
-            } catch (e: Exception) {
-                // Most often READ_CALL_LOG is not held. Not worth a retry.
-                Log.i(TAG, "Post-call enrichment unavailable: ${e.message}")
-                null
-            }
-
-            val dateMillis = row?.get("dateMillis") as? Long
-            val fresh = dateMillis != null &&
-                System.currentTimeMillis() - dateMillis <= LOG_MATCH_WINDOW_MILLIS
-
-            if (row == null || !fresh) {
+            val enriched = readLatestCall(context, seed)
+            if (enriched == null) {
                 // The dialer has not written the row yet. One retry, then the
                 // card keeps the seed's values.
                 if (!isRetry) {
@@ -235,24 +254,60 @@ object PostCallOverlayController {
                 }
                 return@execute
             }
-
-            val number = (row["number"] as? String)?.takeIf { it.isNotBlank() }
-            val name = (row["cachedName"] as? String)?.takeIf { it.isNotBlank() }
-                ?: number?.let { ContactResolver.resolve(context, it) }
-            val direction = (row["type"] as? String) ?: seed.direction
-            val duration = (row["durationSeconds"] as? Long)?.toInt() ?: seed.durationSeconds
-
-            val enriched = seed.copy(
-                displayName = name ?: number ?: withheldLabel(row["presentation"] as? String),
-                phoneNumber = number.orEmpty(),
-                direction = direction,
-                durationSeconds = duration,
-                startedAtMillis = dateMillis,
-                isContact = name != null,
-            )
-
             handler.post { applyEnrichment(context, enriched) }
         }
+    }
+
+    /**
+     * The notification route's [enrich]: the call log is read before anything
+     * is shown, since a notification cannot be rebuilt in place as the card
+     * can. Falls back to the seed after the one retry.
+     */
+    private fun notifyCallEnded(context: Context, seed: PostCallData, isRetry: Boolean) {
+        enrichExecutor.execute {
+            val enriched = readLatestCall(context, seed)
+            if (enriched == null && !isRetry) {
+                handler.postDelayed(
+                    { notifyCallEnded(context, seed, isRetry = true) },
+                    ENRICH_RETRY_DELAY_MILLIS,
+                )
+                return@execute
+            }
+            PostCallNotifier.post(context, enriched ?: seed)
+        }
+    }
+
+    /**
+     * [seed] with the call log's facts for the call that just ended, or null
+     * while the dialer has not written its row (or the log cannot be read).
+     * Blocking: [enrichExecutor] only.
+     */
+    private fun readLatestCall(context: Context, seed: PostCallData): PostCallData? {
+        val row = try {
+            CallLogReader.read(context, sinceMillis = 0L, limit = 1).firstOrNull()
+        } catch (e: Exception) {
+            // Most often READ_CALL_LOG is not held.
+            Log.i(TAG, "Post-call enrichment unavailable: ${e.message}")
+            null
+        } ?: return null
+
+        val dateMillis = row["dateMillis"] as? Long ?: return null
+        if (System.currentTimeMillis() - dateMillis > LOG_MATCH_WINDOW_MILLIS) return null
+
+        val number = (row["number"] as? String)?.takeIf { it.isNotBlank() }
+        val name = (row["cachedName"] as? String)?.takeIf { it.isNotBlank() }
+            ?: number?.let { ContactResolver.resolve(context, it) }
+        val direction = (row["type"] as? String) ?: seed.direction
+        val duration = (row["durationSeconds"] as? Long)?.toInt() ?: seed.durationSeconds
+
+        return seed.copy(
+            displayName = name ?: number ?: withheldLabel(row["presentation"] as? String),
+            phoneNumber = number.orEmpty(),
+            direction = direction,
+            durationSeconds = duration,
+            startedAtMillis = dateMillis,
+            isContact = name != null,
+        )
     }
 
     /**
@@ -285,12 +340,9 @@ object PostCallOverlayController {
     // Window management
     // -------------------------------------------------------------------------
 
-    private fun addOverlay(context: Context, data: PostCallData) {
-        val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        windowMgr = wm
-
-        val p = paletteFor(context)
-        val host = FrameLayout(context).apply {
+    /** The scrim with the card centred on it: the whole window, either host. */
+    private fun buildHost(context: Context, data: PostCallData, p: Palette): FrameLayout =
+        FrameLayout(context).apply {
             setBackgroundColor(p.scrim)
             // The scrim swallows taps so nothing behind the card is pressed by
             // accident. It does not close the card: only the buttons do.
@@ -299,6 +351,12 @@ object PostCallOverlayController {
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             addView(buildCard(context, data, p), cardLayoutParams(context))
         }
+
+    private fun addOverlay(context: Context, data: PostCallData) {
+        val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        windowMgr = wm
+
+        val host = buildHost(context, data, paletteFor(context))
         root = host
 
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -323,7 +381,10 @@ object PostCallOverlayController {
         }
 
         wm.addView(host, params)
+        animateIn(context, host)
+    }
 
+    private fun animateIn(context: Context, host: FrameLayout) {
         // One entrance: the scrim fades in and the card settles from a touch
         // below and slightly smaller. ViewPropertyAnimator honours the system
         // animation scale, so "Remove animations" makes this instant.
@@ -355,6 +416,14 @@ object PostCallOverlayController {
     }
 
     private fun removeOverlay() {
+        // The notification route: the card is an activity's content, and
+        // closing the card closes the activity.
+        hostActivity?.let { activity ->
+            hostActivity = null
+            clearViews()
+            if (!activity.isFinishing) activity.finish()
+            return
+        }
         try {
             root?.let { windowMgr?.removeView(it) }
         } catch (_: Exception) {

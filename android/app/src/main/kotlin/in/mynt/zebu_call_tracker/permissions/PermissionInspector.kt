@@ -47,5 +47,19 @@ object PermissionInspector {
         // WhatsApp to capture from at all.
         "whatsappCalls" to WhatsAppCallListener.isEnabled(context),
         "whatsappInstalled" to WhatsAppCallListener.isWhatsAppInstalled(context),
+        "lowRamDevice" to isLowRamDevice(context),
     )
+
+    /**
+     * Android Go and other low-RAM builds. On these the system itself refuses
+     * "Display over other apps" and "Notification access" to every app ("not
+     * available ... to improve performance"), so neither can be asked for:
+     * the switch never turns on, whatever the user does.
+     */
+    fun isLowRamDevice(context: Context): Boolean = try {
+        (context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager)
+            .isLowRamDevice
+    } catch (_: Exception) {
+        false
+    }
 }

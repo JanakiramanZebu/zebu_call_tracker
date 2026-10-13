@@ -3,7 +3,6 @@ package `in`.mynt.zebu_call_tracker.call
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.provider.Settings
 import android.telephony.TelephonyManager
 import android.util.Log
 import `in`.mynt.zebu_call_tracker.background.BackgroundScheduler
@@ -133,8 +132,8 @@ class CallStateReceiver : BroadcastReceiver() {
      * [PostCallOverlayController] for the two separate reasons why.
      */
     private fun showPostCallOverlay(context: Context) {
-        if (!Settings.canDrawOverlays(context)) return
-
+        // No overlay check here: without "Display over other apps" (always the
+        // case on Android Go) the controller offers the card as a notification.
         val entries = journalEntries(context)
 
         // Only transitions belonging to THIS call. The journal is a flat,

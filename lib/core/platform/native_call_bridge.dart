@@ -148,6 +148,11 @@ abstract interface class NativeCallBridge {
   /// so the values have to cross the channel.
   Future<bool> setSyncPolicy(String policyJson);
 
+  /// Hands administrator recording requests (`requested: true` items from
+  /// `GET /sync/status`, JSON-encoded as a list) to the native worker that
+  /// uploads or answers them. Returns how many were queued.
+  Future<int> enqueueRecordingRequests(String itemsJson);
+
   /// Reads last native sync attempt status and timestamps.
   Future<Map<String, Object?>> getNativeSyncStatus();
 
@@ -450,6 +455,14 @@ class MethodChannelNativeCallBridge implements NativeCallBridge {
   @override
   Future<bool> setSyncPolicy(String policyJson) async {
     return await _invoke<bool>('setSyncPolicy', {'policyJson': policyJson});
+  }
+
+  @override
+  Future<int> enqueueRecordingRequests(String itemsJson) async {
+    return await _invoke<int>(
+      'enqueueRecordingRequests',
+      {'itemsJson': itemsJson},
+    );
   }
 
   @override

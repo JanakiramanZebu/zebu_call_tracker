@@ -16,6 +16,7 @@ import `in`.mynt.zebu_call_tracker.background.BackgroundScheduler
 import `in`.mynt.zebu_call_tracker.background.CallTrackingService
 import `in`.mynt.zebu_call_tracker.background.IngestStore
 import `in`.mynt.zebu_call_tracker.background.NativeHeartbeat
+import `in`.mynt.zebu_call_tracker.background.RequestedRecordingUploadWorker
 import `in`.mynt.zebu_call_tracker.background.SyncCoordinator
 import `in`.mynt.zebu_call_tracker.push.PushTokenWorker
 import `in`.mynt.zebu_call_tracker.background.SyncPolicyStore
@@ -391,6 +392,23 @@ class NativeBridge(private val context: Context) : MethodChannel.MethodCallHandl
                         }
                         result.success(true)
                     }
+                }
+
+                // Administrator recording requests Dart's `GET /sync/status`
+                // saw (`requested: true` items, as the server sent them). The
+                // native worker answers them; Dart never uploads. Replies with
+                // how many were queued.
+                "enqueueRecordingRequests" -> {
+                    val json = call.argument<String>("itemsJson")
+                    var queued = 0
+                    try {
+                        val items = org.json.JSONArray(json ?: "[]")
+                        for (i in 0 until items.length()) {
+                            val item = items.optJSONObject(i) ?: continue
+                            if (RequestedRecordingUploadWorker.enqueueIfRequested(context, item, "app")) queued++
+                        }
+                    } catch (_: org.json.JSONException) {}
+                    result.success(queued)
                 }
 
                 "getNativeSyncStatus" -> background(result) { IngestStore.getLastSyncInfo(context) }

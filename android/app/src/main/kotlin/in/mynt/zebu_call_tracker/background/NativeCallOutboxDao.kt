@@ -995,6 +995,94 @@ object NativeCallOutboxDao {
         }
     }
 
+    /** The column list [toCallRecord] reads, for the single-row lookups below. */
+    private val SELECT_CALL_RECORD_SQL = """
+        SELECT local_id, idempotency_key, external_call_id, server_call_id, phone_number,
+               contact_name, direction, status, started_at, duration_seconds,
+               has_recording, recording_path, recording_media_store_id, recording_checksum,
+               recording_upload_status, sim_slot, attempt_count, sync_state,
+               answered_at, ended_at, metadata_json, client_created_at
+        FROM $TABLE_LOCAL_CALLS
+    """.trimIndent()
+
+    /** One row by its idempotency key, or null. Read-only. */
+    fun findByIdempotencyKey(context: Context, idempotencyKey: String): CallRecord? = synchronized(dbLock) {
+        val db = getReadableDb(context) ?: return null
+        return try {
+            db.rawQuery("$SELECT_CALL_RECORD_SQL WHERE idempotency_key = ? LIMIT 1", arrayOf(idempotencyKey))
+                .use { c -> if (c.moveToFirst()) c.toCallRecord() else null }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error reading call $idempotencyKey: ${e.message}")
+            null
+        }
+    }
+
+    /** How far a requested call's `started_at` may sit from the server's. */
+    private const val REQUEST_MATCH_WINDOW_SECONDS = 120L
+
+    /** Digits compared when telling two renderings of one number apart. */
+    private const val PHONE_SUFFIX_DIGITS = 10
+
+    /**
+     * The local row an administrator's recording request is about, found by
+     * the server's id, else by `external_call_id`, else by `started_at` within
+     * [REQUEST_MATCH_WINDOW_SECONDS] (and the same number, when [phoneNumber]
+     * is known). The two fallbacks never take a row already tied to a
+     * different server call, nor a WhatsApp row: the server never asks for
+     * WhatsApp audio, and the phone cannot record it.
+     *
+     * Read-only. A row found by a fallback still carries its old (null)
+     * server id; the caller decides whether to store the requested one.
+     */
+    fun findCallForRecordingRequest(
+        context: Context,
+        serverCallId: String,
+        externalCallId: String?,
+        startedAtMillis: Long?,
+        phoneNumber: String?,
+    ): CallRecord? = synchronized(dbLock) {
+        val db = getReadableDb(context) ?: return null
+        val columns = SELECT_CALL_RECORD_SQL
+        val unclaimedSimCall = """
+            (server_call_id IS NULL OR server_call_id = ?)
+              AND (external_call_id IS NULL OR external_call_id NOT LIKE '$EXTERNAL_WHATSAPP_PREFIX%')
+        """.trimIndent()
+        return try {
+            db.rawQuery("$columns WHERE server_call_id = ? LIMIT 1", arrayOf(serverCallId))
+                .use { c -> if (c.moveToFirst()) return c.toCallRecord() }
+
+            if (!externalCallId.isNullOrBlank()) {
+                db.rawQuery(
+                    "$columns WHERE external_call_id = ? AND $unclaimedSimCall LIMIT 1",
+                    arrayOf(externalCallId, serverCallId),
+                ).use { c -> if (c.moveToFirst()) return c.toCallRecord() }
+            }
+
+            if (startedAtMillis == null) return null
+            val startSec = startedAtMillis / 1000L
+            val wanted = phoneNumber?.filter { it.isDigit() }?.takeLast(PHONE_SUFFIX_DIGITS)
+                ?.takeIf { it.isNotEmpty() }
+            val candidates = mutableListOf<CallRecord>()
+            db.rawQuery(
+                "$columns WHERE $STARTED_AT_SECONDS_SQL BETWEEN ? AND ? AND $unclaimedSimCall",
+                arrayOf(
+                    (startSec - REQUEST_MATCH_WINDOW_SECONDS).toString(),
+                    (startSec + REQUEST_MATCH_WINDOW_SECONDS).toString(),
+                    serverCallId,
+                ),
+            ).use { c -> while (c.moveToNext()) candidates.add(c.toCallRecord()) }
+            candidates
+                .filter { row ->
+                    wanted == null ||
+                        row.phoneNumber.filter { it.isDigit() }.takeLast(PHONE_SUFFIX_DIGITS) == wanted
+                }
+                .minByOrNull { kotlin.math.abs(it.startedAtMillis - startedAtMillis) }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error finding the call for a recording request: ${e.message}")
+            null
+        }
+    }
+
     /**
      * Hands a claimed row back untouched: no attempt counted, no error kept.
      *

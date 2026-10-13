@@ -49,6 +49,7 @@ final permissionStatusProvider = FutureProvider.autoDispose<PermissionSnapshot>(
       overlayWindow: await overlay,
       whatsappCalls: callPerms['whatsappCalls'] ?? false,
       whatsappInstalled: callPerms['whatsappInstalled'] ?? false,
+      lowRamDevice: callPerms['lowRamDevice'] ?? false,
     );
   },
 );
@@ -64,6 +65,7 @@ class PermissionSnapshot {
     this.overlayWindow = false,
     this.whatsappCalls = false,
     this.whatsappInstalled = false,
+    this.lowRamDevice = false,
   });
 
   final bool readPhoneState;
@@ -91,6 +93,11 @@ class PermissionSnapshot {
   /// WhatsApp or WhatsApp Business is installed. Without one, the WhatsApp
   /// ask is not shown at all.
   final bool whatsappInstalled;
+
+  /// An Android Go / low-RAM phone. The system there refuses "Display over
+  /// other apps" and "Notification access" to every app, so those two asks
+  /// are dropped rather than left as switches that can never be turned on.
+  final bool lowRamDevice;
 
   /// Whether new calls are being captured at all.
   ///

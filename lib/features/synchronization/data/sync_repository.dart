@@ -25,19 +25,49 @@ class PendingRecordingItem {
     required this.callId,
     this.startedAt,
     this.phoneNumber,
+    this.uploadUrl,
+    this.externalCallId,
+    this.requested = false,
+    this.requestId,
   });
 
   final String callId;
   final String? startedAt;
   final String? phoneNumber;
+  final String? uploadUrl;
+  final String? externalCallId;
+
+  /// An administrator pressed "Request from phone" for this call. Answered by
+  /// the native `RequestedRecordingUploadWorker`, never by the reconciliation
+  /// pass. False on servers that predate the field.
+  final bool requested;
+  final int? requestId;
 
   factory PendingRecordingItem.fromJson(Map<String, dynamic> json) {
+    final rawRequestId = json['request_id'];
     return PendingRecordingItem(
       callId: json['call_id'] as String? ?? '',
       startedAt: json['started_at'] as String?,
       phoneNumber: json['phone_number'] as String?,
+      uploadUrl: json['upload_url'] as String?,
+      externalCallId: json['external_call_id'] as String?,
+      requested: json['requested'] == true,
+      requestId: rawRequestId is int
+          ? rawRequestId
+          : int.tryParse(rawRequestId?.toString() ?? ''),
     );
   }
+
+  /// The item as the server sent it, for handing to the native worker.
+  Map<String, Object?> toJson() => {
+        'call_id': callId,
+        'started_at': startedAt,
+        'phone_number': phoneNumber,
+        'upload_url': uploadUrl,
+        'external_call_id': externalCallId,
+        'requested': requested,
+        'request_id': requestId,
+      };
 }
 
 DateTime? _time(Object? raw) =>

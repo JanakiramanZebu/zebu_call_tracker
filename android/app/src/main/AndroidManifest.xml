@@ -122,6 +122,19 @@
             </intent-filter>
         </activity>
 
+        <!-- The post-call card on phones that cannot draw over other apps
+             (Android Go refuses it outright). Opened only from the
+             PostCallNotifier notification. Its own task and out of Recents, so
+             closing the card returns to whatever the user was doing. -->
+        <activity
+            android:name=".overlay.PostCallActivity"
+            android:exported="false"
+            android:theme="@style/PostCallTheme"
+            android:taskAffinity="in.mynt.zebu_call_tracker.postcall"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout" />
+
         <!-- Background call detection. ACTION_PHONE_STATE_CHANGED is on the
              implicit-broadcast exemption list, so this manifest receiver still
              wakes a stopped process on Android 8+. exported="true" is required:

@@ -636,67 +636,164 @@ object NativeCallIngestor {
 
         var linked = 0
         for (row in unlinked) {
-            val dateMillis = (row["startedAtMillis"] as? Number)?.toLong() ?: continue
-            val duration = (row["durationSeconds"] as? Number)?.toInt() ?: 0
-            val key = row["idempotencyKey"] as? String ?: continue
-
-            val direction = (row["direction"] as? String) ?: "unknown"
-            // Either already known from the journal at insert
-            // time, or resolvable now that the receiver has had
-            // longer to see the transitions.
-            val knownAnswered = (row["answeredAtMillis"] as? Number)?.toLong()
-            val window = CallStateJournal.windowFor(journal, dateMillis, duration)
-            val anchor = knownAnswered ?: CallEnrichment.resolveTimes(
-                direction = direction,
-                durationSeconds = duration,
-                window = window,
-                recording = null,
-            ).answeredAtMillis
-
-            val matchObj = NativeCallForMatching(
-                startedAtEpochMillis = dateMillis,
-                durationSeconds = duration,
-                phoneNumber = row["phoneNumber"] as? String,
-                contactName = row["contactName"] as? String,
-                answeredAtEpochMillis = anchor,
-            )
-
-            val result = NativeRecordingMatcher.match(matchObj, candidates)
-            if (result.isMatched && result.candidate != null) {
-                val c = result.candidate
-                val times = CallEnrichment.resolveTimes(
-                    direction = direction,
-                    durationSeconds = duration,
-                    window = window,
-                    recording = c,
-                )
-
-                val updated = NativeCallOutboxDao.updateRecordingMatch(
-                    context = context,
-                    answeredAtMillis = times.answeredAtMillis,
-                    endedAtMillis = times.endedAtMillis,
-                    // The row's existing metadata was built
-                    // before this recording existed, so it
-                    // carries no `recording` object. Rebuilt
-                    // from the merged view rather than patched.
-                    metadataJson = CallEnrichment.remergeRecordingMetadata(
-                        existingJson = row["metadataJson"] as? String,
-                        times = times,
-                        recording = c,
-                        signals = result.signals,
-                        confidence = result.confidence,
-                    ),
-                    idempotencyKey = key,
-                    recordingPath = RecordingScanner.contentUri(c.mediaStoreId),
-                    mediaStoreId = c.mediaStoreId,
-                    // Hashed at upload; see capturePage.
-                    checksum = null,
-                )
-                if (updated) linked++
-                Log.i(TAG, "[RECORDING_DISCOVERY] Retroactively matched recording ${c.mediaStoreId} to existing call $key")
-            }
+            if (linkOne(context, journal, row, candidates)) linked++
         }
         return linked
+    }
+
+    /**
+     * Matches one waiting call against [candidates] and links the winner.
+     * True when a recording was linked.
+     */
+    private fun linkOne(
+        context: Context,
+        journal: List<Pair<String, Long>>,
+        row: Map<String, Any?>,
+        candidates: List<NativeRecordingCandidate>,
+    ): Boolean {
+        val dateMillis = (row["startedAtMillis"] as? Number)?.toLong() ?: return false
+        val duration = (row["durationSeconds"] as? Number)?.toInt() ?: 0
+        val key = row["idempotencyKey"] as? String ?: return false
+
+        val direction = (row["direction"] as? String) ?: "unknown"
+        // Either already known from the journal at insert
+        // time, or resolvable now that the receiver has had
+        // longer to see the transitions.
+        val knownAnswered = (row["answeredAtMillis"] as? Number)?.toLong()
+        val window = CallStateJournal.windowFor(journal, dateMillis, duration)
+        val anchor = knownAnswered ?: CallEnrichment.resolveTimes(
+            direction = direction,
+            durationSeconds = duration,
+            window = window,
+            recording = null,
+        ).answeredAtMillis
+
+        val matchObj = NativeCallForMatching(
+            startedAtEpochMillis = dateMillis,
+            durationSeconds = duration,
+            phoneNumber = row["phoneNumber"] as? String,
+            contactName = row["contactName"] as? String,
+            answeredAtEpochMillis = anchor,
+        )
+
+        val result = NativeRecordingMatcher.match(matchObj, candidates)
+        if (!result.isMatched || result.candidate == null) return false
+        val c = result.candidate
+        val times = CallEnrichment.resolveTimes(
+            direction = direction,
+            durationSeconds = duration,
+            window = window,
+            recording = c,
+        )
+
+        val updated = NativeCallOutboxDao.updateRecordingMatch(
+            context = context,
+            answeredAtMillis = times.answeredAtMillis,
+            endedAtMillis = times.endedAtMillis,
+            // The row's existing metadata was built
+            // before this recording existed, so it
+            // carries no `recording` object. Rebuilt
+            // from the merged view rather than patched.
+            metadataJson = CallEnrichment.remergeRecordingMetadata(
+                existingJson = row["metadataJson"] as? String,
+                times = times,
+                recording = c,
+                signals = result.signals,
+                confidence = result.confidence,
+            ),
+            idempotencyKey = key,
+            recordingPath = RecordingScanner.contentUri(c.mediaStoreId),
+            mediaStoreId = c.mediaStoreId,
+            // Hashed at upload; see capturePage.
+            checksum = null,
+        )
+        Log.i(TAG, "[RECORDING_DISCOVERY] Retroactively matched recording ${c.mediaStoreId} to existing call $key")
+        return updated
+    }
+
+    /** What [linkRecordingFor] found for one call. */
+    enum class RecordingLink {
+        /** The call has a readable recording linked to it now. */
+        LINKED,
+
+        /** A recording was linked once, and the file can no longer be opened. */
+        DELETED,
+
+        /** Nothing on the phone matches the call. */
+        NO_MATCH,
+
+        /** The app may not read the dialer's recordings. */
+        NO_PERMISSION,
+    }
+
+    /**
+     * Makes sure [call] has its recording linked, for an administrator's
+     * request (`RequestedRecordingUploadWorker`): the file already linked if
+     * it still opens, otherwise a fresh MediaStore match with exactly the
+     * window and matcher [linkLateRecordings] uses, however old the call is.
+     *
+     * Reads only what `READ_MEDIA_AUDIO` / `READ_EXTERNAL_STORAGE` allow.
+     */
+    fun linkRecordingFor(context: Context, call: CallRecord): RecordingLink {
+        val linkedUri = call.recordingPath
+            ?: call.recordingMediaStoreId?.let { RecordingScanner.contentUri(it) }
+        if (linkedUri != null) {
+            if (canOpen(context, linkedUri)) {
+                // Relinked through the normal path so the row is pending again
+                // with has_recording set: markRecordingAbsent clears that flag
+                // and keeps the id.
+                val mediaStoreId = call.recordingMediaStoreId
+                if (!call.hasRecording && mediaStoreId != null) {
+                    NativeCallOutboxDao.updateRecordingMatch(
+                        context = context,
+                        idempotencyKey = call.idempotencyKey,
+                        recordingPath = linkedUri,
+                        mediaStoreId = mediaStoreId,
+                        checksum = call.recordingChecksum,
+                    )
+                }
+                return RecordingLink.LINKED
+            }
+            if (!RecordingScanner.hasPermission(context)) return RecordingLink.NO_PERMISSION
+            return RecordingLink.DELETED
+        }
+
+        if (!RecordingScanner.hasPermission(context)) return RecordingLink.NO_PERMISSION
+        if (call.durationSeconds <= 0) return RecordingLink.NO_MATCH
+
+        val startSeconds = call.startedAtMillis / 1000L
+        val candidates = scanRecordings(
+            context,
+            sinceEpochSeconds = max(0L, startSeconds - RECORDING_SKEW_SECONDS),
+            beforeEpochSeconds = startSeconds + call.durationSeconds + RING_ALLOWANCE_SECONDS +
+                RECORDING_SKEW_SECONDS,
+            limit = RECORDING_LIMIT,
+        ).mapNotNull { NativeRecordingMatcher.mapToCandidate(it) }
+        if (candidates.isEmpty()) return RecordingLink.NO_MATCH
+
+        val row = mapOf(
+            "idempotencyKey" to call.idempotencyKey,
+            "phoneNumber" to call.phoneNumber,
+            "contactName" to call.contactName,
+            "startedAtMillis" to call.startedAtMillis,
+            "durationSeconds" to call.durationSeconds,
+            "direction" to call.direction,
+            "answeredAtMillis" to call.answeredAtMillis,
+            "metadataJson" to call.metadataJson,
+        )
+        return if (linkOne(context, CallStateJournal.snapshot(context), row, candidates)) {
+            RecordingLink.LINKED
+        } else {
+            RecordingLink.NO_MATCH
+        }
+    }
+
+    /** Whether [uriString] still opens: false once the dialer's file is deleted. */
+    private fun canOpen(context: Context, uriString: String): Boolean = try {
+        context.contentResolver.openFileDescriptor(android.net.Uri.parse(uriString), "r")
+            ?.use { true } ?: false
+    } catch (_: Exception) {
+        false
     }
 
     /**

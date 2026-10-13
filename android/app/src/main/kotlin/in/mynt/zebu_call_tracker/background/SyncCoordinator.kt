@@ -756,6 +756,138 @@ object SyncCoordinator {
         }
     }
 
+    /** What [uploadRequestedRecording] did with one call's recording. */
+    enum class RequestedUploadOutcome {
+        /** The server has the audio: 2xx, or RECORDING_ALREADY_EXISTS. */
+        UPLOADED,
+
+        /** The server (or the local pre-check) refused this file for good. */
+        REJECTED,
+
+        /** Worth trying again later: network, 5xx, rate limit, a drain in progress. */
+        RETRY,
+
+        /** The server no longer has the call (CALL_NOT_FOUND). */
+        CALL_GONE,
+
+        /** No session, or the device is refused: stop, do not retry. */
+        STOPPED,
+    }
+
+    data class RequestedUpload(val outcome: RequestedUploadOutcome, val errorCode: String? = null)
+
+    /** How long [uploadRequestedRecording] waits for a running drain to finish. */
+    private const val REQUESTED_UPLOAD_LOCK_WAIT_MILLIS = 90_000L
+
+    /** [uploadRequestedRecording] could not take the run lock in time. */
+    const val CODE_SYNC_BUSY = "SYNC_BUSY"
+
+    /**
+     * Uploads one call's recording at an administrator's request
+     * (`RequestedRecordingUploadWorker`), outside the queue order.
+     *
+     * Still this coordinator's upload, under its run lock: the same pre-check,
+     * rate limiter, streaming request and row bookkeeping as the drain, so the
+     * two can never send one file side by side. Waits up to
+     * [REQUESTED_UPLOAD_LOCK_WAIT_MILLIS] for a running drain, then reports
+     * [RequestedUploadOutcome.RETRY] with [CODE_SYNC_BUSY].
+     *
+     * Deliberately ignores a local `uploaded` status: the request means the
+     * server does not have the audio, whatever this phone last heard.
+     */
+    suspend fun uploadRequestedRecording(
+        context: Context,
+        idempotencyKey: String,
+        serverCallId: String,
+        onLongUpload: (suspend () -> Unit)? = null,
+    ): RequestedUpload = withContext(Dispatchers.IO) {
+        val waitStartedAt = System.currentTimeMillis()
+        while (!isRunning.compareAndSet(false, true)) {
+            if (System.currentTimeMillis() - waitStartedAt > REQUESTED_UPLOAD_LOCK_WAIT_MILLIS) {
+                return@withContext RequestedUpload(RequestedUploadOutcome.RETRY, CODE_SYNC_BUSY)
+            }
+            delay(2_000L)
+        }
+
+        val appContext = context.applicationContext
+        try {
+            val rawBaseUrl = IngestStore.getApiBaseUrl(appContext)
+            val storedToken = IngestStore.getAuthToken(appContext)
+            if (rawBaseUrl.isNullOrBlank() || storedToken.isNullOrBlank() ||
+                IngestStore.getDeviceUuid(appContext).isNullOrBlank()
+            ) {
+                return@withContext RequestedUpload(RequestedUploadOutcome.STOPPED, "AUTH_NO_SESSION")
+            }
+            if (NativeStatusCheckIn.isBlocked(appContext)) {
+                return@withContext RequestedUpload(RequestedUploadOutcome.STOPPED, "DEVICE_BLOCKED")
+            }
+
+            val call = NativeCallOutboxDao.findByIdempotencyKey(appContext, idempotencyKey)
+                ?: return@withContext RequestedUpload(RequestedUploadOutcome.REJECTED, "FILE_NOT_FOUND")
+            val mediaStoreId = call.recordingMediaStoreId
+            val recordingUriStr = call.recordingPath
+                ?: mediaStoreId?.let { RecordingScanner.contentUri(it) }
+            if (recordingUriStr.isNullOrBlank()) {
+                return@withContext RequestedUpload(RequestedUploadOutcome.REJECTED, "FILE_NOT_FOUND")
+            }
+
+            val policy = SyncPolicyStore.load(appContext)
+            val precheck = precheckRecording(appContext, policy, recordingUriStr, mediaStoreId)
+            precheck.rejection?.let { code ->
+                NativeCallOutboxDao.markRecordingAbsent(appContext, idempotencyKey, code)
+                return@withContext RequestedUpload(RequestedUploadOutcome.REJECTED, code)
+            }
+            if (onLongUpload != null && (precheck.sizeBytes < 0L || precheck.sizeBytes >= LONG_UPLOAD_BYTES)) {
+                onLongUpload()
+            }
+
+            if (acquireSlot(appContext, RateLimiter.Bucket.RECORDING, System.currentTimeMillis()) > 0L) {
+                return@withContext RequestedUpload(RequestedUploadOutcome.RETRY, "RATE_LIMIT_EXCEEDED")
+            }
+
+            val baseUrl = TokenRefresher.normalizeBaseUrl(rawBaseUrl)
+            val token = TokenRefresher.ensureFresh(appContext, baseUrl, storedToken)
+            val result = executeStreamingRecordingUpload(
+                context = appContext,
+                endpoint = "$baseUrl/calls/$serverCallId/recording",
+                recordingUri = Uri.parse(recordingUriStr),
+                mediaStoreId = mediaStoreId,
+                storedChecksum = call.recordingChecksum,
+                durationSeconds = call.durationSeconds,
+                token = token,
+                baseUrl = baseUrl,
+            )
+            val code = result.errorCode
+
+            when {
+                result.isSuccess || code == "RECORDING_ALREADY_EXISTS" -> {
+                    NativeCallOutboxDao.markRecordingUploaded(appContext, idempotencyKey)
+                    RequestedUpload(RequestedUploadOutcome.UPLOADED, if (result.isSuccess) null else code)
+                }
+                code == "RATE_LIMIT_EXCEEDED" -> {
+                    RateLimiter.onRateLimited(appContext, RateLimiter.Bucket.RECORDING, result.retryAfterSeconds)
+                    RequestedUpload(RequestedUploadOutcome.RETRY, code)
+                }
+                code == "CALL_NOT_FOUND" -> RequestedUpload(RequestedUploadOutcome.CALL_GONE, code)
+                isFatal(code) || code in AUTH_HALT_CODES -> {
+                    // As a drain records it, so the Sync screen says why.
+                    IngestStore.recordSyncOutcome(appContext, blockedStatusFor(code), 0, code)
+                    RequestedUpload(RequestedUploadOutcome.STOPPED, code)
+                }
+                result.isRetryable -> {
+                    NativeCallOutboxDao.markRecordingFailed(appContext, idempotencyKey, code)
+                    RequestedUpload(RequestedUploadOutcome.RETRY, code)
+                }
+                else -> {
+                    NativeCallOutboxDao.markRecordingAbsent(appContext, idempotencyKey, code)
+                    RequestedUpload(RequestedUploadOutcome.REJECTED, code)
+                }
+            }
+        } finally {
+            isRunning.set(false)
+        }
+    }
+
     private data class BatchDrainOutcome(
         val uploaded: Int = 0,
         val failed: Int = 0,

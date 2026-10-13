@@ -95,6 +95,28 @@ class _PermissionScreenState extends ConsumerState<PermissionScreen>
                 isBusy: isBusy,
                 onRequest: request,
               ),
+              // Android Go: the two asks the system refuses are gone from the
+              // list, so say what that costs rather than let it look complete.
+              if (perms.lowRamDevice)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    AppTokens.gutter,
+                    12,
+                    AppTokens.gutter,
+                    0,
+                  ),
+                  child: Text(
+                    perms.whatsappInstalled
+                        ? 'This phone runs Android Go, which does not allow '
+                              'WhatsApp call tracking or the on-screen call '
+                              'card. Calls are still tracked; the card opens '
+                              'from a notification.'
+                        : 'This phone runs Android Go, which does not allow '
+                              'the on-screen call card. The card opens from a '
+                              'notification instead.',
+                    style: AppType.small.copyWith(color: z.ink2),
+                  ),
+                ),
               const SizedBox(height: 24),
 
               // Always offered. Hiding this until every permission was

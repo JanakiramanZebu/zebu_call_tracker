@@ -100,8 +100,11 @@ List<PermissionAsk> permissionAsks(
   // way the app sees them. Shown under Android's own name for the permission,
   // with one line saying what it is used for: notification access reads every
   // notification on the phone, and the employee is entitled to know why it is
-  // asked for (Mobile API Guide §12). Hidden on a phone without WhatsApp.
-  if (perms.whatsappInstalled)
+  // asked for (Mobile API Guide §12). Hidden on a phone without WhatsApp, and
+  // on an Android Go phone, where the system refuses it to every app: left in,
+  // it was an essential switch that could never be turned on, and setup never
+  // finished — so not even SIM calls were tracked.
+  if (perms.whatsappInstalled && !perms.lowRamDevice)
     PermissionAsk(
       id: 'whatsapp',
       kind: AskKind.notificationListener,
@@ -165,14 +168,17 @@ List<PermissionAsk> permissionAsks(
       granted: perms.notifications,
       essential: true,
     ),
-  PermissionAsk(
-    id: 'overlay',
-    kind: AskKind.overlayWindow,
-    title: 'Display over other apps',
-    icon: Icons.picture_in_picture_rounded,
-    granted: perms.overlayWindow,
-    essential: true,
-  ),
+  // Android Go refuses this to every app too. There, the post-call card comes
+  // up from a notification instead (PostCallNotifier), which needs no grant.
+  if (!perms.lowRamDevice)
+    PermissionAsk(
+      id: 'overlay',
+      kind: AskKind.overlayWindow,
+      title: 'Display over other apps',
+      icon: Icons.picture_in_picture_rounded,
+      granted: perms.overlayWindow,
+      essential: true,
+    ),
 ];
 
 /// Whether the ask list as a whole clears the bar for entering the app.

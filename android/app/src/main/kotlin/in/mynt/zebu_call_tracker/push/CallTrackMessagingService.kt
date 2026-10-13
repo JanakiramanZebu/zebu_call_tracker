@@ -5,6 +5,7 @@ import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import `in`.mynt.zebu_call_tracker.background.CallTrackingService
 import `in`.mynt.zebu_call_tracker.background.IngestStore
+import `in`.mynt.zebu_call_tracker.background.RequestedRecordingUploadWorker
 
 /**
  * Receives the server's push wake-up (Mobile API Guide §3.3).
@@ -24,8 +25,38 @@ class CallTrackMessagingService : FirebaseMessagingService() {
 
     override fun onMessageReceived(message: RemoteMessage) {
         val data = message.data
-        // Ignore unknown types: new ones may be added later.
-        if (data["type"] != TYPE_SYNC_REQUEST) return
+        when (data["type"]) {
+            TYPE_SYNC_REQUEST -> onSyncRequest(data)
+            TYPE_UPLOAD_RECORDING -> onUploadRecording(data)
+            // Ignore unknown types: new ones may be added later.
+            else -> Unit
+        }
+    }
+
+    /**
+     * An administrator asked for one call's recording. Handed to its own
+     * unique work at once, keyed by call, so repeated pushes for the same call
+     * do nothing while one is queued or running. The same request also comes
+     * through `GET /sync/status`, for a phone that never sees this push.
+     */
+    private fun onUploadRecording(data: Map<String, String>) {
+        val request = RequestedRecordingUploadWorker.Request.of(
+            callId = data["call_id"],
+            requestId = data["request_id"],
+            externalCallId = data["external_call_id"],
+            startedAt = data["started_at"],
+            phoneNumber = null,
+            source = "push",
+        )
+        if (request == null) {
+            Log.w(TAG, "UPLOAD_RECORDING without a usable call_id; ignored.")
+            return
+        }
+        Log.i(TAG, "UPLOAD_RECORDING received (call=${request.callId}, request=${request.requestId}).")
+        RequestedRecordingUploadWorker.enqueue(applicationContext, request)
+    }
+
+    private fun onSyncRequest(data: Map<String, String>) {
         // Logged, never branched on: every reason gets the same answer.
         val reason = data["reason"] ?: "unspecified"
         Log.i(TAG, "SYNC_REQUEST received (reason=$reason, sent_at=${data["sent_at"]}).")
@@ -48,5 +79,6 @@ class CallTrackMessagingService : FirebaseMessagingService() {
     private companion object {
         const val TAG = "CallTrackMessaging"
         const val TYPE_SYNC_REQUEST = "SYNC_REQUEST"
+        const val TYPE_UPLOAD_RECORDING = "UPLOAD_RECORDING"
     }
 }

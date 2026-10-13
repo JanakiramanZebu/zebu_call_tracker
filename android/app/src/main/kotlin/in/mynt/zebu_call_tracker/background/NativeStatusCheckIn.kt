@@ -138,8 +138,19 @@ object NativeStatusCheckIn {
         val pending = data.optJSONArray("pending_recording_uploads") ?: return
         var reopened = 0
         var reported = 0
+        var requested = 0
         for (i in 0 until pending.length()) {
-            val callId = pending.optJSONObject(i)?.optString("call_id")
+            // An administrator's "Request from phone": answered by its own
+            // worker, which uploads or tells the administrator why not. Never
+            // PATCHed here: has_recording:false would close the request with
+            // no reason given. Enqueued with KEEP, so a request already queued
+            // (by its push, or the last check-in) is left alone.
+            val item = pending.optJSONObject(i)
+            if (item != null && RequestedRecordingUploadWorker.enqueueIfRequested(context, item, "sync")) {
+                requested++
+                continue
+            }
+            val callId = item?.optString("call_id")
                 ?.takeIf { it.isNotBlank() }
                 ?: pending.optString(i).takeIf { it.isNotBlank() && !it.startsWith("{") }
                 ?: continue
@@ -157,8 +168,8 @@ object NativeStatusCheckIn {
                 NativeCallOutboxDao.Reopen.UNKNOWN_CALL -> Unit
             }
         }
-        if (reopened > 0 || reported > 0) {
-            Log.i(TAG, "[PENDING_RECORDINGS] re-offered=$reopened reported_absent=$reported")
+        if (reopened > 0 || reported > 0 || requested > 0) {
+            Log.i(TAG, "[PENDING_RECORDINGS] re-offered=$reopened reported_absent=$reported requested=$requested")
         }
         if (reopened > 0) BackgroundScheduler.enqueueSync(context)
     }

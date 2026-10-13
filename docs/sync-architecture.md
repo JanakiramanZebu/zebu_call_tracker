@@ -89,6 +89,7 @@ Every trigger converges on `SyncCoordinator.runSync`, which holds an
 | App start, app resume | `MainActivity`, `HomeShell` | n/a |
 | Network restored | `ConnectivityManager` callback, and the `NetworkType.CONNECTED` constraint on the periodic sync job | yes (via the constraint) |
 | Manual "Sync now" | `triggerNativeSync` | n/a |
+| Admin "Request from phone" | FCM `UPLOAD_RECORDING`, or a `requested` item in `/sync/status` → `RequestedRecordingUploadWorker` (one recording, see *Requested recordings*) | yes |
 
 The periodic WorkManager pair is the floor that makes the guarantee true.
 `CallTrackingService` runs a faster loop on top of it, but it is an
@@ -238,6 +239,7 @@ Sync screens surface as "Blocked by server" — a person has to intervene.
 | `POST /sync/calls` | **`SyncCoordinator` only** | call metadata |
 | `POST /calls/{id}/recording` | **`SyncCoordinator` only** | audio, streamed |
 | `PATCH /calls/{id}` | `NativeStatusCheckIn` and Dart, during reconciliation | `has_recording: false` |
+| `POST /calls/{id}/recording-request/response` | `RequestedRecordingUploadWorker` only | `not_found` / `failed`, with a reason, for an admin request |
 
 ### Reconciliation
 
@@ -254,6 +256,32 @@ Runs before the coordinator drains, and is best-effort: a failure here must not
 block the upload run. It runs natively too, so a phone nobody opens still gets
 it. While the last word on the device is `BLOCKED`, the coordinator sends
 nothing until a check-in hears `ACTIVE`.
+
+### Requested recordings
+
+An administrator can press "Request from phone" on an answered SIM call whose
+audio the server lacks. The request arrives as an FCM `UPLOAD_RECORDING` push
+and, until it is resolved, as a `pending_recording_uploads` item with
+`requested: true`. Both sources (native check-in, the push service, and Dart's
+check-in via `enqueueRecordingRequests`) enqueue the same unique work,
+`zebu.recording-request.<call_id>` with KEEP, so repeats do not run twice.
+
+`RequestedRecordingUploadWorker`:
+
+1. finds the row by server id, else `external_call_id`, else `started_at`
+   ±2 min (and number, when known), never a WhatsApp row;
+2. links its recording with the ingestor's own matcher
+   (`NativeCallIngestor.linkRecordingFor`), reading only what the media
+   permission allows;
+3. uploads through `SyncCoordinator.uploadRequestedRecording`, which takes the
+   run lock, so this is still the coordinator's upload;
+4. otherwise answers `recording-request/response` with `not_found` or
+   `failed` and a short reason (no numbers, no names).
+
+Transient failures retry with WorkManager backoff; after five real attempts
+the request is answered `failed`. A fatal code stops the job without retrying.
+Requested items are never reopened or PATCHed by reconciliation. The decision
+table is `RequestedRecordingDecision`.
 
 ### Uploads are fire-and-forget
 
