@@ -168,7 +168,7 @@ void main() {
           rec(id: 11, durationMillis: 114100, addedSeconds: 1787890997),
         ],
       );
-      expect(result.isAssociable, isFalse);
+      expect(result.status, isNot(RecordingMatchStatus.matched));
     });
   });
 

@@ -82,7 +82,9 @@ Every trigger converges on `SyncCoordinator.runSync`, which holds an
 |---|---|---|
 | Call ends | `CallStateReceiver` → `BackgroundScheduler.enqueueNow` | yes |
 | Call ends, +10 s / +30 s | delayed `CallIngestWorker` | yes |
-| **Periodic, 15 min** | **`WorkManager` — ingest + sync jobs** | **yes** |
+| **Periodic, hourly** | **`WorkManager` safety net — ingest, then a `CONNECTED` sync if the outbox owes anything** | **yes** |
+| FCM `SYNC_REQUEST` push | `PushSyncWorker` (expedited) | yes, unless force-stopped |
+| Rate-limit window reopens | `BackgroundScheduler.enqueueSyncAt` | yes |
 | Boot / package replaced | `BootReceiver` | yes |
 | App start, app resume | `MainActivity`, `HomeShell` | n/a |
 | Network restored | `ConnectivityManager` callback, and the `NetworkType.CONNECTED` constraint on the periodic sync job | yes (via the constraint) |
@@ -205,7 +207,21 @@ status alone is not enough: a 403 is either `DEVICE_NOT_REGISTERED` (fix the
 precondition and the same record is accepted) or `DEVICE_REVOKED` (stop
 entirely). The coordinator therefore parses `error.code` out of the envelope and
 branches on it, falling back to the status only when the body is not an
-envelope. `Retry-After` on a 429 overrides the local backoff.
+envelope. `Retry-After` overrides the local backoff, which is
+`min(600, 2^n) × random(0.5, 1.5)` seconds and holds a row for the hourly
+safety net after 8 attempts. A `retryable: false` verdict is final: the row is
+marked with `attempt_count = 99` so neither the daily revival nor a late
+recording match wakes it.
+
+### Rate limits
+
+The server limits each user per minute: 120 `POST /sync/calls`, 60 recording
+uploads. `RateLimiter` paces at about 80% of that (96 and 48) with a sliding
+window per bucket, and waits in place for up to 20 s. Beyond that, or on a real
+429, the claimed row is handed back without counting an attempt, the server's
+`Retry-After` is stored per bucket, and the worker books the next run for when
+the window reopens (status `RATE_LIMITED`, not an error). Recordings still go
+strictly one at a time, with no fixed pause between them.
 
 `FATAL_CODES` stop the whole run and record `BLOCKED`, which the Settings and
 Sync screens surface as "Blocked by server" — a person has to intervene.
@@ -214,14 +230,14 @@ Sync screens surface as "Blocked by server" — a person has to intervene.
 
 | Endpoint | Caller | Purpose |
 |---|---|---|
-| `POST /auth/login`, `/mobile/register` | Dart `AuthRepository` | sign-in |
+| `POST /mobile/register` | Dart `AuthRepository` | pairing; the app has no sign-out and never calls `/auth/logout` |
 | `POST /auth/refresh` | Dart `ApiClient`, **and** `SyncCoordinator` natively | the coordinator refreshes without Flutter |
-| `POST /devices/register` | Dart `AuthController` | first sign-in |
-| `POST /devices/heartbeat` | Dart `SyncServiceNotifier` | queue depth, so a stalled handset is visible centrally |
-| `GET /sync/status` | Dart `SyncServiceNotifier` | **reconciliation** — see below |
+| `POST /devices/register` | Dart `SyncServiceNotifier`, and `NativeStatusCheckIn` | when the server says the device is unknown or INACTIVE |
+| `POST /devices/heartbeat` | `NativeHeartbeat` (Dart asks natively) | queue depth, so a stalled handset is visible centrally |
+| `GET /sync/status` | `NativeStatusCheckIn` before a run (every 30 min), and Dart while the app is open | **reconciliation** — see below |
 | `POST /sync/calls` | **`SyncCoordinator` only** | call metadata |
 | `POST /calls/{id}/recording` | **`SyncCoordinator` only** | audio, streamed |
-| `PATCH /calls/{id}` | Dart, during reconciliation | `has_recording: false` |
+| `PATCH /calls/{id}` | `NativeStatusCheckIn` and Dart, during reconciliation | `has_recording: false` |
 
 ### Reconciliation
 
@@ -235,7 +251,9 @@ For each entry the client either re-opens the upload (file still on the handset)
 or `PATCH`es `has_recording: false` (it isn't), so the server stops asking.
 
 Runs before the coordinator drains, and is best-effort: a failure here must not
-block the upload run.
+block the upload run. It runs natively too, so a phone nobody opens still gets
+it. While the last word on the device is `BLOCKED`, the coordinator sends
+nothing until a check-in hears `ACTIVE`.
 
 ### Uploads are fire-and-forget
 

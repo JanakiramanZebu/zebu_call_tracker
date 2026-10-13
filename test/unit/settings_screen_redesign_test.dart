@@ -56,27 +56,30 @@ void main() {
 
     // Profile card & Profile tile
     expect(find.text('John Doe'), findsNWidgets(2));
-    expect(find.text('ZE770 · IT'), findsOneWidget);
+    expect(find.text('Employee ZE770, IT'), findsOneWidget);
 
     // Grouped section headers
-    expect(find.text('ACCOUNT'), findsOneWidget);
-    expect(find.text('DEVICE'), findsOneWidget);
-    expect(find.text('TRACKING'), findsOneWidget);
-    expect(find.text('SYNC & UPLOAD'), findsOneWidget);
-    expect(find.text('DATA & STORAGE'), findsOneWidget);
-    expect(find.text('PERMISSIONS'), findsOneWidget);
-    expect(find.text('APPLICATION'), findsOneWidget);
-    expect(find.text('SYSTEM ACTIONS'), findsOneWidget);
+    for (final section in const [
+      'Appearance',
+      'Account',
+      'Tracking',
+      'Sync',
+      'Your data',
+      'Permissions',
+      'Application',
+      'Troubleshooting',
+    ]) {
+      expect(find.text(section), findsOneWidget, reason: section);
+    }
 
     // Key settings tiles
-    expect(find.text('Background Tracking'), findsOneWidget);
-    expect(find.text('Call Log Access'), findsOneWidget);
-    expect(find.text('Recording Ingestion'), findsOneWidget);
-    expect(find.text('Tracking Health'), findsOneWidget);
-    expect(find.text('Run Device Check'), findsOneWidget);
-    expect(find.text('Sync Status'), findsOneWidget);
-    expect(find.text('Pending Uploads'), findsOneWidget);
-    expect(find.text('Call Metadata Outbox'), findsOneWidget);
-    expect(find.text('Sign Out'), findsOneWidget);
+    expect(find.text('Background activity'), findsOneWidget);
+    expect(find.text('Check for new calls'), findsOneWidget);
+    // Recordings go over any network; the Wi-Fi-only switch is gone.
+    expect(find.text('Send recordings on mobile data'), findsNothing);
+    expect(find.text('Calls waiting to send'), findsOneWidget);
+    expect(find.text('2 calls'), findsOneWidget);
+    // No sign-out: a handset changes hands by being reset and paired again.
+    expect(find.textContaining('Sign out'), findsNothing);
   });
 }

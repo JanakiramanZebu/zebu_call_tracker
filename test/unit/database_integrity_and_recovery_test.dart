@@ -3,12 +3,18 @@ import 'dart:io';
 import 'package:drift/drift.dart' as drift;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:sqlite3/sqlite3.dart' as sql;
 import 'package:zebu_call_tracker/core/storage/app_database.dart';
 import 'package:zebu_call_tracker/core/storage/calls_dao.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  // The repair pass opens the file through sqflite, which on a device is
+  // Android's own SQLite. A desktop test run has no such plugin, so it gets
+  // the FFI implementation of the same API.
+  sqfliteFfiInit();
+  databaseFactory = databaseFactoryFfi;
 
   late AppDatabase db;
   late CallsDao dao;
@@ -43,7 +49,7 @@ void main() {
     test('Database creates tables and passes PRAGMA integrity_check', () async {
       // Insert a sample call
       final now = DateTime.now().toUtc();
-      await dao.insertOrUpdateCall(
+      await dao.insertCallIfAbsent(
         LocalCallsCompanion.insert(
           idempotencyKey: 'test-key-1',
           phoneNumber: '+919876543210',
@@ -75,7 +81,7 @@ void main() {
       for (int i = 0; i < 120; i++) {
         final key = 'bulk-key-$i';
         keys.add(key);
-        await dao.insertOrUpdateCall(
+        await dao.insertCallIfAbsent(
           LocalCallsCompanion.insert(
             idempotencyKey: key,
             phoneNumber: '+9198765432$i',
@@ -104,7 +110,7 @@ void main() {
       // 1. Insert test calls into database
       final now = DateTime.now().toUtc();
       for (int i = 0; i < 10; i++) {
-        await dao.insertOrUpdateCall(
+        await dao.insertCallIfAbsent(
           LocalCallsCompanion.insert(
             idempotencyKey: 'recovery-key-$i',
             phoneNumber: '+91900000000$i',

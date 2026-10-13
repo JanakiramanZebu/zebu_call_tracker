@@ -30,8 +30,6 @@ void main() {
           ),
           backgroundStatusProvider.overrideWith((ref) async => const BackgroundStatus(
             ignoringBatteryOptimizations: true,
-            manufacturer: 'Google',
-            hasVendorSettings: false,
             lastRunAtUtc: null,
             lastRunStatus: null,
             lastRunReason: null,
