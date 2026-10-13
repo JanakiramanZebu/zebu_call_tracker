@@ -178,11 +178,6 @@ class AskRow extends StatelessWidget {
                       : ZButton(
                           key: const ValueKey('ask'),
                           label: _opensSettings ? 'Settings' : 'Allow',
-                          // Solid fill only on the asks that block setup, so
-                          // the eye lands on what has to be done first.
-                          variant: ask.essential
-                              ? ZButtonVariant.primary
-                              : ZButtonVariant.secondary,
                           size: ZButtonSize.compact,
                           expand: false,
                           loading: busy,

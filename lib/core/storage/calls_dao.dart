@@ -479,13 +479,4 @@ class CallsDao extends DatabaseAccessor<AppDatabase> with _$CallsDaoMixin {
         [(t) => OrderingTerm(expression: t.startedAt, mode: OrderingMode.desc)]);
     return query.watch();
   }
-
-  Future<int> getUnsyncedCount() async {
-    final row = await customSelect(
-      'SELECT COUNT(*) AS n FROM local_calls WHERE sync_state <> ?;',
-      variables: [Variable<String>(CallSyncState.uploaded)],
-      readsFrom: {_table},
-    ).getSingle();
-    return row.read<int>('n');
-  }
 }

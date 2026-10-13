@@ -40,8 +40,6 @@ class PermissionAsk {
     this.permission,
     this.kind = AskKind.runtime,
     this.essential = false,
-    this.recommended = false,
-    this.costIfSkipped,
     this.howTo,
   });
 
@@ -62,25 +60,10 @@ class PermissionAsk {
 
   final AskKind kind;
 
-  /// Essential permissions block tracking entirely when denied; the rest only
-  /// reduce detail.
-  ///
-  /// Only mark an ask essential when the app genuinely cannot do its job
-  /// without it. Everything essential gates the onboarding button, and
-  /// several of these asks are settings-page grants the app cannot force —
-  /// marking those essential (as an earlier revision marked them all) means a
-  /// user who declines one can never leave the walkthrough.
+  /// Gates the onboarding button until granted. Every ask is essential: a
+  /// settings-page grant the OS refuses keeps the user in the walkthrough
+  /// until they set it by hand.
   final bool essential;
-
-  /// Strongly recommended: presented as such rather than as a casual
-  /// "Optional", but never gating entry. For an ask whose loss is the call
-  /// itself arriving late, and which the app cannot verify (so cannot
-  /// demand).
-  final bool recommended;
-
-  /// What the user loses by skipping this. Shown on optional asks so "Optional"
-  /// is an informed choice rather than a shrug.
-  final String? costIfSkipped;
 
   /// What to do on the screen the button opens, when that is not obvious.
   /// Shown only until the ask is granted.
@@ -198,14 +181,6 @@ extension PermissionAskList on List<PermissionAsk> {
 
   Iterable<PermissionAsk> get missingEssential =>
       missing.where((a) => a.essential);
-
-  Iterable<PermissionAsk> get missingOptional =>
-      missing.where((a) => !a.essential);
-
-  /// Missing asks that are strongly recommended. A subset of
-  /// [missingOptional]: they never gate [canProceed].
-  Iterable<PermissionAsk> get missingRecommended =>
-      missing.where((a) => a.recommended && !a.essential);
 
   int get grantedCount => where((a) => a.granted).length;
 

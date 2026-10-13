@@ -342,12 +342,6 @@ object BackgroundScheduler {
         legacyRetired = true
     }
 
-    /** Called on sign-out: nothing should be captured for a signed-out handset. */
-    fun cancelAll(context: Context) {
-        WorkManager.getInstance(context).cancelAllWorkByTag(TAG_INGEST)
-        WorkManager.getInstance(context).cancelAllWorkByTag(TAG_SYNC)
-    }
-
     const val TAG_INGEST = "zebu.ingest"
     const val TAG_SYNC = "zebu.sync"
 }

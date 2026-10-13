@@ -1453,49 +1453,6 @@ void showToast(
     );
 }
 
-/// A two-button confirmation dialog. Resolves true only on [confirmLabel].
-Future<bool> showConfirmDialog(
-  BuildContext context, {
-  required String title,
-  required String message,
-  required String confirmLabel,
-  String cancelLabel = 'Cancel',
-  bool destructive = false,
-}) async {
-  final result = await showDialog<bool>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      title: Text(title),
-      content: Text(message),
-      actionsPadding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
-      actions: [
-        Row(
-          children: [
-            Expanded(
-              child: ZButton(
-                label: cancelLabel,
-                variant: ZButtonVariant.secondary,
-                onPressed: () => Navigator.of(ctx).pop(false),
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: ZButton(
-                label: confirmLabel,
-                variant: destructive
-                    ? ZButtonVariant.destructive
-                    : ZButtonVariant.primary,
-                onPressed: () => Navigator.of(ctx).pop(true),
-              ),
-            ),
-          ],
-        ),
-      ],
-    ),
-  );
-  return result ?? false;
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Call rows
 // ─────────────────────────────────────────────────────────────────────────────
