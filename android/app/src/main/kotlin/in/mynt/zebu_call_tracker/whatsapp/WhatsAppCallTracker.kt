@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.ContactsContract
 import android.service.notification.StatusBarNotification
 import android.util.Log
@@ -14,6 +15,7 @@ import androidx.core.content.ContextCompat
 import `in`.mynt.zebu_call_tracker.background.BackgroundScheduler
 import `in`.mynt.zebu_call_tracker.background.NativeCallOutboxDao
 import `in`.mynt.zebu_call_tracker.call.CallWireFormat
+import `in`.mynt.zebu_call_tracker.call.RingTimeline
 import `in`.mynt.zebu_call_tracker.platform.NativeBridge
 import org.json.JSONObject
 import java.security.MessageDigest
@@ -82,8 +84,18 @@ object WhatsAppCallTracker {
         val incoming: Boolean,
         val startedAtMillis: Long,
     ) {
+        /** T0: the ring, or the dial for a call this phone placed. */
+        val startEdge: RingTimeline.Edge = edgeAt(startedAtMillis)
         val notificationKeys = mutableSetOf<String>()
         var answeredAtMillis: Long? = null
+            set(value) {
+                field = value
+                answeredEdge = value?.let { edgeAt(it) }
+            }
+
+        /** T1, once [answeredAtMillis] is known. */
+        var answeredEdge: RingTimeline.Edge? = null
+            private set
         var video = false
         var pendingEnd: Runnable? = null
 
@@ -144,8 +156,11 @@ object WhatsAppCallTracker {
                     incoming = true,
                     startedAtMillis = at,
                     answeredAtMillis = null,
-                    endedAtMillis = at,
+                    // Only one edge was seen: no end, no ring. Sending
+                    // ended_at = started_at here told the server it rang 0 s.
+                    endedAtMillis = null,
                     video = video,
+                    edges = null,
                 )
             }
 
@@ -159,7 +174,8 @@ object WhatsAppCallTracker {
         if (call.notificationKeys.isNotEmpty()) return
 
         val endedAt = System.currentTimeMillis()
-        val finish = Runnable { finish(context, call, endedAt) }
+        val idleEdge = edgeAt(endedAt)
+        val finish = Runnable { finish(context, call, idleEdge) }
         call.pendingEnd = finish
         main.postDelayed(finish, END_GRACE_MS)
     }
@@ -169,7 +185,7 @@ object WhatsAppCallTracker {
         call.pendingEnd = null
     }
 
-    private fun finish(context: Context, call: ActiveCall, endedAtMillis: Long) {
+    private fun finish(context: Context, call: ActiveCall, idleEdge: RingTimeline.Edge) {
         val key = "${call.app}|${call.peer}"
         if (active[key] !== call || call.notificationKeys.isNotEmpty()) return
         active.remove(key)
@@ -184,10 +200,30 @@ object WhatsAppCallTracker {
             incoming = call.incoming,
             startedAtMillis = call.startedAtMillis,
             answeredAtMillis = call.answeredAtMillis,
-            endedAtMillis = endedAtMillis,
+            endedAtMillis = idleEdge.wallMillis,
             video = call.video,
+            edges = RingTimeline.Edges(
+                start = call.startEdge,
+                // Only an incoming pickup is an edge of its own; an outgoing
+                // answer is reconstructed from the duration, as for SIM calls.
+                answered = if (call.incoming) call.answeredEdge else null,
+                idle = idleEdge,
+            ),
         )
     }
+
+    /**
+     * An edge at [wallMillis], placed on the monotonic clock by its distance
+     * from now. Every edge of a call is taken inside this one process, so they
+     * all belong to the same boot; [IN_PROCESS_BOOT] says exactly that.
+     */
+    private fun edgeAt(wallMillis: Long): RingTimeline.Edge = RingTimeline.Edge(
+        wallMillis = wallMillis,
+        elapsedMillis = SystemClock.elapsedRealtime() - (System.currentTimeMillis() - wallMillis),
+        bootCount = IN_PROCESS_BOOT,
+    )
+
+    private const val IN_PROCESS_BOOT = 0
 
     private fun save(
         context: Context,
@@ -196,12 +232,16 @@ object WhatsAppCallTracker {
         incoming: Boolean,
         startedAtMillis: Long,
         answeredAtMillis: Long?,
-        endedAtMillis: Long,
+        endedAtMillis: Long?,
         video: Boolean,
+        edges: RingTimeline.Edges?,
     ) {
         val answered = answeredAtMillis != null
-        val duration =
-            if (answered) ((endedAtMillis - answeredAtMillis!!) / 1000L).coerceAtLeast(0).toInt() else 0
+        val duration = if (answered && endedAtMillis != null) {
+            ((endedAtMillis - answeredAtMillis!!) / 1000L).coerceAtLeast(0).toInt()
+        } else {
+            0
+        }
 
         // Stored in the server's vocabulary; the uploader maps it again with
         // CallWireFormat.outcomeFor, which agrees with these.
@@ -212,6 +252,12 @@ object WhatsAppCallTracker {
             else -> CallWireFormat.Status.CANCELLED
         }
 
+        // The same table as a SIM call. Where it cannot measure, the times the
+        // listener saw are still sent as before; only the ring is withheld.
+        val ring = RingTimeline.compute(edges, direction, duration)
+        val answeredAt = ring.answeredAtMillis ?: answeredAtMillis
+        val endedAt = ring.endedAtMillis ?: endedAtMillis
+
         io.execute {
             try {
                 val number = numberFor(context, peer)
@@ -220,6 +266,7 @@ object WhatsAppCallTracker {
                     .put("channel", "whatsapp")
                     .put("app", if (app == WhatsAppCallListener.WHATSAPP_BUSINESS) "whatsapp_business" else "whatsapp")
                     .put("media", if (video) "video" else "voice")
+                    .put("timing", JSONObject().put("ring_source", ring.ringSource))
                     .toString()
 
                 val inserted = NativeCallOutboxDao.insertExternalCall(
@@ -232,10 +279,11 @@ object WhatsAppCallTracker {
                         direction = direction,
                         status = status,
                         startedAtMillis = startedAtMillis,
-                        answeredAtMillis = answeredAtMillis,
-                        endedAtMillis = endedAtMillis,
+                        answeredAtMillis = answeredAt,
+                        endedAtMillis = endedAt,
                         durationSeconds = duration,
                         metadataJson = metadata,
+                        ringDurationSeconds = ring.ringDurationSeconds,
                     ),
                 )
                 if (inserted) {

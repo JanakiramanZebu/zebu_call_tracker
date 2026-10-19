@@ -51,6 +51,13 @@ data class CallRecord(
      * `client_created_at`. Null only if the column could not be read.
      */
     val clientCreatedAtMillis: Long? = null,
+    /**
+     * Seconds the call rang before it was answered, or before it stopped
+     * ringing for one that never connected. Measured from the call-state
+     * journal only ([in.mynt.zebu_call_tracker.call.RingTimeline]); null when
+     * nothing measured it.
+     */
+    val ringDurationSeconds: Int? = null,
 )
 
 /**
@@ -234,6 +241,7 @@ class ZebuDatabaseHelper private constructor(context: Context, dbPath: String) :
          */
         private val ADDITIVE_COLUMNS = listOf(
             "metadata_json" to "metadata_json TEXT",
+            "ring_duration_seconds" to "ring_duration_seconds INTEGER",
         )
 
         /** Keep the names in step with `lib/core/storage/app_database.dart`. */
@@ -532,7 +540,7 @@ object NativeCallOutboxDao {
                            contact_name, direction, status, started_at, duration_seconds,
                            has_recording, recording_path, recording_media_store_id, recording_checksum,
                            recording_upload_status, sim_slot, attempt_count, sync_state,
-                           answered_at, ended_at, metadata_json, client_created_at
+                           answered_at, ended_at, metadata_json, client_created_at, ring_duration_seconds
                     FROM $TABLE_LOCAL_CALLS
                     WHERE server_call_id IS NULL
                       AND (sync_state = '${SyncStates.WAITING}'
@@ -613,6 +621,7 @@ object NativeCallOutboxDao {
             simSlot = if (isNull(15)) null else getInt(15),
             attemptCount = getInt(16),
             clientCreatedAtMillis = if (isNull(21)) null else toMillis(getLong(21)),
+            ringDurationSeconds = if (isNull(22)) null else getInt(22),
         )
     }
 
@@ -768,7 +777,7 @@ object NativeCallOutboxDao {
                        contact_name, direction, status, started_at, duration_seconds,
                        has_recording, recording_path, recording_media_store_id, recording_checksum,
                        recording_upload_status, sim_slot, attempt_count, sync_state,
-                       answered_at, ended_at, metadata_json, client_created_at
+                       answered_at, ended_at, metadata_json, client_created_at, ring_duration_seconds
                 FROM $TABLE_LOCAL_CALLS
                 WHERE $where
                 ORDER BY started_at DESC
@@ -1001,7 +1010,7 @@ object NativeCallOutboxDao {
                contact_name, direction, status, started_at, duration_seconds,
                has_recording, recording_path, recording_media_store_id, recording_checksum,
                recording_upload_status, sim_slot, attempt_count, sync_state,
-               answered_at, ended_at, metadata_json, client_created_at
+               answered_at, ended_at, metadata_json, client_created_at, ring_duration_seconds
         FROM $TABLE_LOCAL_CALLS
     """.trimIndent()
 
@@ -1195,6 +1204,7 @@ object NativeCallOutboxDao {
         val endedAtMillis: Long?,
         val durationSeconds: Int,
         val metadataJson: String?,
+        val ringDurationSeconds: Int? = null,
     )
 
     /**
@@ -1215,6 +1225,7 @@ object NativeCallOutboxDao {
             put("started_at", call.startedAtMillis / 1000L)
             call.answeredAtMillis?.let { put("answered_at", it / 1000L) }
             call.endedAtMillis?.let { put("ended_at", it / 1000L) }
+            call.ringDurationSeconds?.let { put("ring_duration_seconds", it) }
             call.metadataJson?.let { put("metadata_json", it) }
             put("duration_seconds", call.durationSeconds)
             put("has_recording", 0)
@@ -1308,6 +1319,9 @@ object NativeCallOutboxDao {
                     val endedAtMillis = (matchInfo?.get("endedAtMillis") as? Number)?.toLong()
                     if (answeredAtMillis != null) put("answered_at", answeredAtMillis / 1000L)
                     if (endedAtMillis != null) put("ended_at", endedAtMillis / 1000L)
+                    (matchInfo?.get("ringDurationSeconds") as? Number)?.let {
+                        put("ring_duration_seconds", it.toInt())
+                    }
                     (matchInfo?.get("metadataJson") as? String)?.let {
                         put("metadata_json", it)
                     }
@@ -1570,6 +1584,155 @@ object NativeCallOutboxDao {
         } catch (e: Exception) {
             Log.e(TAG, "Error updating recording match: ${e.message}")
             false
+        }
+    }
+
+    /** A captured call that has no ring time yet; see [ringFillCandidates]. */
+    data class RingFillCandidate(
+        val idempotencyKey: String,
+        val startedAtMillis: Long,
+        val durationSeconds: Int,
+        val direction: String,
+        val metadataJson: String?,
+    )
+
+    /**
+     * Call-log rows started at or after [sinceMillis] that have no ring time.
+     *
+     * WhatsApp rows are left out: their edges come from the notification
+     * listener at capture and are never in the phone-state journal. A row
+     * being uploaded right now is left for the next pass, so the fill never
+     * races the request that is carrying the row's old values.
+     */
+    fun ringFillCandidates(context: Context, sinceMillis: Long): List<RingFillCandidate> = synchronized(dbLock) {
+        val db = getReadableDb(context) ?: return emptyList()
+        val out = mutableListOf<RingFillCandidate>()
+        return try {
+            db.rawQuery(
+                """
+                SELECT idempotency_key, started_at, duration_seconds, direction, metadata_json
+                FROM $TABLE_LOCAL_CALLS
+                WHERE ring_duration_seconds IS NULL
+                  AND $STARTED_AT_SECONDS_SQL >= ?
+                  AND (external_call_id IS NULL OR external_call_id NOT LIKE '$EXTERNAL_WHATSAPP_PREFIX%')
+                  AND sync_state <> '${SyncStates.UPLOADING}'
+                ORDER BY started_at DESC
+                LIMIT $RING_FILL_LIMIT
+                """.trimIndent(),
+                arrayOf((sinceMillis / 1000L).toString()),
+            ).use { c ->
+                while (c.moveToNext()) {
+                    out += RingFillCandidate(
+                        idempotencyKey = c.getString(0),
+                        startedAtMillis = toMillis(c.getLong(1)),
+                        durationSeconds = c.getInt(2),
+                        direction = if (c.isNull(3)) CallWireFormat.Direction.UNKNOWN else c.getString(3),
+                        metadataJson = if (c.isNull(4)) null else c.getString(4),
+                    )
+                }
+            }
+            out
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not read calls awaiting a ring time: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /** More than a journal's worth of calls; the journal holds 200 transitions. */
+    private const val RING_FILL_LIMIT = 200
+
+    /** What [applyRingFill] did. */
+    enum class RingFill {
+        /** Nothing changed: the row is gone, already has a ring, or is mid-upload. */
+        SKIPPED,
+
+        /** Stored locally; the row had not reached the server, so its next post carries it. */
+        STORED,
+
+        /** Stored, and the row was queued to be posted again under its own key. */
+        REQUEUED,
+    }
+
+    /**
+     * Stores a ring time found after the row was written, and the end and
+     * answer times that came with it where the row had none.
+     *
+     * A row the server already holds ([server_call_id] set) is sent again:
+     * the id is dropped and the row parked as RETRY_PENDING, due now, so the
+     * batch pass claims it and re-posts it under the SAME idempotency key.
+     * The server merges `ended_at` and `ring_duration_seconds` into the call it
+     * has and returns the same id, which [markUploaded] stores back. Nothing
+     * about the recording is touched: one already uploaded stays uploaded, and
+     * one still owed is sent after the metadata as usual.
+     *
+     * One transaction, guarded on `ring_duration_seconds IS NULL` and not
+     * UPLOADING, under [dbLock] like every claim, so it cannot interleave with
+     * a claim of the same row.
+     */
+    fun applyRingFill(
+        context: Context,
+        idempotencyKey: String,
+        ringDurationSeconds: Int,
+        answeredAtMillis: Long?,
+        endedAtMillis: Long?,
+        metadataJson: String?,
+    ): RingFill = synchronized(dbLock) {
+        val db = getWritableDb(context) ?: return RingFill.SKIPPED
+        db.beginTransaction()
+        return try {
+            val state = db.rawQuery(
+                "SELECT sync_state, server_call_id FROM $TABLE_LOCAL_CALLS " +
+                    "WHERE idempotency_key = ? AND ring_duration_seconds IS NULL",
+                arrayOf(idempotencyKey),
+            ).use { c -> if (c.moveToFirst()) c.getString(0) to !c.isNull(1) else null }
+            val (syncState, onServer) = state ?: return RingFill.SKIPPED
+            // Mid-upload, or held by the server but parked on a recording
+            // retry whose backoff must not be cut short: left for a later
+            // pass. Storing the ring now would leave the server without it,
+            // because only a row with no ring is ever filled.
+            if (syncState == SyncStates.UPLOADING) return RingFill.SKIPPED
+            if (onServer && syncState != SyncStates.UPLOADED) return RingFill.SKIPPED
+
+            val cv = ContentValues().apply {
+                put("ring_duration_seconds", ringDurationSeconds)
+                if (metadataJson != null) put("metadata_json", metadataJson)
+            }
+            db.update(TABLE_LOCAL_CALLS, cv, "idempotency_key = ?", arrayOf(idempotencyKey))
+            // Gaps only, as in updateRecordingMatch: a value already stored
+            // came from a source at least as good.
+            if (answeredAtMillis != null) {
+                db.execSQL(
+                    "UPDATE $TABLE_LOCAL_CALLS SET answered_at = ? " +
+                        "WHERE idempotency_key = ? AND answered_at IS NULL",
+                    arrayOf(answeredAtMillis / 1000L, idempotencyKey),
+                )
+            }
+            if (endedAtMillis != null) {
+                db.execSQL(
+                    "UPDATE $TABLE_LOCAL_CALLS SET ended_at = ? " +
+                        "WHERE idempotency_key = ? AND ended_at IS NULL",
+                    arrayOf(endedAtMillis / 1000L, idempotencyKey),
+                )
+            }
+            if (onServer) {
+                db.update(
+                    TABLE_LOCAL_CALLS,
+                    ContentValues().apply {
+                        putNull("server_call_id")
+                        put("sync_state", SyncStates.RETRY_PENDING)
+                        put("next_attempt_at", System.currentTimeMillis() / 1000L)
+                    },
+                    "idempotency_key = ?",
+                    arrayOf(idempotencyKey),
+                )
+            }
+            db.setTransactionSuccessful()
+            if (onServer) RingFill.REQUEUED else RingFill.STORED
+        } catch (e: Exception) {
+            Log.e(TAG, "Error storing a late ring time: ${e.message}")
+            RingFill.SKIPPED
+        } finally {
+            db.endTransaction()
         }
     }
 

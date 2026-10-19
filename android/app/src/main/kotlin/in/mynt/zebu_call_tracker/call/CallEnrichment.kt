@@ -51,6 +51,9 @@ object CallEnrichment {
         val endedAtMillis: Long?,
         val answeredAtSource: String?,
         val endedAtSource: String?,
+        /** Only ever measured from the journal; see [RingTimeline]. */
+        val ringDurationSeconds: Int? = null,
+        val ringSource: String = RingTimeline.Source.UNAVAILABLE,
     )
 
     /**
@@ -73,37 +76,32 @@ object CallEnrichment {
      *
      * The ladder, strongest first:
      *
-     *  1. **Journal.** `OFFHOOK` is the pickup — but only for an INCOMING call.
-     *     An outgoing call has no ringing state: OFFHOOK fires when dialling
-     *     starts, and the remote party answering produces no broadcast at all.
-     *     `ACTION_PHONE_STATE_CHANGED` cannot report an outgoing answer, so
-     *     using OFFHOOK there would report dial time as talk time and inflate
-     *     every outgoing call by its ring. `IDLE` is the hangup in both
-     *     directions and is used for both.
+     *  1. **Journal**, through [RingTimeline]. Incoming: `OFFHOOK` is the
+     *     pickup. Outgoing: OFFHOOK is only when dialling started — the remote
+     *     party answering produces no broadcast — so the answer is the hang-up
+     *     minus DURATION. `IDLE` is the end in both directions, missed,
+     *     rejected and cancelled calls included. Ring time comes from here and
+     *     nowhere else.
      *  2. **Recording.** DATE_ADDED / DATE_MODIFIED, where [isOpenStamped]
      *     confirms the device means what we think by them.
      *  3. **Derived.** `answered + duration` for the end, once the answer is
      *     known from either source above.
-     *  4. **Null.** Backfill, missed calls, and anything the receiver was not
-     *     alive for.
+     *  4. **Null.** Backfill, and anything the receiver was not alive for.
      */
     fun resolveTimes(
-        direction: String,
         durationSeconds: Int,
-        window: CallStateJournal.CallWindow?,
+        ring: RingTimeline.Result,
         recording: NativeRecordingCandidate?,
     ): Times {
-        val isIncoming = direction.trim().lowercase() == CallWireFormat.Direction.INCOMING
         val openStamped = recording != null && isOpenStamped(recording)
 
         var answeredAt: Long? = null
         var answeredSource: String? = null
 
-        val offHook = window?.offHookAtMillis
-        if (isIncoming && offHook != null) {
-            answeredAt = offHook
-            answeredSource = Source.JOURNAL
-        } else if (openStamped) {
+        if (ring.answeredAtMillis != null) {
+            answeredAt = ring.answeredAtMillis
+            answeredSource = ring.answeredAtSource
+        } else if (openStamped && durationSeconds > 0) {
             answeredAt = recording!!.dateAddedEpochSeconds * 1000L
             answeredSource = Source.RECORDING
         }
@@ -111,10 +109,9 @@ object CallEnrichment {
         var endedAt: Long? = null
         var endedSource: String? = null
 
-        val idle = window?.idleAtMillis
-        if (idle != null) {
-            endedAt = idle
-            endedSource = Source.JOURNAL
+        if (ring.endedAtMillis != null) {
+            endedAt = ring.endedAtMillis
+            endedSource = ring.endedAtSource
         } else if (openStamped) {
             endedAt = recording!!.dateModifiedEpochSeconds * 1000L
             endedSource = Source.RECORDING
@@ -128,7 +125,39 @@ object CallEnrichment {
             endedAtMillis = endedAt,
             answeredAtSource = answeredSource,
             endedAtSource = endedSource,
+            ringDurationSeconds = ring.ringDurationSeconds,
+            ringSource = ring.ringSource,
         )
+    }
+
+    /** The timing sources, `ring_source` always present. */
+    private fun timingObject(times: Times): JSONObject = JSONObject().apply {
+        putIfPresent(this, "answered_at_source", times.answeredAtSource)
+        putIfPresent(this, "ended_at_source", times.endedAtSource)
+        put("ring_source", times.ringSource)
+    }
+
+    /**
+     * Folds a ring time found after the row was written into its metadata:
+     * `timing` takes the new sources, everything else is kept. Null when
+     * [existingJson] cannot be parsed, so the caller leaves it alone.
+     */
+    fun mergeRingTiming(existingJson: String?, times: Times): String? {
+        val json = if (existingJson.isNullOrBlank()) {
+            JSONObject()
+        } else {
+            try {
+                JSONObject(existingJson)
+            } catch (e: Exception) {
+                return null
+            }
+        }
+        val timing = json.optJSONObject("timing") ?: JSONObject()
+        val fresh = timingObject(times)
+        for (key in fresh.keys()) timing.put(key, fresh.get(key))
+        json.put("timing", timing)
+        val encoded = json.toString()
+        return if (encoded.toByteArray(Charsets.UTF_8).size <= MAX_METADATA_BYTES) encoded else null
     }
 
     /**
@@ -182,10 +211,7 @@ object CallEnrichment {
         // How much of the timing above is measured and how much is inferred.
         // Without this the server cannot tell a journal-accurate answer time
         // from one reconstructed off a file timestamp.
-        val timing = JSONObject()
-        putIfPresent(timing, "answered_at_source", times.answeredAtSource)
-        putIfPresent(timing, "ended_at_source", times.endedAtSource)
-        if (timing.length() > 0) json.put("timing", timing)
+        json.put("timing", timingObject(times))
 
         if (recording != null) {
             json.put("recording", recordingObject(recording, signals, confidence))
@@ -236,10 +262,13 @@ object CallEnrichment {
             }
         }
 
-        val timing = JSONObject()
-        putIfPresent(timing, "answered_at_source", times.answeredAtSource)
-        putIfPresent(timing, "ended_at_source", times.endedAtSource)
-        if (timing.length() > 0) json.put("timing", timing)
+        // A ring measured earlier stays measured: the row's ring column is
+        // never cleared, so its source must not flip to unavailable just
+        // because the journal has since rotated those edges out.
+        val previousRing = json.optJSONObject("timing")?.optString("ring_source")
+        val timing = timingObject(times)
+        if (previousRing == RingTimeline.Source.JOURNAL) timing.put("ring_source", previousRing)
+        json.put("timing", timing)
 
         json.put("recording", recordingObject(recording, signals, confidence))
 

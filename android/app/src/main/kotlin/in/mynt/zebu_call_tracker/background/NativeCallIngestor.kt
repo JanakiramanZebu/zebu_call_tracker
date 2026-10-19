@@ -8,6 +8,7 @@ import `in`.mynt.zebu_call_tracker.call.CallLogReader
 import `in`.mynt.zebu_call_tracker.call.CallStateJournal
 import `in`.mynt.zebu_call_tracker.call.CallWireFormat
 import `in`.mynt.zebu_call_tracker.call.ContactResolver
+import `in`.mynt.zebu_call_tracker.call.RingTimeline
 import `in`.mynt.zebu_call_tracker.permissions.PermissionInspector
 import `in`.mynt.zebu_call_tracker.recording.AnsweredTimeMatcher
 import `in`.mynt.zebu_call_tracker.recording.NativeCallForMatching
@@ -251,6 +252,11 @@ object NativeCallIngestor {
                 incremental(context, journal, appBuild, cursorMillis, reason)
             }
 
+            // After the capture. A row this pass just wrote without a ring
+            // comes back here and gets the same answer from the same journal,
+            // so it is skipped; the work is for rows written earlier.
+            if (fillRingTimes(context, journal) > 0) BackgroundScheduler.enqueueSync(context)
+
             requestSyncFor(context, changed)
             IngestStore.recordRun(context, STATUS_OK, reason, capturedCalls = changed.captured)
             true
@@ -313,7 +319,7 @@ object NativeCallIngestor {
      */
     private fun backfill(
         context: Context,
-        journal: List<Pair<String, Long>>,
+        journal: List<CallStateJournal.JournalEntry>,
         appBuild: Int?,
         restart: Boolean,
     ): PassResult {
@@ -381,7 +387,7 @@ object NativeCallIngestor {
      */
     private fun incremental(
         context: Context,
-        journal: List<Pair<String, Long>>,
+        journal: List<CallStateJournal.JournalEntry>,
         appBuild: Int?,
         cursorMillis: Long,
         reason: String,
@@ -453,7 +459,7 @@ object NativeCallIngestor {
     private fun capturePage(
         context: Context,
         calls: List<Map<String, Any?>>,
-        journal: List<Pair<String, Long>>,
+        journal: List<CallStateJournal.JournalEntry>,
         appBuild: Int?,
         recordingLimit: Int,
     ): PassResult {
@@ -511,8 +517,9 @@ object NativeCallIngestor {
             // A call that never connected has no answer time and no
             // recording, but its metadata is still worth carrying —
             // block reason and presentation are most interesting
-            // exactly when a call did not happen.
-            val window = CallStateJournal.windowFor(journal, dateMillis, duration)
+            // exactly when a call did not happen. It does have a ring
+            // and an end, which is what the journal is asked for here.
+            val ring = ringFor(journal, dateMillis, duration, direction)
 
             var matched: NativeRecordingCandidate? = null
             var signals: NativeMatchSignals? = null
@@ -528,12 +535,7 @@ object NativeCallIngestor {
                     // Anchor on the journal's pickup where there is one.
                     // Resolved without a recording first, precisely
                     // because it is what decides WHICH recording.
-                    answeredAtEpochMillis = CallEnrichment.resolveTimes(
-                        direction = direction,
-                        durationSeconds = duration,
-                        window = window,
-                        recording = null,
-                    ).answeredAtMillis,
+                    answeredAtEpochMillis = matchAnchor(ring),
                 )
 
                 val result = NativeRecordingMatcher.match(matchObj, candidates)
@@ -564,9 +566,8 @@ object NativeCallIngestor {
             // Re-resolved WITH the matched recording, which can supply
             // the answer and end times the journal could not.
             val times = CallEnrichment.resolveTimes(
-                direction = direction,
                 durationSeconds = duration,
-                window = window,
+                ring = ring,
                 recording = matched,
             )
 
@@ -576,6 +577,7 @@ object NativeCallIngestor {
                 "contactName" to contactName,
                 "answeredAtMillis" to times.answeredAtMillis,
                 "endedAtMillis" to times.endedAtMillis,
+                "ringDurationSeconds" to times.ringDurationSeconds,
                 "metadataJson" to CallEnrichment.buildMetadata(
                     row = call,
                     times = times,
@@ -610,7 +612,7 @@ object NativeCallIngestor {
      */
     private fun linkLateRecordings(
         context: Context,
-        journal: List<Pair<String, Long>>,
+        journal: List<CallStateJournal.JournalEntry>,
         unlinked: List<Map<String, Any?>>,
     ): Int {
         // One scan covering every waiting call, from the earliest start to the
@@ -648,7 +650,7 @@ object NativeCallIngestor {
      */
     private fun linkOne(
         context: Context,
-        journal: List<Pair<String, Long>>,
+        journal: List<CallStateJournal.JournalEntry>,
         row: Map<String, Any?>,
         candidates: List<NativeRecordingCandidate>,
     ): Boolean {
@@ -661,13 +663,8 @@ object NativeCallIngestor {
         // time, or resolvable now that the receiver has had
         // longer to see the transitions.
         val knownAnswered = (row["answeredAtMillis"] as? Number)?.toLong()
-        val window = CallStateJournal.windowFor(journal, dateMillis, duration)
-        val anchor = knownAnswered ?: CallEnrichment.resolveTimes(
-            direction = direction,
-            durationSeconds = duration,
-            window = window,
-            recording = null,
-        ).answeredAtMillis
+        val ring = ringFor(journal, dateMillis, duration, direction)
+        val anchor = knownAnswered ?: matchAnchor(ring)
 
         val matchObj = NativeCallForMatching(
             startedAtEpochMillis = dateMillis,
@@ -681,9 +678,8 @@ object NativeCallIngestor {
         if (!result.isMatched || result.candidate == null) return false
         val c = result.candidate
         val times = CallEnrichment.resolveTimes(
-            direction = direction,
             durationSeconds = duration,
-            window = window,
+            ring = ring,
             recording = c,
         )
 
@@ -710,6 +706,72 @@ object NativeCallIngestor {
         )
         Log.i(TAG, "[RECORDING_DISCOVERY] Retroactively matched recording ${c.mediaStoreId} to existing call $key")
         return updated
+    }
+
+    /** The journal's edges for one call, run through the outcome table. */
+    private fun ringFor(
+        journal: List<CallStateJournal.JournalEntry>,
+        startedAtMillis: Long,
+        durationSeconds: Int,
+        direction: String,
+    ): RingTimeline.Result = RingTimeline.compute(
+        edges = CallStateJournal.edgesFor(journal, startedAtMillis, durationSeconds),
+        direction = direction,
+        durationSeconds = durationSeconds,
+    )
+
+    /**
+     * The answer instant the recording matcher may anchor on: an incoming
+     * pickup the journal actually saw. An outgoing call's answer is
+     * reconstructed from DURATION, which the matcher already weighs on its
+     * own, so it is not offered as an anchor.
+     */
+    private fun matchAnchor(ring: RingTimeline.Result): Long? =
+        ring.answeredAtMillis?.takeIf { ring.answeredAtSource == CallEnrichment.Source.JOURNAL }
+
+    /**
+     * Gives a ring time to captured calls that have none yet, where the
+     * journal can now supply one.
+     *
+     * Almost every call gets its ring at capture: the receiver journals IDLE
+     * before it queues the ingest. This catches the rest — rows Dart ingested
+     * (it does not measure rings), and any row captured before its IDLE was
+     * recorded. Bounded by the oldest measurable journal entry, so it only
+     * ever looks at rows the journal could still answer for.
+     *
+     * A row the server already holds is re-posted under its own idempotency
+     * key ([NativeCallOutboxDao.applyRingFill]); the server merges the end and
+     * ring time into the existing call. Returns how many were re-queued.
+     */
+    private fun fillRingTimes(context: Context, journal: List<CallStateJournal.JournalEntry>): Int {
+        val since = CallStateJournal.oldestMeasurableMillis(journal) ?: return 0
+        val candidates = NativeCallOutboxDao.ringFillCandidates(
+            context,
+            sinceMillis = since - CallStateJournal.SEARCH_SKEW_MILLIS,
+        )
+        var requeued = 0
+        for (row in candidates) {
+            val ring = ringFor(journal, row.startedAtMillis, row.durationSeconds, row.direction)
+            if (!ring.isAvailable) continue
+            val times = CallEnrichment.resolveTimes(
+                durationSeconds = row.durationSeconds,
+                ring = ring,
+                recording = null,
+            )
+            val outcome = NativeCallOutboxDao.applyRingFill(
+                context,
+                idempotencyKey = row.idempotencyKey,
+                ringDurationSeconds = times.ringDurationSeconds ?: continue,
+                answeredAtMillis = times.answeredAtMillis,
+                endedAtMillis = times.endedAtMillis,
+                metadataJson = CallEnrichment.mergeRingTiming(row.metadataJson, times),
+            )
+            if (outcome == NativeCallOutboxDao.RingFill.REQUEUED) requeued++
+        }
+        if (requeued > 0) {
+            Log.i(TAG, "[RING_FILL] $requeued synced call(s) re-queued with a ring time.")
+        }
+        return requeued
     }
 
     /** What [linkRecordingFor] found for one call. */

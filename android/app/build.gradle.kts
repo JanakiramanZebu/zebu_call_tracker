@@ -83,6 +83,12 @@ android {
             )
         }
     }
+
+    // JVM unit tests (src/test). `Log` and other framework stubs return
+    // defaults instead of throwing, so pure logic that logs can run there.
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 flutter {
@@ -109,4 +115,9 @@ dependencies {
     // on top of the safety net and the heartbeat, never a replacement for them.
     implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
     implementation("com.google.firebase:firebase-messaging")
+
+    testImplementation("junit:junit:4.13.2")
+    // The real org.json: android.jar's copy is a stub that does nothing on the
+    // JVM, and the payload tests read back the JSON they build.
+    testImplementation("org.json:json:20240303")
 }
