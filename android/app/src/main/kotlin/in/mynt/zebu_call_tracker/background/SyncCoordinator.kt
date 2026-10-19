@@ -143,6 +143,8 @@ object SyncCoordinator {
     fun hasWorkToSend(context: Context): Boolean {
         val appContext = context.applicationContext
         if (NativeCallOutboxDao.hasClaimableWork(appContext)) return true
+        // One run, the first after the update, to re-offer written-off audio.
+        if (IngestStore.isAbsentRecordingRevivalDue(appContext)) return true
         return IngestStore.isFailureRevivalDue(appContext, REVIVAL_MAX_AGE_MILLIS) &&
             NativeCallOutboxDao.hasRevivableFailures(appContext, PERMANENT_RECORD_CODES)
     }
@@ -195,6 +197,12 @@ object SyncCoordinator {
             //    and come back on their own backoff regardless.
             if (IngestStore.consumeFailureRevival(appContext, REVIVAL_MAX_AGE_MILLIS)) {
                 NativeCallOutboxDao.reviveRetryableFailures(appContext, PERMANENT_RECORD_CODES)
+            }
+
+            // 3. Once per install: recordings an older build wrote off when the
+            //    live proxy's 1 MB limit 413'd them (see isRetryableFailure).
+            if (IngestStore.consumeAbsentRecordingRevival(appContext)) {
+                NativeCallOutboxDao.reviveAbsentRecordingsWithFile(appContext)
             }
 
             val rawBaseUrl = IngestStore.getApiBaseUrl(appContext)
@@ -1916,13 +1924,22 @@ object SyncCoordinator {
         }
     }
 
-    /** §10.1, expressed once. */
+    /**
+     * §10.1, expressed once.
+     *
+     * A failure with no `error.code` is retryable whatever its status. The API
+     * answers every error with the envelope, so a bare status came from
+     * something in front of it — and the live reverse proxy's stock 1 MB body
+     * limit answered every recording over a megabyte with an HTML 413. Read
+     * as a verdict on the file, that filed each one ABSENT for good; a proxy
+     * limit is a deployment fault, and the recording must still go up once it
+     * is fixed. The row's backoff bounds the cost meanwhile.
+     */
     private fun isRetryableFailure(statusCode: Int, errorCode: String?): Boolean {
-        if (errorCode != null) {
-            if (errorCode in FATAL_CODES) return false
-            if (errorCode in PERMANENT_RECORD_CODES) return false
-            if (errorCode in RECOVERABLE_CODES) return true
-        }
+        if (errorCode == null) return true
+        if (errorCode in FATAL_CODES) return false
+        if (errorCode in PERMANENT_RECORD_CODES) return false
+        if (errorCode in RECOVERABLE_CODES) return true
         return statusCode in 500..599 || statusCode == 408 || statusCode == 429
     }
 

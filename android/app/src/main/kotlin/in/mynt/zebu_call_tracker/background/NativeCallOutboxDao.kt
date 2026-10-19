@@ -508,6 +508,46 @@ object NativeCallOutboxDao {
     }
 
     /**
+     * Owes the server, once more, every recording given up on while its file
+     * is still referenced.
+     *
+     * The live reverse proxy refused every upload over 1 MB with an HTML 413,
+     * which the coordinator read as a verdict on the file and filed ABSENT,
+     * clearing `has_recording`. The reason did not survive either:
+     * `markUploaded` nulls `last_error_code` straight after. So those rows
+     * cannot be told apart from ones the server refused on the merits, and
+     * all of them get one more attempt. A file the API really refuses comes
+     * back with an envelope code and is filed ABSENT again; one deleted from
+     * the phone fails its open and does the same.
+     *
+     * Run once per install ([IngestStore.consumeAbsentRecordingRevival]),
+     * not on every open: repeated, it would re-send a refused file each run.
+     */
+    fun reviveAbsentRecordingsWithFile(context: Context): Int = synchronized(dbLock) {
+        val db = getWritableDb(context) ?: return 0
+        return try {
+            val cv = ContentValues().apply {
+                put("has_recording", 1)
+                put("recording_upload_status", RecordingStates.PENDING)
+                putNull("next_attempt_at")
+            }
+            val count = db.update(
+                TABLE_LOCAL_CALLS,
+                cv,
+                "recording_upload_status = ? AND server_call_id IS NOT NULL " +
+                    "AND (recording_media_store_id IS NOT NULL OR recording_path IS NOT NULL) " +
+                    "AND (external_call_id IS NULL OR external_call_id NOT LIKE '$EXTERNAL_WHATSAPP_PREFIX%')",
+                arrayOf(RecordingStates.ABSENT),
+            )
+            Log.i(TAG, "[ABSENT_RECORDING_REVIVAL] Re-offered $count recording(s) previously given up on")
+            count
+        } catch (e: Exception) {
+            Log.e(TAG, "Error reviving absent recordings: ${e.message}")
+            0
+        }
+    }
+
+    /**
      * Claims up to [limit] rows that still owe the server their METADATA.
      *
      * The batch counterpart to [claimNextWaitingCall]. `POST /sync/calls` takes
