@@ -79,3 +79,6 @@ android/app/google-services.json
 
 # Claude Code design-skill packs: local tooling, third-party content
 .claude/skills/
+
+# Distributable APKs copied out of build/ (68 MB each).
+/release/

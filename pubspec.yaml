@@ -65,6 +65,8 @@ flutter:
     # IBM Plex Sans's SIL OFL licence, registered with LicenseRegistry in
     # main.dart.
     - assets/fonts/LICENSE.txt
+    # Shorebird code push: the updater reads app_id from here at launch.
+    - shorebird.yaml
 
   # IBM Plex Sans is bundled rather than fetched at runtime: the app is used
   # on field networks, and a runtime fetch rendered the first launch in a
