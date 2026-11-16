@@ -35,6 +35,10 @@ object RecordingCapabilityProbe {
         "Recordings/Call",
         "Sounds/CallRecord",
         "Record/Call",
+        "Record/Phone",
+        "Recordings/Call Recordings",
+        "Music/Recordings/Call Recordings",
+        "Sound Recorder/Call Recordings",
         "PhoneRecord",
     )
 

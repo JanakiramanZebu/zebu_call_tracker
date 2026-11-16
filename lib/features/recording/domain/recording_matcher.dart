@@ -173,6 +173,7 @@ class MatchSignals {
     this.anchorScore,
     this.anchorDeltaSeconds,
     this.endStamped = false,
+    this.isInterrupted = false,
   });
 
   final double durationScore;
@@ -198,6 +199,7 @@ class MatchSignals {
   /// as `dateModified` minus the audio (stamped at close), false when it was
   /// `dateAdded` (stamped at open).
   final bool endStamped;
+  final bool isInterrupted;
 
   /// True when an answer time was known and the file lines up with it.
   bool get isAnchored => anchorScore != null && anchorScore! > 0;
@@ -482,9 +484,11 @@ class RecordingMatcher {
       signals: best.s,
       runnerUpConfidence: runnerUp,
       rankedCandidates: ranked,
-      reason: best.s.isAnchored
-          ? 'Recording started at the moment the call was answered.'
-          : 'Duration and timing both consistent.',
+      reason: best.s.isInterrupted
+          ? 'Interrupted call recording: captured ${best.c.durationSeconds.toInt()}s of ${call.durationSeconds}s.'
+          : best.s.isAnchored
+              ? 'Recording started at the moment the call was answered.'
+              : 'Duration and timing both consistent.',
     );
   }
 
@@ -540,7 +544,18 @@ class RecordingMatcher {
     final scale = _driftScale(call);
     final durationDelta = (candidate.durationSeconds - call.durationSeconds)
         .abs();
-    if (durationDelta > maxDurationDeltaSeconds * scale) return null;
+    final isInterrupted = candidate.durationSeconds <
+        call.durationSeconds - (maxDurationDeltaSeconds * scale);
+
+    if (isInterrupted) {
+      if (candidate.durationSeconds < 3.0) return null;
+      final hasNumberMatch = call.cachedNumberTail.isNotEmpty &&
+          candidate.normalizedDigits.contains(call.cachedNumberTail);
+      final hasAnchor = call.answeredAtEpochSeconds != null;
+      if (!hasNumberMatch && !hasAnchor) return null;
+    } else if (durationDelta > maxDurationDeltaSeconds * scale) {
+      return null;
+    }
 
     final lifetime = candidate.lifetimeSeconds;
     final lifetimeTolerance = maxLifetimeDeltaSeconds * scale;
@@ -552,12 +567,18 @@ class RecordingMatcher {
     final open = (candidate.dateModifiedEpochSeconds <= 0 ||
             lifetimeDelta <= lifetimeTolerance)
         ? _scoreAt(call, candidate, candidate.dateAddedEpochSeconds,
-            endStamped: false, durationDelta: durationDelta, scale: scale)
+            endStamped: false,
+            durationDelta: durationDelta,
+            scale: scale,
+            isInterrupted: isInterrupted)
         : null;
     final end = (lifetime <= maxEndStampLifetimeSeconds ||
             lifetime < candidate.durationSeconds - lifetimeTolerance)
         ? _scoreAt(call, candidate, candidate.endStampedStartEpochSeconds,
-            endStamped: true, durationDelta: durationDelta, scale: scale)
+            endStamped: true,
+            durationDelta: durationDelta,
+            scale: scale,
+            isInterrupted: isInterrupted)
         : null;
 
     if (open == null || end == null) return open ?? end;
@@ -573,9 +594,20 @@ class RecordingMatcher {
     required bool endStamped,
     required double durationDelta,
     required double scale,
+    required bool isInterrupted,
   }) {
     final ringGap = startedAtSeconds - call.startedAtEpochSeconds;
     if (ringGap < minRingGapSeconds || ringGap > maxRingGapSeconds) return null;
+
+    final callHangupSeconds = (call.answeredAtEpochSeconds ??
+            (call.startedAtEpochSeconds + ringGap)) +
+        call.durationSeconds;
+    final recordingEndSeconds =
+        startedAtSeconds + candidate.durationSeconds.round();
+    if (recordingEndSeconds >
+        callHangupSeconds + (maxDurationDeltaSeconds * scale).round()) {
+      return null;
+    }
 
     // Hard anchor gate. When the answer instant is known, a file that did not
     // start recording at that instant belongs to another call, however well
@@ -590,11 +622,17 @@ class RecordingMatcher {
       anchorScore = math.max(0.0, 1.0 - (delta / anchorToleranceSeconds));
     }
 
-    // Linear decay to zero at the tolerance edge.
-    final durationScore = math.max(
+    final double durationScore;
+    if (isInterrupted) {
+      final ratio = (candidate.durationSeconds / call.durationSeconds)
+          .clamp(0.0, 1.0);
+      durationScore = (0.45 + 0.35 * ratio).clamp(0.45, 0.80);
+    } else {
+      durationScore = math.max(
         0.0,
         1.0 - (durationDelta / (durationToleranceSeconds * scale)),
-    );
+      );
+    }
 
     // A gap of 0-20s is an ordinary ring and scores full marks; longer gaps are
     // possible but progressively less likely to be THIS call.
@@ -626,6 +664,7 @@ class RecordingMatcher {
       anchorDeltaSeconds: anchorDelta,
       identityMatched: identityMatched,
       endStamped: endStamped,
+      isInterrupted: isInterrupted,
     );
   }
 

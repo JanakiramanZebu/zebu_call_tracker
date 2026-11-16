@@ -152,7 +152,8 @@ abstract final class CallEnrichment {
     if (idle != null) {
       endedAt = idle;
       endedSource = TimingSource.journal;
-    } else if (openStamped) {
+    } else if (openStamped &&
+        (recording.durationSeconds - durationSeconds).abs() <= 5.0) {
       endedAt = recording.dateModifiedEpochSeconds * 1000;
       endedSource = TimingSource.recording;
     } else if (answeredAt != null) {
@@ -300,6 +301,9 @@ abstract final class CallEnrichment {
       rec['end_stamped'] = signals.endStamped;
       rec['identity_matched'] = signals.identityMatched;
       _put(rec, 'anchor_delta_seconds', signals.anchorDeltaSeconds);
+      if (signals.isInterrupted) {
+        rec['is_interrupted'] = true;
+      }
     }
     return rec;
   }

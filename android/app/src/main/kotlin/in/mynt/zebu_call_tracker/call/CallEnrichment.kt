@@ -112,7 +112,7 @@ object CallEnrichment {
         if (ring.endedAtMillis != null) {
             endedAt = ring.endedAtMillis
             endedSource = ring.endedAtSource
-        } else if (openStamped) {
+        } else if (openStamped && abs(recording!!.durationSeconds - durationSeconds) <= 5.0) {
             endedAt = recording!!.dateModifiedEpochSeconds * 1000L
             endedSource = Source.RECORDING
         } else if (answeredAt != null) {
@@ -305,6 +305,9 @@ object CallEnrichment {
             put("end_stamped", signals.endStamped)
             put("identity_matched", signals.identityMatched)
             putIfPresent(this, "anchor_delta_seconds", signals.anchorDeltaSeconds)
+            if (signals.isInterrupted) {
+                put("is_interrupted", true)
+            }
         }
     }
 

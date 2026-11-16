@@ -100,6 +100,7 @@ data class NativeMatchSignals(
      * DATE_ADDED (stamped at open).
      */
     val endStamped: Boolean = false,
+    val isInterrupted: Boolean = false,
 ) {
     /** True when an answer time was known and the file lines up with it. */
     val isAnchored: Boolean get() = anchorScore != null && anchorScore > 0.0
@@ -281,7 +282,9 @@ object NativeRecordingMatcher {
             isMatched = true,
             confidence = best.second,
             candidate = best.first,
-            reason = if (best.third.isAnchored) {
+            reason = if (best.third.isInterrupted) {
+                "Interrupted call recording: captured ${best.first.durationSeconds.toInt()}s of ${call.durationSeconds}s."
+            } else if (best.third.isAnchored) {
                 "Recording started at the moment the call was answered."
             } else {
                 "Matched successfully."
@@ -348,7 +351,16 @@ object NativeRecordingMatcher {
 
         val scale = driftScale(call)
         val durationDelta = abs(candidate.durationSeconds - call.durationSeconds)
-        if (durationDelta > MAX_DURATION_DELTA_SECONDS * scale) return null
+        val isInterrupted = candidate.durationSeconds < call.durationSeconds - (MAX_DURATION_DELTA_SECONDS * scale)
+
+        if (isInterrupted) {
+            if (candidate.durationSeconds < 3.0) return null
+            val hasNumberMatch = call.numberTail.isNotEmpty() && candidate.normalizedDigits.contains(call.numberTail)
+            val hasAnchor = call.answeredAtEpochSeconds != null
+            if (!hasNumberMatch && !hasAnchor) return null
+        } else if (durationDelta > MAX_DURATION_DELTA_SECONDS * scale) {
+            return null
+        }
 
         val lifetime = candidate.lifetimeSeconds
         val lifetimeTolerance = MAX_LIFETIME_DELTA_SECONDS * scale
@@ -358,14 +370,14 @@ object NativeRecordingMatcher {
         // duration is, read as open-stamped, truncated, still being written,
         // or copied here by something other than the dialer.
         val open = if (candidate.dateModifiedEpochSeconds <= 0L || lifetimeDelta <= lifetimeTolerance) {
-            scoreAt(call, candidate, candidate.dateAddedEpochSeconds, false, durationDelta, lifetimeDelta, scale)
+            scoreAt(call, candidate, candidate.dateAddedEpochSeconds, false, durationDelta, lifetimeDelta, scale, isInterrupted)
         } else {
             null
         }
         val end = if (lifetime <= MAX_END_STAMP_LIFETIME_SECONDS ||
             lifetime < candidate.durationSeconds - lifetimeTolerance
         ) {
-            scoreAt(call, candidate, candidate.endStampedStartEpochSeconds, true, durationDelta, lifetimeDelta, scale)
+            scoreAt(call, candidate, candidate.endStampedStartEpochSeconds, true, durationDelta, lifetimeDelta, scale, isInterrupted)
         } else {
             null
         }
@@ -384,9 +396,14 @@ object NativeRecordingMatcher {
         durationDelta: Double,
         lifetimeDelta: Double,
         scale: Double,
+        isInterrupted: Boolean,
     ): NativeMatchSignals? {
         val ringGap = startedAtSeconds - call.startedAtEpochSeconds
         if (ringGap < MIN_RING_GAP_SECONDS || ringGap > MAX_RING_GAP_SECONDS) return null
+
+        val callHangupSeconds = (call.answeredAtEpochSeconds ?: (call.startedAtEpochSeconds + ringGap)) + call.durationSeconds
+        val recordingEndSeconds = startedAtSeconds + candidate.durationSeconds.toLong()
+        if (recordingEndSeconds > callHangupSeconds + (MAX_DURATION_DELTA_SECONDS * scale).toLong()) return null
 
         // Hard anchor gate. When the answer instant is known, a file that did
         // not start recording at that instant belongs to another call, however
@@ -404,7 +421,12 @@ object NativeRecordingMatcher {
             anchorScore = null
         }
 
-        val durationScore = max(0.0, 1.0 - (durationDelta / (DURATION_TOLERANCE_SECONDS * scale)))
+        val durationScore = if (isInterrupted) {
+            val ratio = (candidate.durationSeconds / call.durationSeconds).coerceIn(0.0, 1.0)
+            (0.45 + 0.35 * ratio).coerceIn(0.45, 0.80)
+        } else {
+            max(0.0, 1.0 - (durationDelta / (DURATION_TOLERANCE_SECONDS * scale)))
+        }
 
         val timingScore = when {
             ringGap < 0 -> 0.85
@@ -427,6 +449,7 @@ object NativeRecordingMatcher {
             lifetimeDeltaSeconds = lifetimeDelta,
             identityMatched = identityMatched,
             endStamped = endStamped,
+            isInterrupted = isInterrupted,
         )
     }
 

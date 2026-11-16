@@ -283,4 +283,146 @@ void main() {
       expect(result.status, RecordingMatchStatus.unmatched);
     });
   });
+
+  group('interrupted call recordings are matched with corroboration', () {
+    test('interrupted recording pairs when phone number matches', () {
+      // 180s call with recording interrupted after 60s
+      final result = matcher.match(
+        call(startSeconds: 1787890986, durationSeconds: 180, number: '+917305739666'),
+        [
+          rec(
+            durationMillis: 60000,
+            addedSeconds: 1787890995, // 9s ring gap
+            name: '+917305739666_20260828103000.m4a',
+          ),
+        ],
+      );
+
+      expect(result.status, RecordingMatchStatus.matched);
+      expect(result.signals!.isInterrupted, isTrue);
+      expect(result.confidence, greaterThanOrEqualTo(0.70));
+      expect(result.reason, contains('Interrupted call recording: captured 60s of 180s.'));
+    });
+
+    test('interrupted recording pairs when anchor answeredAt matches', () {
+      // Call with known answeredAt timestamp
+      final callWithAnchor = CallForMatching(
+        startedAtEpochMillis: 1787890986 * 1000,
+        durationSeconds: 240,
+        answeredAtEpochMillis: 1787890995 * 1000,
+      );
+      final result = matcher.match(
+        callWithAnchor,
+        [
+          rec(
+            durationMillis: 75000,
+            addedSeconds: 1787890995,
+            name: 'Recording_unknown.m4a',
+          ),
+        ],
+      );
+
+      expect(result.status, RecordingMatchStatus.matched);
+      expect(result.signals!.isInterrupted, isTrue);
+      expect(result.signals!.isAnchored, isTrue);
+      expect(result.confidence, greaterThanOrEqualTo(0.70));
+    });
+
+    test('interrupted recording without identity and without anchor is rejected', () {
+      // Interrupted file but neither number nor anchor corroborate it
+      final result = matcher.match(
+        call(startSeconds: 1787890986, durationSeconds: 180, number: '+917305739666'),
+        [
+          rec(
+            durationMillis: 60000,
+            addedSeconds: 1787890995,
+            name: 'Audio_Recording.m4a', // no number in name
+          ),
+        ],
+      );
+
+      expect(result.status, RecordingMatchStatus.unmatched);
+    });
+
+    test('interrupted recording under 3 seconds is rejected', () {
+      final result = matcher.match(
+        call(startSeconds: 1787890986, durationSeconds: 180, number: '+917305739666'),
+        [
+          rec(
+            durationMillis: 2500, // 2.5s < 3.0s minimum
+            addedSeconds: 1787890995,
+            name: '+917305739666_20260828103000.m4a',
+          ),
+        ],
+      );
+
+      expect(result.status, RecordingMatchStatus.unmatched);
+    });
+
+    test('complete recording wins over interrupted recording when both exist', () {
+      final result = matcher.match(
+        call(startSeconds: 1787890986, durationSeconds: 114, number: '+917305739666'),
+        [
+          rec(
+            id: 1,
+            durationMillis: 50000, // interrupted candidate
+            addedSeconds: 1787890995,
+            name: '+917305739666_part1.m4a',
+          ),
+          rec(
+            id: 2,
+            durationMillis: 114046, // complete candidate
+            addedSeconds: 1787890995,
+            name: '+917305739666_complete.m4a',
+          ),
+        ],
+      );
+
+      expect(result.status, RecordingMatchStatus.matched);
+      expect(result.candidate!.mediaStoreId, 2);
+      expect(result.signals!.isInterrupted, isFalse);
+    });
+  });
+
+  group('OPPO / ColorOS device recording formats', () {
+    test('OPPO ColorOS 14-digit timestamp filename resolves number identity', () {
+      final result = matcher.match(
+        call(
+          startSeconds: 1787890986,
+          durationSeconds: 114,
+          number: '+919876543210',
+        ),
+        [
+          rec(
+            durationMillis: 114046,
+            addedSeconds: 1787890995,
+            name: '+919876543210_20261114103000.m4a',
+          ),
+        ],
+      );
+
+      expect(result.status, RecordingMatchStatus.matched);
+      expect(result.signals!.identityMatched, isTrue);
+    });
+
+    test('OPPO / Realme yyyyMMdd_HHmmss format resolves number identity', () {
+      final result = matcher.match(
+        call(
+          startSeconds: 1787890986,
+          durationSeconds: 114,
+          number: '+919876543210',
+        ),
+        [
+          rec(
+            durationMillis: 114046,
+            addedSeconds: 1787890995,
+            name: 'Contact_+919876543210_20261114_103000.m4a',
+          ),
+        ],
+      );
+
+      expect(result.status, RecordingMatchStatus.matched);
+      expect(result.signals!.identityMatched, isTrue);
+    });
+  });
 }
