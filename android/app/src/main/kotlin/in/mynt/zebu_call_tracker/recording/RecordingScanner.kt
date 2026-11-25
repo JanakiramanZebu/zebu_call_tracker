@@ -43,7 +43,16 @@ object RecordingScanner {
         "Recordings/Call/",              // Samsung (One UI 5+)
         "Sounds/CallRecord/",            // Samsung (legacy)
         "MIUI/sound_recorder/call_rec/", // Xiaomi
-        "Record/Call/",                  // Oppo / Realme / OnePlus
+        "Record/Call/",                  // Oppo / Realme / OnePlus (legacy)
+        "Record/Phone/",                 // Oppo / Realme (ColorOS 6-11)
+        "Recordings/Call Recordings/",   // Oppo / Realme / OnePlus (ColorOS 12+)
+        "Music/Recordings/Call Recordings/", // Oppo / Realme (ColorOS 11-14)
+        "Music/Recordings/Phone Recordings/", // Oppo / Realme
+        "Recordings/Phone/",             // Oppo / Realme / Vivo
+        "Sound Recorder/Call Recordings/", // Oppo / Realme stock recorder
+        "Sound Recorder/",               // Oppo legacy recorder
+        "Sounds/Call Recordings/",       // ColorOS / OxygenOS
+        "Sounds/Call/",                  // ColorOS / OxygenOS
         "PhoneRecord/",                  // Vivo
         "Recordings/Calls/",             // Pixel (where permitted by region)
     )
@@ -56,7 +65,17 @@ object RecordingScanner {
      * "Call recording <name>_YYMMDD_HHMMSS.m4a" (2025 builds) and
      * "Call <name>_YYMMDD_HHMMSS.m4a" (2026 builds).
      */
-    private val NAME_HINTS = listOf("Call recording%", "Call %", "%callrec%")
+    private val NAME_HINTS = listOf(
+        "Call recording%",
+        "Call %",
+        "%callrec%",
+        "Recording_%",
+        "Record_%",
+        "%_CallRecord%",
+        "%_Call_%",
+        "%CallRecording%",
+        "%_20______%",
+    )
 
     /**
      * RELATIVE_PATH only exists from API 29. minSdk is 24, and naming the

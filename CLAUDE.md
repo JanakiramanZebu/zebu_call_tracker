@@ -27,6 +27,7 @@ flutter build apk --release --dart-define-from-file=env/production.json
 (cd android && ./gradlew :app:compileReleaseKotlin)   # Kotlin-only check
 ```
 
+- Production builds go through Shorebird: `scripts/shorebird.sh release` (an APK to distribute; needed for any Kotlin change) or `scripts/shorebird.sh patch [staging]` (Dart-only, over the air). Patches apply only to APKs built by `shorebird release`, and only after the app is opened twice (download, then apply), so they reach rarely-opened phones slowly.
 - `API_BASE_URL` is the only build-time setting (see [env/README.md](env/README.md)). A release build without it is broken by design. Release builds need `https://`.
 - If a release build fails with `package dev.flutter.plugins.integration_test does not exist` after a debug build, delete `android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java` and rebuild.
 - Release builds use R8 (`isMinifyEnabled`). When touching reflection or JSON classes, build release and check `android/app/proguard-rules.pro`.

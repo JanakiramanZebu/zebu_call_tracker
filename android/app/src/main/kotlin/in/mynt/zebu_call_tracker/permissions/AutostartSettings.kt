@@ -27,14 +27,18 @@ object AutostartSettings {
 
     private val MAKERS = setOf(
         "xiaomi", "redmi", "poco", "oppo", "realme", "vivo", "iqoo",
-        "huawei", "honor", "oneplus", "asus", "letv",
+        "huawei", "honor", "oneplus", "asus", "letv", "oplus", "coloros",
     )
 
     /** Known screens, in the order tried. Most makers moved theirs at least once. */
     private val SCREENS = listOf(
         ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity"),
+        ComponentName("com.oplus.battery", "com.oplus.powermanager.fuelgaue.PowerControlActivity"),
         ComponentName("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity"),
+        ComponentName("com.coloros.safecenter", "com.coloros.safecenter.permission.startupapp.StartupAppListActivity"),
+        ComponentName("com.coloros.safecenter", "com.coloros.safecenter.permission.startupmanager.StartupAppListActivity"),
         ComponentName("com.coloros.safecenter", "com.coloros.safecenter.startupapp.StartupAppListActivity"),
+        ComponentName("com.coloros.oppoguardelf", "com.coloros.powermanager.fuelgaue.PowerConsumptionActivity"),
         ComponentName("com.oppo.safe", "com.oppo.safe.permission.startup.StartupAppListActivity"),
         ComponentName("com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"),
         ComponentName("com.iqoo.secure", "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity"),

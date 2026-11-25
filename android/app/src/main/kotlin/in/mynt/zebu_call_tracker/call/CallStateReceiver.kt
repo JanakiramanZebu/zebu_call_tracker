@@ -116,7 +116,7 @@ class CallStateReceiver : BroadcastReceiver() {
      * that [CallStateJournal.record] has just written — no other I/O.
      */
     private fun connectedThisCall(context: Context): Boolean =
-        entriesForLatestCall(journalEntries(context)).any { it.first == "offhook" }
+        entriesForLatestCall(journalEntries(context)).any { it.state == "offhook" }
 
     /**
      * Hands the just-ended call to [PostCallOverlayController].
@@ -144,7 +144,7 @@ class CallStateReceiver : BroadcastReceiver() {
         // to a single call.
         val thisCall = entriesForLatestCall(entries)
 
-        val states = thisCall.map { it.first }
+        val states = thisCall.map { it.state }
         val direction = when {
             states.contains("ringing") && states.contains("offhook") -> "incoming"
             states.contains("ringing") -> "missed"
@@ -152,8 +152,8 @@ class CallStateReceiver : BroadcastReceiver() {
             else -> "unknown"
         }
 
-        val offHookAt = thisCall.lastOrNull { it.first == "offhook" }?.second
-        val idleAt = thisCall.lastOrNull { it.first == "idle" }?.second
+        val offHookAt = thisCall.lastOrNull { it.state == "offhook" }?.atMillis
+        val idleAt = thisCall.lastOrNull { it.state == "idle" }?.atMillis
             ?: System.currentTimeMillis()
         val approxDurationSec = if (offHookAt != null) {
             ((idleAt - offHookAt) / 1000L).toInt().coerceAtLeast(0)
@@ -176,8 +176,8 @@ class CallStateReceiver : BroadcastReceiver() {
         )
     }
 
-    /** The journal as (state, atMillis) pairs, oldest first. */
-    private fun journalEntries(context: Context): List<Pair<String, Long>> =
+    /** The journal, oldest first. */
+    private fun journalEntries(context: Context): List<CallStateJournal.JournalEntry> =
         CallStateJournal.snapshot(context)
 
     /**
@@ -187,12 +187,12 @@ class CallStateReceiver : BroadcastReceiver() {
      * one, so everything from the second-to-last `idle` onwards is ours.
      */
     private fun entriesForLatestCall(
-        entries: List<Pair<String, Long>>,
-    ): List<Pair<String, Long>> {
+        entries: List<CallStateJournal.JournalEntry>,
+    ): List<CallStateJournal.JournalEntry> {
         if (entries.isEmpty()) return entries
         val previousIdle = entries
             .dropLast(1)
-            .indexOfLast { it.first == "idle" }
+            .indexOfLast { it.state == "idle" }
         return if (previousIdle >= 0) entries.drop(previousIdle + 1) else entries
     }
 

@@ -105,6 +105,9 @@ class AppDatabase extends _$AppDatabase {
   /// statements can go.
   static const _additiveColumns = <String, String>{
     'metadata_json': 'metadata_json TEXT NULL',
+    // Written and read natively only (`NativeCallOutboxDao`); declared here
+    // so whichever owner opens the file first creates it.
+    'ring_duration_seconds': 'ring_duration_seconds INTEGER NULL',
   };
 
   /// True when `local_calls` already has [column].

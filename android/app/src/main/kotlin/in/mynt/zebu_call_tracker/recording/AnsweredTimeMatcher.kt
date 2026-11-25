@@ -49,8 +49,11 @@ object AnsweredTimeMatcher {
 
     private const val MAX_END_STAMP_LIFETIME_SECONDS = 5L
 
-    /** `_yyMMdd_HHmmss` at the end of the name, before the extension. */
-    private val NAME_TIME = Regex("_(\\d{6})_(\\d{6})(?:\\([0-9]+\\))?\\.[A-Za-z0-9]+$")
+    /** `_yyMMdd_HHmmss` at the end of the name, before the extension (Samsung style). */
+    private val NAME_TIME_2DIGIT_YEAR = Regex("_(\\d{6})_(\\d{6})(?:\\([0-9]+\\))?\\.[A-Za-z0-9]+$")
+
+    /** `_yyyyMMdd_HHmmss` or `_yyyyMMddHHmmss` (OPPO ColorOS, Realme, Xiaomi style). */
+    private val NAME_TIME_4DIGIT_YEAR = Regex("(?:^|_)(20\\d{2})(\\d{2})(\\d{2})_?(\\d{2})(\\d{2})(\\d{2})(?:\\([0-9]+\\))?\\.[A-Za-z0-9]+$")
 
     /** The window searched, as epoch seconds, for the log line. */
     data class Window(val fromSeconds: Long, val untilSeconds: Long)
@@ -65,6 +68,7 @@ object AnsweredTimeMatcher {
      * The recording of the call that started at [callStartSeconds] and talked
      * for [callDurationSeconds], or null. When several qualify, the one that
      * started nearest the answer time (or a typical ring when unknown) wins.
+     * Supports both complete and interrupted/partial recordings.
      */
     fun pick(
         callStartSeconds: Long,
@@ -80,10 +84,18 @@ object AnsweredTimeMatcher {
         return candidates
             .asSequence()
             .filter { it.durationMillis > 0L }
-            .filter { abs(it.durationSeconds - callDurationSeconds) <= slack }
+            .filter {
+                val diff = abs(it.durationSeconds - callDurationSeconds)
+                val isInterrupted = it.durationSeconds < callDurationSeconds && it.durationSeconds >= 3.0
+                diff <= slack || isInterrupted
+            }
             .map { it to startedAtSeconds(it, zone) }
             .filter { (_, start) -> start in w.fromSeconds..w.untilSeconds }
-            .minByOrNull { (_, start) -> abs(start - expected) }
+            .minByOrNull { (cand, start) ->
+                // Prefer recordings matching duration within slack, then closest to expected start
+                val penalty = if (abs(cand.durationSeconds - callDurationSeconds) <= slack) 0L else 1000L
+                abs(start - expected) + penalty
+            }
             ?.first
     }
 
@@ -100,17 +112,42 @@ object AnsweredTimeMatcher {
                 c.endStampedStartEpochSeconds
             }
 
-    /** Epoch seconds of a `_yyMMdd_HHmmss` name, read in the phone's own time zone. */
+    /**
+     * Epoch seconds of a recording's timestamp in its filename, read in the phone's own time zone.
+     * Supports both 4-digit years (OPPO ColorOS, Realme, Xiaomi) and 2-digit years (Samsung One UI).
+     */
     fun nameTimeSeconds(displayName: String?, zone: TimeZone = TimeZone.getDefault()): Long? {
-        val m = NAME_TIME.find(displayName ?: return null) ?: return null
-        val format = SimpleDateFormat("yyMMddHHmmss", Locale.US).apply {
-            isLenient = false
-            timeZone = zone
+        val name = displayName ?: return null
+
+        // 1. Check 4-digit year (OPPO ColorOS, Realme, Xiaomi)
+        val m4 = NAME_TIME_4DIGIT_YEAR.find(name)
+        if (m4 != null) {
+            val dateStr = m4.groupValues.subList(1, 7).joinToString("")
+            val format = SimpleDateFormat("yyyyMMddHHmmss", Locale.US).apply {
+                isLenient = false
+                timeZone = zone
+            }
+            try {
+                format.parse(dateStr)?.time?.let { return it / 1000L }
+            } catch (_: ParseException) {
+                // Fall through to 2-digit check
+            }
         }
-        return try {
-            format.parse(m.groupValues[1] + m.groupValues[2])?.time?.div(1000L)
-        } catch (_: ParseException) {
-            null
+
+        // 2. Check 2-digit year (Samsung One UI)
+        val m2 = NAME_TIME_2DIGIT_YEAR.find(name)
+        if (m2 != null) {
+            val format = SimpleDateFormat("yyMMddHHmmss", Locale.US).apply {
+                isLenient = false
+                timeZone = zone
+            }
+            try {
+                format.parse(m2.groupValues[1] + m2.groupValues[2])?.time?.let { return it / 1000L }
+            } catch (_: ParseException) {
+                // None
+            }
         }
+
+        return null
     }
 }

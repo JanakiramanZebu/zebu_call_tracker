@@ -33,6 +33,9 @@ abstract final class CallEnrichment {
   /// How far the journal's measured talk time may differ from `DURATION`.
   static const _corroborationToleranceMillis = 5000;
 
+  /// `metadata.timing.ring_source` when nothing measured the ring.
+  static const ringSourceUnavailable = 'unavailable';
+
   /// Whether this file's timestamps follow the open-stamped convention.
   ///
   /// A dialer that stamps `dateAdded` when it opens the file leaves
@@ -149,7 +152,8 @@ abstract final class CallEnrichment {
     if (idle != null) {
       endedAt = idle;
       endedSource = TimingSource.journal;
-    } else if (openStamped) {
+    } else if (openStamped &&
+        (recording.durationSeconds - durationSeconds).abs() <= 5.0) {
       endedAt = recording.dateModifiedEpochSeconds * 1000;
       endedSource = TimingSource.recording;
     } else if (answeredAt != null) {
@@ -213,10 +217,16 @@ abstract final class CallEnrichment {
     // How much of the timing above is measured and how much is inferred.
     // Without this the server cannot tell a journal-accurate answer time from
     // one reconstructed off a file timestamp.
+    //
+    // `ring_source` is always present. Ring time is measured natively from
+    // the call-state journal (`RingTimeline.kt`) and nowhere in Dart, so a row
+    // written here starts out unavailable; the native ingester's late fill
+    // upgrades it to `journal` when the journal can answer.
     final timing = <String, Object?>{};
     _put(timing, 'answered_at_source', times.answeredAtSource);
     _put(timing, 'ended_at_source', times.endedAtSource);
-    if (timing.isNotEmpty) json['timing'] = timing;
+    timing['ring_source'] = ringSourceUnavailable;
+    json['timing'] = timing;
 
     if (recording != null) {
       json['recording'] = recordingObject(recording, signals, confidence);
@@ -249,10 +259,17 @@ abstract final class CallEnrichment {
       }
     }
 
+    // The ring source is kept: it describes a measurement this method does
+    // not redo, and the row's ring column is never cleared.
+    final previous = json['timing'];
+    final ringSource =
+        (previous is Map ? previous['ring_source'] : null) as String? ??
+            ringSourceUnavailable;
     final timing = <String, Object?>{};
     _put(timing, 'answered_at_source', times.answeredAtSource);
     _put(timing, 'ended_at_source', times.endedAtSource);
-    if (timing.isNotEmpty) json['timing'] = timing;
+    timing['ring_source'] = ringSource;
+    json['timing'] = timing;
 
     json['recording'] = recordingObject(recording, signals, confidence);
     return _encodeWithinCap(json);
@@ -284,6 +301,9 @@ abstract final class CallEnrichment {
       rec['end_stamped'] = signals.endStamped;
       rec['identity_matched'] = signals.identityMatched;
       _put(rec, 'anchor_delta_seconds', signals.anchorDeltaSeconds);
+      if (signals.isInterrupted) {
+        rec['is_interrupted'] = true;
+      }
     }
     return rec;
   }

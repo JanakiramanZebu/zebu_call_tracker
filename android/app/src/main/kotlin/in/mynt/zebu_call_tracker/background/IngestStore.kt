@@ -42,6 +42,7 @@ object IngestStore {
     private const val KEY_STATS_MIGRATED = "migrated_from_store"
     private const val KEY_REVIVAL_REQUESTED = "failure_revival_requested"
     private const val KEY_LAST_REVIVAL_AT = "last_failure_revival_at_millis"
+    private const val KEY_ABSENT_RECORDINGS_REVIVED = "absent_recordings_revived_v1"
 
     /** Statistics older builds kept in [PREFS]; moved by [statsPrefs]. */
     private val MIGRATED_STATS_KEYS = setOf(
@@ -345,6 +346,21 @@ object IngestStore {
             .putBoolean(KEY_REVIVAL_REQUESTED, false)
             .putLong(KEY_LAST_REVIVAL_AT, now)
             .apply()
+        return true
+    }
+
+    /**
+     * True exactly once per install: the first time it is asked after an
+     * update that shipped the proxy-413 fix. See
+     * [NativeCallOutboxDao.reviveAbsentRecordingsWithFile].
+     */
+    fun isAbsentRecordingRevivalDue(context: Context): Boolean =
+        !statsPrefs(context).getBoolean(KEY_ABSENT_RECORDINGS_REVIVED, false)
+
+    fun consumeAbsentRecordingRevival(context: Context): Boolean {
+        val p = statsPrefs(context)
+        if (p.getBoolean(KEY_ABSENT_RECORDINGS_REVIVED, false)) return false
+        p.edit().putBoolean(KEY_ABSENT_RECORDINGS_REVIVED, true).apply()
         return true
     }
 
