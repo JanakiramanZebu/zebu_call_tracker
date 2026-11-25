@@ -94,7 +94,16 @@ object RingTimeline {
         return when (direction.trim().lowercase()) {
             CallWireFormat.Direction.INCOMING -> {
                 val answered = edges.answered
-                if (answered != null) {
+                if (answered != null && duration == 0L) {
+                    // OFFHOOK on a call the call log says never connected. On
+                    // call waiting the missed call's ringing ends in OFFHOOK
+                    // because the ongoing call is still up, and IDLE only comes
+                    // when that call hangs up. So the ring ended at T1, and an
+                    // answer time here would be refused by the server
+                    // ("a 'missed' call cannot have answered_at set").
+                    val ring = elapsedBetween(start, answered) ?: return UNAVAILABLE
+                    endedOnly(answered, ring)
+                } else if (answered != null) {
                     // Answered: rang from T0 until the pickup at T1.
                     val ring = elapsedBetween(start, answered) ?: return UNAVAILABLE
                     // T2 must still belong to the same boot and follow T1.

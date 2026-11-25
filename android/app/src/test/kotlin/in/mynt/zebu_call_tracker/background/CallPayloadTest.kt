@@ -21,6 +21,7 @@ class CallPayloadTest {
         durationSeconds: Int,
         endedAtMillis: Long?,
         ringDurationSeconds: Int?,
+        answeredAtMillis: Long? = null,
     ) = CallRecord(
         localId = 1,
         idempotencyKey = "key-1",
@@ -31,7 +32,7 @@ class CallPayloadTest {
         direction = direction,
         status = status,
         startedAtMillis = STARTED,
-        answeredAtMillis = null,
+        answeredAtMillis = answeredAtMillis,
         endedAtMillis = endedAtMillis,
         durationSeconds = durationSeconds,
         hasRecording = false,
@@ -108,6 +109,47 @@ class CallPayloadTest {
 
         assertFalse(json.has("ring_duration_seconds"))
         assertFalse(json.has("ended_at"))
+    }
+
+    @Test
+    fun missedCallWithStoredAnswerTime_omitsAnsweredAt() {
+        // Call waiting: the ongoing call's OFFHOOK was stored as this call's
+        // answer. The server refuses answered_at on a missed call (422).
+        val json = CallPayload.build(
+            call(
+                direction = CallWireFormat.Direction.INCOMING,
+                status = CallWireFormat.Status.MISSED,
+                durationSeconds = 0,
+                endedAtMillis = STARTED + 20_000,
+                ringDurationSeconds = 20,
+                answeredAtMillis = STARTED + 20_000,
+            ),
+            deviceUuid = "device-1",
+            isoFormat = iso,
+        )
+
+        assertEquals("missed", json.getString("status"))
+        assertFalse(json.has("answered_at"))
+        assertTrue(json.has("ended_at"))
+    }
+
+    @Test
+    fun endedCall_keepsAnsweredAt() {
+        val json = CallPayload.build(
+            call(
+                direction = CallWireFormat.Direction.INCOMING,
+                status = CallWireFormat.Status.ENDED,
+                durationSeconds = 60,
+                endedAtMillis = STARTED + 72_000,
+                ringDurationSeconds = 12,
+                answeredAtMillis = STARTED + 12_000,
+            ),
+            deviceUuid = "device-1",
+            isoFormat = iso,
+        )
+
+        assertEquals("ended", json.getString("status"))
+        assertEquals(iso.format(java.util.Date(STARTED + 12_000)), json.getString("answered_at"))
     }
 
     private companion object {

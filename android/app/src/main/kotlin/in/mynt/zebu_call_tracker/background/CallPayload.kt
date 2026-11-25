@@ -19,6 +19,13 @@ object CallPayload {
 
     private const val TAG = "CallPayload"
 
+    /** Statuses the server refuses `answered_at` on (call_state.validate_timestamps). */
+    private val UNANSWERED_STATUSES = setOf(
+        CallWireFormat.Status.MISSED,
+        CallWireFormat.Status.REJECTED,
+        CallWireFormat.Status.CANCELLED,
+    )
+
     fun build(call: CallRecord, deviceUuid: String, isoFormat: SimpleDateFormat): JSONObject {
         // Single source of truth for the wire vocabulary. Building it inline
         // is how `status = "completed"` — a value the server's enum does not
@@ -46,7 +53,7 @@ object CallPayload {
             put("direction", outcome.direction)
             put("status", outcome.status)
             put("started_at", isoFormat.format(Date(call.startedAtMillis)))
-            applyTimings(this, call, isoFormat)
+            applyTimings(this, call, outcome.status, isoFormat)
             put("duration_seconds", call.durationSeconds)
             put("has_recording", call.hasRecording)
             call.simSlot?.let { put("sim_slot", it) }
@@ -79,6 +86,7 @@ object CallPayload {
     private fun applyTimings(
         json: JSONObject,
         call: CallRecord,
+        wireStatus: String,
         isoFormat: SimpleDateFormat,
     ) {
         // Never earlier than started_at: the server refuses that as a
@@ -87,7 +95,14 @@ object CallPayload {
         // 15 s before the call-log start, and an open-stamped recording's
         // DATE_ADDED then lands before it. A time that cannot be right is
         // dropped; the server falls back to the measured duration.
-        call.answeredAtMillis?.takeIf { it >= call.startedAtMillis }?.let {
+        //
+        // Never on a call that did not connect either: the server refuses
+        // answered_at on missed, rejected and cancelled calls with a
+        // non-retryable 422, and the phone then drops the call. The status
+        // comes from the call log and wins over any stored answer time.
+        call.answeredAtMillis?.takeIf {
+            it >= call.startedAtMillis && wireStatus !in UNANSWERED_STATUSES
+        }?.let {
             json.put("answered_at", isoFormat.format(Date(it)))
         }
         call.endedAtMillis?.takeIf { it >= call.startedAtMillis }?.let {

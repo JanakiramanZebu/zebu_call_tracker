@@ -51,6 +51,20 @@ class RingTimelineTest {
     }
 
     @Test
+    fun incomingMissedOnCallWaiting_ringEndsAtOffhookAndHasNoAnswer() {
+        // Rang during another call: ringing ends in OFFHOOK (the other call is
+        // still up) and IDLE only comes when that call hangs up, minutes later.
+        val edges = RingTimeline.Edges(start = edge(0), answered = edge(18_200), idle = edge(240_000))
+        val r = RingTimeline.compute(edges, incoming, durationSeconds = 0)
+
+        assertNull(r.answeredAtMillis)
+        assertNull(r.answeredAtSource)
+        assertEquals(WALL_T0 + 18_200, r.endedAtMillis)
+        assertEquals(18, r.ringDurationSeconds)
+        assertEquals(RingTimeline.Source.JOURNAL, r.ringSource)
+    }
+
+    @Test
     fun incomingRejected_ringsUntilIdle() {
         // A rejected call is ringing -> idle, like a missed one, only shorter.
         val edges = RingTimeline.Edges(start = edge(0), answered = null, idle = edge(4_200))
