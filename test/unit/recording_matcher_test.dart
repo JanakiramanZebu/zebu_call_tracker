@@ -185,8 +185,11 @@ void main() {
     });
 
     test('a matching filename cannot rescue contradictory evidence', () {
-      // Same contact, but the audio is 60s against a 114s call. The name in the
-      // filename is exactly the trap that filename-only matching falls into.
+      // Same contact, but the audio is 150s against a 114s call: longer than
+      // the call itself, which no recording of it can be. (A SHORTER file is
+      // a recording stopped mid-call, and the name does corroborate that.)
+      // The name in the filename is exactly the trap that filename-only
+      // matching falls into.
       final result = matcher.match(
         call(
           startSeconds: 1787890986,
@@ -195,7 +198,7 @@ void main() {
         ),
         [
           rec(
-            durationMillis: 60000,
+            durationMillis: 150000,
             addedSeconds: 1787890995,
             name: 'Call Ulagas Zebu_260828_095315.m4a',
           ),

@@ -144,6 +144,9 @@ object NativeRecordingMatcher {
     private const val DURATION_TOLERANCE_SECONDS = 5.0
     private const val MAX_DURATION_DELTA_SECONDS = 15.0
 
+    /** An interrupted recording shorter than this is a mis-tap, not the call. */
+    private const val MIN_INTERRUPTED_SECONDS = 3.0
+
     /**
      * How far a long call's audio may drift from its call-log duration, as a
      * fraction of that duration. The duration tolerance, its hard gate and
@@ -351,13 +354,24 @@ object NativeRecordingMatcher {
 
         val scale = driftScale(call)
         val durationDelta = abs(candidate.durationSeconds - call.durationSeconds)
-        val isInterrupted = candidate.durationSeconds < call.durationSeconds - (MAX_DURATION_DELTA_SECONDS * scale)
+
+        // Shorter than the call by more than the duration tolerance: the
+        // employee stopped the recording mid-call. Measured from the
+        // tolerance, not the hard gate, because the linear duration score is
+        // already zero there — a file 5–15 s short used to score too low to
+        // match and too high to be treated as interrupted.
+        val isInterrupted = candidate.durationSeconds < call.durationSeconds - (DURATION_TOLERANCE_SECONDS * scale)
 
         if (isInterrupted) {
-            if (candidate.durationSeconds < 3.0) return null
-            val hasNumberMatch = call.numberTail.isNotEmpty() && candidate.normalizedDigits.contains(call.numberTail)
+            if (candidate.durationSeconds < MIN_INTERRUPTED_SECONDS) return null
+            // Length no longer identifies the call, so something else must.
+            // The contact name counts as well as the number: Samsung names a
+            // saved contact's file after the contact, and an outgoing call
+            // never has a journal anchor, so requiring the number dropped
+            // every stopped recording of an outgoing call to a saved contact.
+            val hasIdentity = checkIdentityMatch(call, candidate)
             val hasAnchor = call.answeredAtEpochSeconds != null
-            if (!hasNumberMatch && !hasAnchor) return null
+            if (!hasIdentity && !hasAnchor) return null
         } else if (durationDelta > MAX_DURATION_DELTA_SECONDS * scale) {
             return null
         }

@@ -290,6 +290,7 @@ class RecordingMatcher {
   const RecordingMatcher({
     this.durationToleranceSeconds = 5.0,
     this.maxDurationDeltaSeconds = 15.0,
+    this.minInterruptedSeconds = 3.0,
     this.durationDriftRatio = 0.02,
     this.maxRingGapSeconds = 180,
     this.minRingGapSeconds = -15,
@@ -309,6 +310,9 @@ class RecordingMatcher {
   /// Hard gate: a bigger gap than this is a different call, whatever else lines
   /// up. Widened for long calls; see [durationDriftRatio].
   final double maxDurationDeltaSeconds;
+
+  /// An interrupted recording shorter than this is a mis-tap, not the call.
+  final double minInterruptedSeconds;
 
   /// How far a long call's audio may drift from its call-log duration, as a
   /// fraction of that duration. The duration tolerance, its hard gate and the
@@ -544,15 +548,25 @@ class RecordingMatcher {
     final scale = _driftScale(call);
     final durationDelta = (candidate.durationSeconds - call.durationSeconds)
         .abs();
+
+    // Shorter than the call by more than the duration tolerance: the employee
+    // stopped the recording mid-call. Measured from the tolerance, not the
+    // hard gate, because the linear duration score is already zero there — a
+    // file 5–15 s short used to score too low to match and too high to be
+    // treated as interrupted.
     final isInterrupted = candidate.durationSeconds <
-        call.durationSeconds - (maxDurationDeltaSeconds * scale);
+        call.durationSeconds - (durationToleranceSeconds * scale);
 
     if (isInterrupted) {
-      if (candidate.durationSeconds < 3.0) return null;
-      final hasNumberMatch = call.cachedNumberTail.isNotEmpty &&
-          candidate.normalizedDigits.contains(call.cachedNumberTail);
+      if (candidate.durationSeconds < minInterruptedSeconds) return null;
+      // Length no longer identifies the call, so something else must. The
+      // contact name counts as well as the number: Samsung names a saved
+      // contact's file after the contact, and an outgoing call never has a
+      // journal anchor, so requiring the number dropped every stopped
+      // recording of an outgoing call to a saved contact.
+      final hasIdentity = _identityMatches(call, candidate);
       final hasAnchor = call.answeredAtEpochSeconds != null;
-      if (!hasNumberMatch && !hasAnchor) return null;
+      if (!hasIdentity && !hasAnchor) return null;
     } else if (durationDelta > maxDurationDeltaSeconds * scale) {
       return null;
     }
